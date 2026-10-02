@@ -200,6 +200,9 @@ impl PipelineBackend for MockBackend {
             srt_url: ch.srt_url.clone(),
             last_error: ch.last_error.clone(),
             nvenc_slots_used: self.nvenc_used.load(Ordering::SeqCst),
+            configured_mode: "auto".into(),
+            locked_mode: Some("mock".into()),
+            input_format: Some("1920x1080p50/1 (mock)".into()),
         })
     }
 
@@ -224,6 +227,9 @@ impl PipelineBackend for MockBackend {
                     srt_url: ch.srt_url.clone(),
                     last_error: ch.last_error.clone(),
                     nvenc_slots_used: self.nvenc_used.load(Ordering::SeqCst),
+                    configured_mode: "auto".into(),
+                    locked_mode: Some("mock".into()),
+                    input_format: Some("1920x1080p50/1 (mock)".into()),
                 })
             })
             .collect()

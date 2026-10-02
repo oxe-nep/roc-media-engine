@@ -1,10 +1,12 @@
 //! Pipeline abstractions: capture, record, SRT, preview, playout.
 
 mod describe;
+mod signal_format;
 mod state;
 mod traits;
 
 pub use describe::*;
+pub use signal_format::*;
 pub use state::*;
 pub use traits::*;
 

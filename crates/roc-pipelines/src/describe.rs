@@ -47,15 +47,15 @@ pub fn decklink_device_number(device: &str) -> u32 {
 }
 
 fn decklink_src(device: &str, mode: &str) -> String {
-    // Lock mode to avoid auto-detect renegotiation (SD→HD) which breaks live graphs.
+    // Always lock to a concrete mode for the live graph (caller probes when config is `auto`).
     // drop-no-signal-frames keeps the pipeline alive across brief ST 2110 gaps.
-    let mode = if mode.trim().is_empty() {
-        "1080p50"
+    let mode = if mode.trim().is_empty() || mode.eq_ignore_ascii_case("auto") {
+        "1080p50" // last-resort fallback; prefer probe_input_format first
     } else {
         mode.trim()
     };
     format!(
-        "decklinkvideosrc device-number={} mode={} drop-no-signal-frames=true",
+        "decklinkvideosrc name=dlsrc device-number={} mode={} drop-no-signal-frames=true",
         decklink_device_number(device),
         mode
     )

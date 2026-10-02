@@ -28,6 +28,15 @@ pub struct ChannelSnapshot {
     pub srt_url: Option<String>,
     pub last_error: Option<String>,
     pub nvenc_slots_used: usize,
+    /// Configured mode (`auto` or locked enum name).
+    #[serde(default)]
+    pub configured_mode: String,
+    /// Mode currently locked into the capture graph.
+    #[serde(default)]
+    pub locked_mode: Option<String>,
+    /// Last detected input format summary (from live caps).
+    #[serde(default)]
+    pub input_format: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -61,56 +61,56 @@ channels:
     name: "Channel 1"
     encode_preset: hq
     device: "DeckLink IP 100G (1)"
-    mode: "1080p50"
+    mode: "auto"
     udp_egress: "udp://239.255.28.1:21001?pkt_size=1316&reuse=1&ttl=1"
     srt_url: "srt://0.0.0.0:9101?mode=listener"
   - id: 2
     name: "Channel 2"
     encode_preset: hq
     device: "DeckLink IP 100G (2)"
-    mode: "1080p50"
+    mode: "auto"
     udp_egress: "udp://239.255.28.2:21002?pkt_size=1316&reuse=1&ttl=1"
     srt_url: "srt://0.0.0.0:9102?mode=listener"
   - id: 3
     name: "Channel 3"
     encode_preset: hq
     device: "DeckLink IP 100G (3)"
-    mode: "1080p50"
+    mode: "auto"
     udp_egress: "udp://239.255.28.3:21003?pkt_size=1316&reuse=1&ttl=1"
     srt_url: "srt://0.0.0.0:9103?mode=listener"
   - id: 4
     name: "Channel 4"
     encode_preset: hq
     device: "DeckLink IP 100G (4)"
-    mode: "1080p50"
+    mode: "auto"
     udp_egress: "udp://239.255.28.4:21004?pkt_size=1316&reuse=1&ttl=1"
     srt_url: "srt://0.0.0.0:9104?mode=listener"
   - id: 5
     name: "Channel 5"
     encode_preset: hq
     device: "DeckLink IP 100G (5)"
-    mode: "1080p50"
+    mode: "auto"
     udp_egress: "udp://239.255.28.5:21005?pkt_size=1316&reuse=1&ttl=1"
     srt_url: "srt://0.0.0.0:9105?mode=listener"
   - id: 6
     name: "Channel 6"
     encode_preset: hq
     device: "DeckLink IP 100G (6)"
-    mode: "1080p50"
+    mode: "auto"
     udp_egress: "udp://239.255.28.6:21006?pkt_size=1316&reuse=1&ttl=1"
     srt_url: "srt://0.0.0.0:9106?mode=listener"
   - id: 7
     name: "Channel 7"
     encode_preset: hq
     device: "DeckLink IP 100G (7)"
-    mode: "1080p50"
+    mode: "auto"
     udp_egress: "udp://239.255.28.7:21007?pkt_size=1316&reuse=1&ttl=1"
     srt_url: "srt://0.0.0.0:9107?mode=listener"
   - id: 8
     name: "Channel 8"
     encode_preset: hq
     device: "DeckLink IP 100G (8)"
-    mode: "1080p50"
+    mode: "auto"
     udp_egress: "udp://239.255.28.8:21008?pkt_size=1316&reuse=1&ttl=1"
     srt_url: "srt://0.0.0.0:9108?mode=listener"
 

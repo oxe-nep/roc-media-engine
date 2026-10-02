@@ -5,6 +5,7 @@ use gstreamer::prelude::*;
 use roc_config::{ChannelConfig, EncodePreset};
 
 use crate::describe::{build_capture_encode_once_launch, CaptureLaunchOpts};
+use crate::signal_format::{format_from_caps, is_auto_mode, probe_input_format, InputFormat};
 use crate::{ChannelSnapshot, ChannelStatus};
 
 pub struct ChannelPipeline {
@@ -18,13 +19,19 @@ pub struct ChannelPipeline {
     pub srt_url: Option<String>,
     pub last_error: Option<String>,
     device: String,
-    mode: String,
+    /// User config: `auto` or a concrete DeckLink mode.
+    configured_mode: String,
+    /// Mode locked into the running graph.
+    locked_mode: String,
+    detected: Option<InputFormat>,
     preset: EncodePreset,
     udp_egress: Option<String>,
     parse_element: String,
     pipeline: Option<gstreamer::Pipeline>,
     rec_branch: Option<Branch>,
     srt_branch: Option<Branch>,
+    /// Avoid relaunch storms: last adapt attempt.
+    last_adapt: Option<std::time::Instant>,
 }
 
 struct Branch {
@@ -54,20 +61,26 @@ impl ChannelPipeline {
             srt_url: ch.srt_url.clone(),
             last_error: None,
             device: ch.device.clone(),
-            mode: ch.mode.clone().unwrap_or_else(|| "1080p50".into()),
+            configured_mode: ch
+                .mode
+                .clone()
+                .unwrap_or_else(|| "auto".into()),
+            locked_mode: String::new(),
+            detected: None,
             parse_element: parse_element_for_codec(&preset.video_codec).to_string(),
             preset: preset.clone(),
             udp_egress: ch.udp_egress.clone(),
             pipeline: None,
             rec_branch: None,
             srt_branch: None,
+            last_adapt: None,
         })
     }
 
     pub fn update_config(&mut self, ch: &ChannelConfig, preset: &EncodePreset) {
         self.name = ch.name.clone();
         self.device = ch.device.clone();
-        self.mode = ch.mode.clone().unwrap_or_else(|| "1080p50".into());
+        self.configured_mode = ch.mode.clone().unwrap_or_else(|| "auto".into());
         self.preset = preset.clone();
         self.encode_preset_label = preset.label.clone();
         self.parse_element = parse_element_for_codec(&preset.video_codec).to_string();
@@ -81,9 +94,41 @@ impl ChannelPipeline {
         if self.pipeline.is_some() {
             return Ok(());
         }
+        let locked = self.resolve_lock_mode()?;
+        self.locked_mode = locked.clone();
+        self.launch_locked(&locked)?;
+        Ok(())
+    }
+
+    fn resolve_lock_mode(&mut self) -> Result<String> {
+        if !is_auto_mode(&self.configured_mode) {
+            return Ok(self.configured_mode.clone());
+        }
+        match probe_input_format(&self.device, 3500) {
+            Ok(fmt) => {
+                tracing::info!(
+                    channel = self.id,
+                    format = %fmt.summary(),
+                    "probed input format"
+                );
+                self.detected = Some(fmt.clone());
+                Ok(fmt.mode)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    channel = self.id,
+                    error = %err,
+                    "input probe failed — falling back to 1080p50"
+                );
+                Ok("1080p50".into())
+            }
+        }
+    }
+
+    fn launch_locked(&mut self, locked: &str) -> Result<()> {
         let launch = build_capture_encode_once_launch(&CaptureLaunchOpts {
             device: self.device.clone(),
-            mode: self.mode.clone(),
+            mode: locked.to_string(),
             preset: self.preset.clone(),
             preview_path: Some(format!("/tmp/roc-ch{}-preview.ts", self.id)),
             record_path: None,
@@ -91,7 +136,7 @@ impl ChannelPipeline {
             udp_egress: self.udp_egress.clone(),
             with_tee_preview: true,
         });
-        tracing::info!(channel = self.id, %launch, "capture pipeline");
+        tracing::info!(channel = self.id, mode = %locked, %launch, "capture pipeline");
         let pipeline = gstreamer::parse::launch(&launch)
             .with_context(|| format!("parse capture launch ch{}", self.id))?
             .downcast::<gstreamer::Pipeline>()
@@ -348,14 +393,60 @@ impl ChannelPipeline {
     }
 
     pub fn poll_bus(&mut self) {
+        {
+            let Some(p) = self.pipeline.as_ref() else {
+                return;
+            };
+            let (_, cur, _) = p.state(gstreamer::ClockTime::ZERO);
+            if cur == gstreamer::State::Playing && self.status != ChannelStatus::Error {
+                self.status = ChannelStatus::Running;
+            }
+        }
+
+        let adapt_to = {
+            if let Some(fmt) = self.read_live_format() {
+                let changed = self
+                    .detected
+                    .as_ref()
+                    .map(|d| d.mode != fmt.mode)
+                    .unwrap_or(true);
+                self.detected = Some(fmt.clone());
+                let should = is_auto_mode(&self.configured_mode)
+                    && fmt.mode != self.locked_mode
+                    && fmt.width >= 1280
+                    && self
+                        .last_adapt
+                        .map(|t| t.elapsed() > std::time::Duration::from_secs(3))
+                        .unwrap_or(true);
+                if should {
+                    Some(fmt.mode)
+                } else {
+                    if changed {
+                        tracing::info!(
+                            channel = self.id,
+                            format = %fmt.summary(),
+                            "input format"
+                        );
+                    }
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(mode) = adapt_to {
+            tracing::warn!(
+                channel = self.id,
+                from = %self.locked_mode,
+                to = %mode,
+                "input format changed — adapting capture"
+            );
+            let _ = self.adapt_to_mode(&mode);
+        }
+
         let Some(p) = self.pipeline.as_ref() else {
             return;
         };
-        // Authoritative state — don't rely only on catching StateChanged transitions.
-        let (_, cur, _) = p.state(gstreamer::ClockTime::ZERO);
-        if cur == gstreamer::State::Playing && self.status != ChannelStatus::Error {
-            self.status = ChannelStatus::Running;
-        }
         let bus = p.bus().expect("pipeline bus");
         while let Some(msg) = bus.timed_pop(gstreamer::ClockTime::ZERO) {
             use gstreamer::MessageView;
@@ -389,6 +480,45 @@ impl ChannelPipeline {
         }
     }
 
+    fn read_live_format(&self) -> Option<InputFormat> {
+        let p = self.pipeline.as_ref()?;
+        let dl = p.by_name("dlsrc")?;
+        let pad = dl.static_pad("src")?;
+        let caps = pad.current_caps()?;
+        format_from_caps(&caps)
+    }
+
+    fn adapt_to_mode(&mut self, new_mode: &str) -> Result<()> {
+        self.last_adapt = Some(std::time::Instant::now());
+        let was_rec = self.recording;
+        let rec_path = self.recording_path.clone();
+        let was_srt = self.srt;
+        let srt_url = self.srt_url.clone();
+
+        let _ = self.detach_recording(false);
+        let _ = self.detach_srt(false);
+        if let Some(p) = self.pipeline.take() {
+            let _ = p.set_state(gstreamer::State::Null);
+        }
+        self.recording = false;
+        self.srt = false;
+        self.recording_path = None;
+        self.locked_mode = new_mode.to_string();
+        self.launch_locked(new_mode)?;
+
+        if was_rec {
+            if let Some(path) = rec_path {
+                let _ = self.start_recording(&path);
+            }
+        }
+        if was_srt {
+            if let Some(url) = srt_url {
+                let _ = self.start_srt(&url);
+            }
+        }
+        Ok(())
+    }
+
     pub fn snapshot(&self, nvenc_slots_used: usize) -> ChannelSnapshot {
         ChannelSnapshot {
             id: self.id,
@@ -401,6 +531,13 @@ impl ChannelPipeline {
             srt_url: self.srt_url.clone(),
             last_error: self.last_error.clone(),
             nvenc_slots_used,
+            configured_mode: self.configured_mode.clone(),
+            locked_mode: if self.locked_mode.is_empty() {
+                None
+            } else {
+                Some(self.locked_mode.clone())
+            },
+            input_format: self.detected.as_ref().map(|f| f.summary()),
         }
     }
 }
