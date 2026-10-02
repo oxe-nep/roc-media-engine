@@ -27,6 +27,9 @@ use self::capture::ChannelPipeline;
 pub struct GstBackend {
     max_nvenc: usize,
     nvenc_used: AtomicUsize,
+    /// Serialize all graph mutations (attach/detach/start/stop) across channels.
+    /// Concurrent multi-channel REC stop previously raced inside GStreamer/DeckLink.
+    gst_op: Mutex<()>,
     channels: Mutex<HashMap<u32, ChannelPipeline>>,
     presets: Mutex<HashMap<u32, EncodePreset>>,
     configs: Mutex<HashMap<u32, ChannelConfig>>,
@@ -49,6 +52,7 @@ impl GstBackend {
         Ok(Self {
             max_nvenc: 8,
             nvenc_used: AtomicUsize::new(0),
+            gst_op: Mutex::new(()),
             channels: Mutex::new(HashMap::new()),
             presets: Mutex::new(HashMap::new()),
             configs: Mutex::new(HashMap::new()),
@@ -81,6 +85,7 @@ impl PipelineBackend for GstBackend {
     }
 
     fn start_capture(&self, channel_id: u32) -> Result<()> {
+        let _gst = self.gst_op.lock();
         let used = self.nvenc_used.load(Ordering::SeqCst);
         if used >= self.max_nvenc {
             bail!("NVENC session limit reached ({}/{})", used, self.max_nvenc);
@@ -98,6 +103,7 @@ impl PipelineBackend for GstBackend {
     }
 
     fn stop_capture(&self, channel_id: u32) -> Result<()> {
+        let _gst = self.gst_op.lock();
         let mut map = self.channels.lock();
         let pipe = map
             .get_mut(&channel_id)
@@ -114,6 +120,7 @@ impl PipelineBackend for GstBackend {
     }
 
     fn start_recording(&self, channel_id: u32, path: &str) -> Result<()> {
+        let _gst = self.gst_op.lock();
         let mut map = self.channels.lock();
         let pipe = map
             .get_mut(&channel_id)
@@ -122,6 +129,7 @@ impl PipelineBackend for GstBackend {
     }
 
     fn stop_recording(&self, channel_id: u32) -> Result<()> {
+        let _gst = self.gst_op.lock();
         let mut map = self.channels.lock();
         let pipe = map
             .get_mut(&channel_id)
@@ -130,6 +138,7 @@ impl PipelineBackend for GstBackend {
     }
 
     fn start_srt(&self, channel_id: u32, url: &str) -> Result<()> {
+        let _gst = self.gst_op.lock();
         let mut map = self.channels.lock();
         let pipe = map
             .get_mut(&channel_id)
@@ -138,6 +147,7 @@ impl PipelineBackend for GstBackend {
     }
 
     fn stop_srt(&self, channel_id: u32) -> Result<()> {
+        let _gst = self.gst_op.lock();
         let mut map = self.channels.lock();
         let pipe = map
             .get_mut(&channel_id)
@@ -146,6 +156,8 @@ impl PipelineBackend for GstBackend {
     }
 
     fn channel_snapshot(&self, channel_id: u32) -> Result<ChannelSnapshot> {
+        // Same lock order as mutations: gst_op → channels (poll_bus may adapt/relaunch).
+        let _gst = self.gst_op.lock();
         let mut map = self.channels.lock();
         let pipe = map
             .get_mut(&channel_id)
@@ -155,6 +167,7 @@ impl PipelineBackend for GstBackend {
     }
 
     fn list_channels(&self) -> Vec<ChannelSnapshot> {
+        let _gst = self.gst_op.lock();
         let mut map = self.channels.lock();
         let used = self.nvenc_used.load(Ordering::SeqCst);
         let mut ids: Vec<u32> = map.keys().copied().collect();

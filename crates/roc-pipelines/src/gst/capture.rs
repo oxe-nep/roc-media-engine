@@ -130,7 +130,7 @@ impl ChannelPipeline {
             device: self.device.clone(),
             mode: locked.to_string(),
             preset: self.preset.clone(),
-            preview_path: Some(format!("/tmp/roc-ch{}-preview.ts", self.id)),
+            preview_path: Some(format!("/tmp/roc-ch{}-preview.jpg", self.id)),
             record_path: None,
             srt_url: None,
             udp_egress: self.udp_egress.clone(),
@@ -285,28 +285,25 @@ impl ChannelPipeline {
             .clone();
         let tee = self.encoded_tee()?;
 
-        if finalize {
-            // EOS only this branch so mp4mux finalizes the file.
-            if let Some(queue) = branch.elements.first() {
-                if let Some(pad) = queue.static_pad("sink") {
-                    let _ = pad.send_event(gstreamer::event::Eos::new());
-                }
-            }
-            // Brief wait for mux to flush.
-            let bus = pipeline.bus().context("bus")?;
-            let _ = bus.timed_pop_filtered(
-                gstreamer::ClockTime::from_mseconds(1500),
-                &[gstreamer::MessageType::Eos, gstreamer::MessageType::Error],
-            );
-        }
-
-        for el in &branch.elements {
-            let _ = el.set_state(gstreamer::State::Null);
-        }
+        // 1) Cut data path from tee before touching downstream state.
         if let Some(qpad) = branch.elements[0].static_pad("sink") {
             let _ = branch.tee_pad.unlink(&qpad);
         }
         tee.release_request_pad(&branch.tee_pad);
+
+        // 2) Optional EOS for a cleaner mp4 footer. Do NOT wait on the pipeline bus:
+        //    that raced under multi-channel stop and held the global lock for seconds.
+        if finalize {
+            if let Some(queue) = branch.elements.first() {
+                let _ = queue.send_event(gstreamer::event::Eos::new());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+
+        // 3) Null from sink → source, then remove.
+        for el in branch.elements.iter().rev() {
+            let _ = el.set_state(gstreamer::State::Null);
+        }
         for el in &branch.elements {
             let _ = pipeline.remove(el);
         }
@@ -378,13 +375,14 @@ impl ChannelPipeline {
             .clone();
         let tee = self.encoded_tee()?;
 
-        for el in &branch.elements {
-            let _ = el.set_state(gstreamer::State::Null);
-        }
         if let Some(qpad) = branch.elements[0].static_pad("sink") {
             let _ = branch.tee_pad.unlink(&qpad);
         }
         tee.release_request_pad(&branch.tee_pad);
+
+        for el in branch.elements.iter().rev() {
+            let _ = el.set_state(gstreamer::State::Null);
+        }
         for el in &branch.elements {
             let _ = pipeline.remove(el);
         }

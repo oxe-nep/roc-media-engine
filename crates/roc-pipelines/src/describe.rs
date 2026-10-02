@@ -192,11 +192,11 @@ pub fn build_capture_launch(opts: &CaptureLaunchOpts) -> String {
         let prev = opts
             .preview_path
             .clone()
-            .unwrap_or_else(|| "/tmp/roc-preview.ts".into());
+            .unwrap_or_else(|| "/tmp/roc-preview.jpg".into());
         branches.push(format!(
-            "t. ! queue name=q_prev ! videoconvert ! videoscale ! video/x-raw,width=640,height=360 ! \
-             x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=50 ! \
-             h264parse ! mpegtsmux ! filesink location=\"{prev}\" sync=false"
+            "t. ! queue max-size-buffers=2 leaky=downstream ! videorate ! video/x-raw,framerate=5/1 ! \
+             videoconvert ! videoscale ! video/x-raw,width=480,height=270 ! jpegenc quality=50 ! \
+             multifilesink location=\"{prev}\" max-files=1 sync=false"
         ));
     }
 
@@ -244,11 +244,11 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         let prev = opts
             .preview_path
             .clone()
-            .unwrap_or_else(|| "/tmp/roc-preview.ts".into());
+            .unwrap_or_else(|| "/tmp/roc-preview.jpg".into());
         format!(
-            "t. ! queue ! videoconvert ! videoscale ! video/x-raw,width=640,height=360 ! \
-             x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 ! \
-             h264parse ! mpegtsmux ! filesink location=\"{prev}\" sync=false"
+            "t. ! queue max-size-buffers=2 leaky=downstream ! videorate ! video/x-raw,framerate=5/1 ! \
+             videoconvert ! videoscale ! video/x-raw,width=480,height=270 ! jpegenc quality=50 ! \
+             multifilesink location=\"{prev}\" max-files=1 sync=false"
         )
     } else {
         String::new()
