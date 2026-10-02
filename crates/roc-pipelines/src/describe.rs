@@ -87,7 +87,7 @@ fn stereo_pair_matrix(pair: usize) -> String {
             } else {
                 "0.0"
             };
-            coeffs.push(format!("(float){v}"));
+            coeffs.push(v.to_string());
         }
         rows.push(format!("<{}>", coeffs.join(", ")));
     }
@@ -104,9 +104,8 @@ fn listen_hls_branches(hls_dir: &str) -> String {
         parts.push(format!(
             "a. ! queue max-size-buffers=64 leaky=downstream ! \
              audiomixmatrix in-channels=8 out-channels=2 mode=manual matrix=\"{matrix}\" ! \
-             audioconvert ! audio/x-raw,channels=2,rate=48000 ! \
-             avenc_aac bitrate=128000 ! aacparse ! \
-             hlssink2 location=\"{seg}\" playlist-location=\"{playlist}\" \
+             audioconvert ! voaacenc bitrate=128000 ! aacparse ! mpegtsmux alignment=7 ! \
+             hlssink location=\"{seg}\" playlist-location=\"{playlist}\" \
              target-duration=1 max-files=6 playlist-length=6"
         ));
     }
@@ -411,8 +410,8 @@ mod tests {
     #[test]
     fn stereo_pair_matrix_selects_pair() {
         let m0 = stereo_pair_matrix(0);
-        assert!(m0.contains("(float)1.0, (float)0.0, (float)0.0"));
+        assert!(m0.contains("1.0, 0.0, 0.0"));
         let m1 = stereo_pair_matrix(1);
-        assert!(m1.contains("(float)0.0, (float)0.0, (float)1.0, (float)0.0"));
+        assert!(m1.contains("0.0, 0.0, 1.0, 0.0"));
     }
 }
