@@ -18,5 +18,8 @@ cargo build --release -p roc-engine --features gst
 sudo cp "$UNIT_SRC" "$UNIT_DST"
 sudo systemctl daemon-reload
 sudo systemctl enable roc-media-engine.service
+# Drop any stray manual process still holding :8090
+sudo fuser -k 8090/tcp >/dev/null 2>&1 || true
+sleep 1
 sudo systemctl restart roc-media-engine.service
 sudo systemctl --no-pager --full status roc-media-engine.service | head -30
