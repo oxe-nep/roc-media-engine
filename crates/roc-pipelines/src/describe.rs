@@ -45,7 +45,21 @@ pub fn decklink_device_number(device: &str) -> u32 {
 }
 
 fn decklink_src(device: &str) -> String {
-    format!("decklinkvideosrc device-number={}", decklink_device_number(device))
+    // Lock mode to avoid auto-detect renegotiation (SD→HD) which breaks live graphs.
+    // drop-no-signal-frames keeps the pipeline alive across brief ST 2110 gaps.
+    format!(
+        "decklinkvideosrc device-number={} mode=1080i50 drop-no-signal-frames=true",
+        decklink_device_number(device)
+    )
+}
+
+fn nvenc_chain(preset: &str, bitrate_kbit: u64, gop: u32) -> String {
+    // nvh264enc on this host accepts CUDAMemory NV12 best via cudaupload.
+    format!(
+        "videoconvert ! video/x-raw,format=NV12 ! cudaupload ! \
+         nvh264enc preset={preset} bitrate={bitrate_kbit} gop-size={gop} ! \
+         h264parse config-interval=-1"
+    )
 }
 
 fn decklink_video_sink(device: &str, mode: &str) -> String {
@@ -66,22 +80,20 @@ fn decklink_audio_sink(device: &str) -> String {
 /// Spike: DeckLink → deinterlace → NVENC → optional tee → file (+ preview).
 pub fn build_spike_tee_launch(device: &str, output_mp4: &str, with_preview: bool) -> String {
     let src = decklink_src(device);
-    let enc = "nvh264enc preset=low-latency-hq bitrate=12000 gop-size=50 ! h264parse config-interval=-1";
+    let enc = nvenc_chain("low-latency-hq", 12_000, 50);
     if with_preview {
         format!(
             "{src} ! \
-             deinterlace ! videoconvert ! video/x-raw,format=NV12 ! \
-             tee name=t \
+             deinterlace ! tee name=t \
              t. ! queue ! {enc} ! mp4mux fragment-duration=1000 ! filesink location=\"{output_mp4}\" \
-             t. ! queue ! videoscale ! video/x-raw,width=640,height=360 ! \
+             t. ! queue ! videoconvert ! videoscale ! video/x-raw,width=640,height=360 ! \
              x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 ! \
              h264parse ! mpegtsmux ! filesink location=\"{output_mp4}.preview.ts\""
         )
     } else {
         format!(
             "{src} ! \
-             deinterlace ! videoconvert ! video/x-raw,format=NV12 ! \
-             {enc} ! mp4mux fragment-duration=1000 ! filesink location=\"{output_mp4}\""
+             deinterlace ! {enc} ! mp4mux fragment-duration=1000 ! filesink location=\"{output_mp4}\""
         )
     }
 }
@@ -92,9 +104,7 @@ pub fn build_capture_launch(opts: &CaptureLaunchOpts) -> String {
         .unwrap_or(12_000);
     let gop = opts.preset.video_gop;
     let preset = &opts.preset.video_preset;
-    let enc = format!(
-        "nvh264enc preset={preset} bitrate={bitrate_kbit} gop-size={gop} ! h264parse config-interval=-1"
-    );
+    let enc = nvenc_chain(preset, bitrate_kbit, gop);
     let src = decklink_src(&opts.device);
 
     let mut branches = Vec::new();
@@ -123,7 +133,7 @@ pub fn build_capture_launch(opts: &CaptureLaunchOpts) -> String {
             .clone()
             .unwrap_or_else(|| "/tmp/roc-preview.ts".into());
         branches.push(format!(
-            "t. ! queue name=q_prev ! videoscale ! video/x-raw,width=640,height=360 ! \
+            "t. ! queue name=q_prev ! videoconvert ! videoscale ! video/x-raw,width=640,height=360 ! \
              x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=50 ! \
              h264parse ! mpegtsmux ! filesink location=\"{prev}\" sync=false"
         ));
@@ -133,7 +143,7 @@ pub fn build_capture_launch(opts: &CaptureLaunchOpts) -> String {
 
     format!(
         "{src} ! \
-         deinterlace mode=auto ! videoconvert ! video/x-raw,format=NV12 ! \
+         deinterlace mode=auto ! \
          tee name=t \
          {branches}",
         branches = branches.join(" ")
@@ -174,7 +184,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
             .clone()
             .unwrap_or_else(|| "/tmp/roc-preview.ts".into());
         format!(
-            "t. ! queue ! videoscale ! video/x-raw,width=640,height=360 ! \
+            "t. ! queue ! videoconvert ! videoscale ! video/x-raw,width=640,height=360 ! \
              x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 ! \
              h264parse ! mpegtsmux ! filesink location=\"{prev}\" sync=false"
         )
@@ -184,12 +194,12 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
 
     format!(
         "{src} ! \
-         deinterlace mode=auto ! videoconvert ! video/x-raw,format=NV12 ! \
-         tee name=t \
-         t. ! queue ! nvh264enc preset={preset} bitrate={bitrate_kbit} gop-size={gop} ! \
+         deinterlace mode=auto ! tee name=t \
+         t. ! queue ! {enc} ! \
          tee name=e \
          {out_branches} \
          {preview}",
+        enc = nvenc_chain(preset, bitrate_kbit, gop),
         out_branches = out_branches.join(" "),
     )
 }
