@@ -1,4 +1,4 @@
-//! Per-channel GStreamer capture graph with dynamic REC/SRT branches.
+//! Per-channel GStreamer capture graph with dynamic REC/SRT branches (no full relaunch).
 
 use anyhow::{anyhow, bail, Context, Result};
 use gstreamer::prelude::*;
@@ -20,7 +20,24 @@ pub struct ChannelPipeline {
     device: String,
     preset: EncodePreset,
     udp_egress: Option<String>,
+    parse_element: String,
     pipeline: Option<gstreamer::Pipeline>,
+    rec_branch: Option<Branch>,
+    srt_branch: Option<Branch>,
+}
+
+struct Branch {
+    tee_pad: gstreamer::Pad,
+    elements: Vec<gstreamer::Element>,
+}
+
+fn parse_element_for_codec(video_codec: &str) -> &'static str {
+    let c = video_codec.to_ascii_lowercase();
+    if c.contains("265") || c.contains("hevc") {
+        "h265parse"
+    } else {
+        "h264parse"
+    }
 }
 
 impl ChannelPipeline {
@@ -36,9 +53,12 @@ impl ChannelPipeline {
             srt_url: ch.srt_url.clone(),
             last_error: None,
             device: ch.device.clone(),
+            parse_element: parse_element_for_codec(&preset.video_codec).to_string(),
             preset: preset.clone(),
             udp_egress: ch.udp_egress.clone(),
             pipeline: None,
+            rec_branch: None,
+            srt_branch: None,
         })
     }
 
@@ -47,6 +67,7 @@ impl ChannelPipeline {
         self.device = ch.device.clone();
         self.preset = preset.clone();
         self.encode_preset_label = preset.label.clone();
+        self.parse_element = parse_element_for_codec(&preset.video_codec).to_string();
         self.udp_egress = ch.udp_egress.clone();
         if self.srt_url.is_none() {
             self.srt_url = ch.srt_url.clone();
@@ -82,6 +103,8 @@ impl ChannelPipeline {
     }
 
     pub fn stop(&mut self) -> Result<()> {
+        let _ = self.detach_recording(false);
+        let _ = self.detach_srt(false);
         if let Some(p) = self.pipeline.take() {
             let _ = p.send_event(gstreamer::event::Eos::new());
             let _ = p.set_state(gstreamer::State::Null);
@@ -97,10 +120,10 @@ impl ChannelPipeline {
         if self.pipeline.is_none() {
             bail!("capture not running");
         }
-        // Dynamic branch attach is complex; for MVP we restart graph with record_path.
-        // Encode-once tee keeps a single NVENC session.
-        let srt = self.srt_url.clone().filter(|_| self.srt);
-        self.relaunch(Some(path.to_string()), srt)?;
+        if self.recording {
+            bail!("already recording");
+        }
+        self.attach_recording(path)?;
         self.recording = true;
         self.recording_path = Some(path.to_string());
         Ok(())
@@ -110,8 +133,7 @@ impl ChannelPipeline {
         if !self.recording {
             return Ok(());
         }
-        let srt = self.srt_url.clone().filter(|_| self.srt);
-        self.relaunch(None, srt)?;
+        self.detach_recording(true)?;
         self.recording = false;
         self.recording_path = None;
         Ok(())
@@ -121,9 +143,11 @@ impl ChannelPipeline {
         if self.pipeline.is_none() {
             bail!("capture not running");
         }
+        if self.srt {
+            let _ = self.detach_srt(false);
+        }
         self.srt_url = Some(url.to_string());
-        let rec = self.recording_path.clone();
-        self.relaunch(rec, Some(url.to_string()))?;
+        self.attach_srt(url)?;
         self.srt = true;
         Ok(())
     }
@@ -132,35 +156,190 @@ impl ChannelPipeline {
         if !self.srt {
             return Ok(());
         }
-        let rec = self.recording_path.clone();
-        self.relaunch(rec, None)?;
+        self.detach_srt(false)?;
         self.srt = false;
         Ok(())
     }
 
-    fn relaunch(&mut self, record_path: Option<String>, srt_url: Option<String>) -> Result<()> {
-        if let Some(p) = self.pipeline.take() {
-            let _ = p.set_state(gstreamer::State::Null);
+    fn encoded_tee(&self) -> Result<gstreamer::Element> {
+        let p = self
+            .pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow!("no pipeline"))?;
+        p.by_name("e")
+            .ok_or_else(|| anyhow!("encoded tee `e` missing — is capture running?"))
+    }
+
+    fn attach_recording(&mut self, path: &str) -> Result<()> {
+        let pipeline = self
+            .pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow!("no pipeline"))?
+            .clone();
+        let tee = self.encoded_tee()?;
+
+        let queue = gstreamer::ElementFactory::make("queue")
+            .name(format!("q_rec_{}", self.id))
+            .build()
+            .context("queue")?;
+        let parse = gstreamer::ElementFactory::make(&self.parse_element)
+            .name(format!("parse_rec_{}", self.id))
+            .build()
+            .with_context(|| format!("make {}", self.parse_element))?;
+        let mux = gstreamer::ElementFactory::make("mp4mux")
+            .name(format!("mux_rec_{}", self.id))
+            .property("fragment-duration", 1000u32)
+            .build()
+            .context("mp4mux")?;
+        let sink = gstreamer::ElementFactory::make("filesink")
+            .name(format!("fs_rec_{}", self.id))
+            .property("location", path)
+            .property("sync", false)
+            .build()
+            .context("filesink")?;
+
+        pipeline.add_many([&queue, &parse, &mux, &sink])?;
+        gstreamer::Element::link_many([&queue, &parse, &mux, &sink])
+            .context("link record branch")?;
+
+        let tee_pad = tee
+            .request_pad_simple("src_%u")
+            .ok_or_else(|| anyhow!("tee request_pad failed"))?;
+        let sink_pad = queue
+            .static_pad("sink")
+            .ok_or_else(|| anyhow!("queue sink pad"))?;
+        tee_pad
+            .link(&sink_pad)
+            .context("link tee → record queue")?;
+
+        for el in [&queue, &parse, &mux, &sink] {
+            el.sync_state_with_parent()
+                .context("sync_state_with_parent record")?;
         }
-        let launch = build_capture_encode_once_launch(&CaptureLaunchOpts {
-            device: self.device.clone(),
-            preset: self.preset.clone(),
-            preview_path: Some(format!("/tmp/roc-ch{}-preview.ts", self.id)),
-            record_path,
-            srt_url,
-            udp_egress: self.udp_egress.clone(),
-            with_tee_preview: true,
+
+        tracing::info!(channel = self.id, %path, "attached record branch (no relaunch)");
+        self.rec_branch = Some(Branch {
+            tee_pad,
+            elements: vec![queue, parse, mux, sink],
         });
-        tracing::info!(channel = self.id, %launch, "relaunch capture");
-        let pipeline = gstreamer::parse::launch(&launch)
-            .context("parse relaunch")?
-            .downcast::<gstreamer::Pipeline>()
-            .map_err(|_| anyhow!("relaunch did not yield Pipeline"))?;
-        pipeline
-            .set_state(gstreamer::State::Playing)
-            .context("relaunch PLAYING")?;
-        self.pipeline = Some(pipeline);
-        self.status = ChannelStatus::Waiting;
+        Ok(())
+    }
+
+    fn detach_recording(&mut self, finalize: bool) -> Result<()> {
+        let Some(branch) = self.rec_branch.take() else {
+            return Ok(());
+        };
+        let pipeline = self
+            .pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow!("no pipeline"))?
+            .clone();
+        let tee = self.encoded_tee()?;
+
+        if finalize {
+            // EOS only this branch so mp4mux finalizes the file.
+            if let Some(queue) = branch.elements.first() {
+                if let Some(pad) = queue.static_pad("sink") {
+                    let _ = pad.send_event(gstreamer::event::Eos::new());
+                }
+            }
+            // Brief wait for mux to flush.
+            let bus = pipeline.bus().context("bus")?;
+            let _ = bus.timed_pop_filtered(
+                gstreamer::ClockTime::from_mseconds(1500),
+                &[gstreamer::MessageType::Eos, gstreamer::MessageType::Error],
+            );
+        }
+
+        for el in &branch.elements {
+            let _ = el.set_state(gstreamer::State::Null);
+        }
+        if let Some(qpad) = branch.elements[0].static_pad("sink") {
+            let _ = branch.tee_pad.unlink(&qpad);
+        }
+        tee.release_request_pad(&branch.tee_pad);
+        for el in &branch.elements {
+            let _ = pipeline.remove(el);
+        }
+        tracing::info!(channel = self.id, "detached record branch");
+        Ok(())
+    }
+
+    fn attach_srt(&mut self, url: &str) -> Result<()> {
+        let pipeline = self
+            .pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow!("no pipeline"))?
+            .clone();
+        let tee = self.encoded_tee()?;
+
+        let queue = gstreamer::ElementFactory::make("queue")
+            .name(format!("q_srt_{}", self.id))
+            .build()
+            .context("queue")?;
+        let parse = gstreamer::ElementFactory::make(&self.parse_element)
+            .name(format!("parse_srt_{}", self.id))
+            .build()
+            .with_context(|| format!("make {}", self.parse_element))?;
+        let mux = gstreamer::ElementFactory::make("mpegtsmux")
+            .name(format!("mux_srt_{}", self.id))
+            .property("alignment", 7i32)
+            .build()
+            .context("mpegtsmux")?;
+        let sink = gstreamer::ElementFactory::make("srtsink")
+            .name(format!("srt_sink_{}", self.id))
+            .property("uri", url)
+            .property("wait-for-connection", false)
+            .build()
+            .context("srtsink")?;
+
+        pipeline.add_many([&queue, &parse, &mux, &sink])?;
+        gstreamer::Element::link_many([&queue, &parse, &mux, &sink])
+            .context("link srt branch")?;
+
+        let tee_pad = tee
+            .request_pad_simple("src_%u")
+            .ok_or_else(|| anyhow!("tee request_pad failed"))?;
+        let sink_pad = queue
+            .static_pad("sink")
+            .ok_or_else(|| anyhow!("queue sink pad"))?;
+        tee_pad.link(&sink_pad).context("link tee → srt queue")?;
+
+        for el in [&queue, &parse, &mux, &sink] {
+            el.sync_state_with_parent()
+                .context("sync_state_with_parent srt")?;
+        }
+
+        tracing::info!(channel = self.id, %url, "attached SRT branch (no relaunch)");
+        self.srt_branch = Some(Branch {
+            tee_pad,
+            elements: vec![queue, parse, mux, sink],
+        });
+        Ok(())
+    }
+
+    fn detach_srt(&mut self, _finalize: bool) -> Result<()> {
+        let Some(branch) = self.srt_branch.take() else {
+            return Ok(());
+        };
+        let pipeline = self
+            .pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow!("no pipeline"))?
+            .clone();
+        let tee = self.encoded_tee()?;
+
+        for el in &branch.elements {
+            let _ = el.set_state(gstreamer::State::Null);
+        }
+        if let Some(qpad) = branch.elements[0].static_pad("sink") {
+            let _ = branch.tee_pad.unlink(&qpad);
+        }
+        tee.release_request_pad(&branch.tee_pad);
+        for el in &branch.elements {
+            let _ = pipeline.remove(el);
+        }
+        tracing::info!(channel = self.id, "detached SRT branch");
         Ok(())
     }
 
@@ -182,10 +361,16 @@ impl ChannelPipeline {
                     tracing::error!(channel = self.id, error = ?self.last_error, "gst error");
                 }
                 MessageView::Eos(_) => {
-                    self.status = ChannelStatus::Stopped;
+                    // Branch EOS during record stop should not kill channel status.
+                    if !self.recording && self.rec_branch.is_none() && self.pipeline.is_some() {
+                        // ignore
+                    }
                 }
                 MessageView::StateChanged(sc) => {
-                    if sc.src().map(|s| s == p.upcast_ref::<gstreamer::Object>()).unwrap_or(false)
+                    if sc
+                        .src()
+                        .map(|s| s == p.upcast_ref::<gstreamer::Object>())
+                        .unwrap_or(false)
                         && sc.current() == gstreamer::State::Playing
                     {
                         self.status = ChannelStatus::Running;
