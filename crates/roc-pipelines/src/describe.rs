@@ -76,6 +76,50 @@ fn udp_host_port(url: &str) -> (String, u32) {
     ("239.255.28.1".into(), 21001)
 }
 
+/// 8→2 matrix selecting stereo pair `pair` (0=ch1-2 … 3=ch7-8).
+fn stereo_pair_matrix(pair: usize) -> String {
+    let mut rows = Vec::with_capacity(2);
+    for out_ch in 0..2 {
+        let mut coeffs = Vec::with_capacity(8);
+        for in_ch in 0..8 {
+            let v = if in_ch == pair * 2 + out_ch {
+                "1.0"
+            } else {
+                "0.0"
+            };
+            coeffs.push(format!("(float){v}"));
+        }
+        rows.push(format!("<{}>", coeffs.join(", ")));
+    }
+    format!("<{}>", rows.join(", "))
+}
+
+/// Four audio-only listen HLS playlists (`listen_0.m3u8` … `listen_3.m3u8`).
+fn listen_hls_branches(hls_dir: &str) -> String {
+    let mut parts = Vec::with_capacity(4);
+    for pair in 0..4 {
+        let matrix = stereo_pair_matrix(pair);
+        let playlist = format!("{hls_dir}/listen_{pair}.m3u8");
+        let seg = format!("{hls_dir}/l{pair}_%05d.ts");
+        parts.push(format!(
+            "a. ! queue max-size-buffers=64 leaky=downstream ! \
+             audiomixmatrix in-channels=8 out-channels=2 mode=manual matrix=\"{matrix}\" ! \
+             audioconvert ! audio/x-raw,channels=2,rate=48000 ! \
+             avenc_aac bitrate=128000 ! aacparse ! \
+             hlssink2 location=\"{seg}\" playlist-location=\"{playlist}\" \
+             target-duration=1 max-files=6 playlist-length=6"
+        ));
+    }
+    parts.join(" ")
+}
+
+fn hls_dir_from_playlist(playlist: &str) -> String {
+    std::path::Path::new(playlist)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".".into())
+}
+
 fn encode_family(video_codec: &str) -> EncodeFamily {
     let c = video_codec.to_ascii_lowercase();
     if c.contains("265") || c.contains("hevc") {
@@ -274,14 +318,8 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
             .preview_path
             .clone()
             .unwrap_or_else(|| "/tmp/roc-preview/preview.m3u8".into());
-        let seg = {
-            let path = std::path::Path::new(&playlist);
-            let dir = path
-                .parent()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| ".".into());
-            format!("{dir}/seg%05d.ts")
-        };
+        let dir = hls_dir_from_playlist(&playlist);
+        let seg = format!("{dir}/seg%05d.ts");
         format!(
             "t. ! queue max-size-buffers=3 leaky=downstream ! videorate ! video/x-raw,framerate=10/1 ! \
              videoconvert ! videoscale ! video/x-raw,width=640,height=360 ! \
@@ -294,13 +332,33 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         String::new()
     };
 
+    let (audio_src, listen) = if opts.with_tee_preview || opts.preview_path.is_some() {
+        let playlist = opts
+            .preview_path
+            .clone()
+            .unwrap_or_else(|| "/tmp/roc-preview/preview.m3u8".into());
+        let dir = hls_dir_from_playlist(&playlist);
+        let num = decklink_device_number(&opts.device);
+        (
+            format!(
+                "decklinkaudiosrc device-number={num} channels=8 ! \
+                 audioconvert ! audio/x-raw,channels=8,rate=48000,layout=interleaved ! tee name=a"
+            ),
+            listen_hls_branches(&dir),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+
     format!(
         "{src} ! \
          deinterlace mode=auto ! tee name=t \
+         {audio_src} \
          t. ! queue ! {enc} ! \
          tee name=e \
          {out_branches} \
-         {preview}",
+         {preview} \
+         {listen}",
         enc = nvenc_chain(&opts.preset.video_codec, preset, bitrate_kbit, gop),
         out_branches = out_branches.join(" "),
     )
@@ -348,5 +406,13 @@ mod tests {
         assert_eq!(decklink_device_number("DeckLink IP 100G (8)"), 7);
         assert_eq!(decklink_device_number("3"), 2);
         assert_eq!(decklink_device_number("0"), 0);
+    }
+
+    #[test]
+    fn stereo_pair_matrix_selects_pair() {
+        let m0 = stereo_pair_matrix(0);
+        assert!(m0.contains("(float)1.0, (float)0.0, (float)0.0"));
+        let m1 = stereo_pair_matrix(1);
+        assert!(m1.contains("(float)0.0, (float)0.0, (float)1.0, (float)0.0"));
     }
 }
