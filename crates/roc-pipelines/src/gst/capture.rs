@@ -126,11 +126,18 @@ impl ChannelPipeline {
     }
 
     fn launch_locked(&mut self, locked: &str) -> Result<()> {
+        let preview = format!(
+            "/opt/application/roc-recording/backend/preview/ch{}.jpg",
+            self.id
+        );
+        if let Some(parent) = std::path::Path::new(&preview).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let launch = build_capture_encode_once_launch(&CaptureLaunchOpts {
             device: self.device.clone(),
             mode: locked.to_string(),
             preset: self.preset.clone(),
-            preview_path: Some(format!("/tmp/roc-ch{}-preview.jpg", self.id)),
+            preview_path: Some(preview),
             record_path: None,
             srt_url: None,
             udp_egress: self.udp_egress.clone(),
