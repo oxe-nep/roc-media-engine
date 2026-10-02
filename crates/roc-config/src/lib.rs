@@ -227,6 +227,34 @@ fn default_presets() -> std::collections::HashMap<String, EncodePreset> {
             audio_channels: 2,
         },
     );
+    m.insert(
+        "hq_hevc".into(),
+        EncodePreset {
+            label: "HQ HEVC 8 Mbit".into(),
+            video_codec: "nvh265enc".into(),
+            video_bitrate: "8M".into(),
+            video_maxrate: Some("10M".into()),
+            video_bufsize: Some("16M".into()),
+            video_preset: "low-latency-hq".into(),
+            video_gop: 50,
+            audio_bitrate: "192k".into(),
+            audio_channels: 2,
+        },
+    );
+    m.insert(
+        "mezz_hevc".into(),
+        EncodePreset {
+            label: "Mezz HEVC 14 Mbit".into(),
+            video_codec: "nvh265enc".into(),
+            video_bitrate: "14M".into(),
+            video_maxrate: Some("16M".into()),
+            video_bufsize: Some("28M".into()),
+            video_preset: "hq".into(),
+            video_gop: 50,
+            audio_bitrate: "256k".into(),
+            audio_channels: 2,
+        },
+    );
     m
 }
 

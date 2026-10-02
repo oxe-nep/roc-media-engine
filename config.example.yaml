@@ -35,6 +35,26 @@ encode_presets:
     video_gop: 50
     audio_bitrate: "256k"
     audio_channels: 2
+  hq_hevc:
+    label: "HQ HEVC 8 Mbit"
+    video_codec: nvh265enc
+    video_bitrate: "8M"
+    video_maxrate: "10M"
+    video_bufsize: "16M"
+    video_preset: low-latency-hq
+    video_gop: 50
+    audio_bitrate: "192k"
+    audio_channels: 2
+  mezz_hevc:
+    label: "Mezz HEVC 14 Mbit"
+    video_codec: nvh265enc
+    video_bitrate: "14M"
+    video_maxrate: "16M"
+    video_bufsize: "28M"
+    video_preset: hq
+    video_gop: 50
+    audio_bitrate: "256k"
+    audio_channels: 2
 
 channels:
   - id: 1

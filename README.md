@@ -44,7 +44,7 @@ curl -X POST "http://127.0.0.1:8090/api/channels/1/srt/start"
 
 ## Capture host (Linux + DeckLink IP + NVIDIA)
 
-Enable the real backend with `--features gst` (see [docs/GST_PLUGINS.md](docs/GST_PLUGINS.md) and [docs/SPIKE.md](docs/SPIKE.md)).
+Enable the real backend with `--features gst` (see [docs/GST_PLUGINS.md](docs/GST_PLUGINS.md), [docs/SPIKE.md](docs/SPIKE.md), [docs/CODECS.md](docs/CODECS.md)).
 
 ```bash
 cargo build -p roc-engine --release --features gst

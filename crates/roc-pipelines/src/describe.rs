@@ -53,12 +53,46 @@ fn decklink_src(device: &str) -> String {
     )
 }
 
-fn nvenc_chain(preset: &str, bitrate_kbit: u64, gop: u32) -> String {
-    // nvh264enc on this host accepts CUDAMemory NV12 best via cudaupload.
+fn encode_family(video_codec: &str) -> EncodeFamily {
+    let c = video_codec.to_ascii_lowercase();
+    if c.contains("265") || c.contains("hevc") {
+        EncodeFamily::Hevc
+    } else {
+        EncodeFamily::H264
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncodeFamily {
+    H264,
+    Hevc,
+}
+
+impl EncodeFamily {
+    fn parse_element(self) -> &'static str {
+        match self {
+            Self::H264 => "h264parse",
+            Self::Hevc => "h265parse",
+        }
+    }
+
+    fn encoder_element(self) -> &'static str {
+        match self {
+            Self::H264 => "nvh264enc",
+            Self::Hevc => "nvh265enc",
+        }
+    }
+}
+
+/// NVENC encode chain (H.264 or H.265) via NV12 + cudaupload.
+fn nvenc_chain(video_codec: &str, preset: &str, bitrate_kbit: u64, gop: u32) -> String {
+    let family = encode_family(video_codec);
+    let enc = family.encoder_element();
+    let parse = family.parse_element();
     format!(
         "videoconvert ! video/x-raw,format=NV12 ! cudaupload ! \
-         nvh264enc preset={preset} bitrate={bitrate_kbit} gop-size={gop} ! \
-         h264parse config-interval=-1"
+         {enc} preset={preset} bitrate={bitrate_kbit} gop-size={gop} ! \
+         {parse} config-interval=-1"
     )
 }
 
@@ -77,10 +111,19 @@ fn decklink_audio_sink(device: &str) -> String {
     )
 }
 
-/// Spike: DeckLink → deinterlace → NVENC → optional tee → file (+ preview).
+/// Spike: DeckLink → deinterlace → NVENC (h264|hevc) → optional tee → file (+ preview).
 pub fn build_spike_tee_launch(device: &str, output_mp4: &str, with_preview: bool) -> String {
+    build_spike_tee_launch_codec(device, output_mp4, with_preview, "nvh264enc")
+}
+
+pub fn build_spike_tee_launch_codec(
+    device: &str,
+    output_mp4: &str,
+    with_preview: bool,
+    video_codec: &str,
+) -> String {
     let src = decklink_src(device);
-    let enc = nvenc_chain("low-latency-hq", 12_000, 50);
+    let enc = nvenc_chain(video_codec, "low-latency-hq", 12_000, 50);
     if with_preview {
         format!(
             "{src} ! \
@@ -104,7 +147,7 @@ pub fn build_capture_launch(opts: &CaptureLaunchOpts) -> String {
         .unwrap_or(12_000);
     let gop = opts.preset.video_gop;
     let preset = &opts.preset.video_preset;
-    let enc = nvenc_chain(preset, bitrate_kbit, gop);
+    let enc = nvenc_chain(&opts.preset.video_codec, preset, bitrate_kbit, gop);
     let src = decklink_src(&opts.device);
 
     let mut branches = Vec::new();
@@ -157,24 +200,25 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         .unwrap_or(12_000);
     let gop = opts.preset.video_gop;
     let preset = &opts.preset.video_preset;
+    let family = encode_family(&opts.preset.video_codec);
+    let parse = family.parse_element();
     let src = decklink_src(&opts.device);
 
     let mut out_branches = Vec::new();
     if let Some(path) = &opts.record_path {
         out_branches.push(format!(
-            "e. ! queue ! h264parse ! mp4mux fragment-duration=1000 ! filesink location=\"{path}\" sync=false"
+            "e. ! queue ! {parse} ! mp4mux fragment-duration=1000 ! filesink location=\"{path}\" sync=false"
         ));
     }
     if let Some(url) = &opts.srt_url {
         out_branches.push(format!(
-            "e. ! queue ! h264parse ! mpegtsmux alignment=7 ! srtsink uri=\"{url}\" wait-for-connection=false"
+            "e. ! queue ! {parse} ! mpegtsmux alignment=7 ! srtsink uri=\"{url}\" wait-for-connection=false"
         ));
     }
     if opts.udp_egress.is_some() {
-        out_branches.push(
-            "e. ! queue ! h264parse ! mpegtsmux alignment=7 ! udpsink host=239.255.28.1 port=21001 sync=false async=false"
-                .into(),
-        );
+        out_branches.push(format!(
+            "e. ! queue ! {parse} ! mpegtsmux alignment=7 ! udpsink host=239.255.28.1 port=21001 sync=false async=false"
+        ));
     }
     out_branches.push("e. ! queue leaky=downstream ! fakesink sync=false".into());
 
@@ -199,7 +243,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
          tee name=e \
          {out_branches} \
          {preview}",
-        enc = nvenc_chain(preset, bitrate_kbit, gop),
+        enc = nvenc_chain(&opts.preset.video_codec, preset, bitrate_kbit, gop),
         out_branches = out_branches.join(" "),
     )
 }

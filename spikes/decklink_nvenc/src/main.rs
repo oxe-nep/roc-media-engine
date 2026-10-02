@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use roc_pipelines::build_spike_tee_launch;
+use roc_pipelines::build_spike_tee_launch_codec;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -18,6 +18,10 @@ struct Args {
     /// Output fragmented MP4 path
     #[arg(long, default_value = "/tmp/roc-spike.mp4")]
     output: PathBuf,
+
+    /// Video codec: h264 | hevc (nvh264enc / nvh265enc)
+    #[arg(long, default_value = "h264")]
+    codec: String,
 
     /// Also tee a low-bitrate preview TS beside the MP4
     #[arg(long)]
@@ -32,19 +36,29 @@ struct Args {
     mock: bool,
 }
 
+fn codec_element(codec: &str) -> Result<&'static str> {
+    match codec.to_ascii_lowercase().as_str() {
+        "h264" | "avc" | "nvh264enc" => Ok("nvh264enc"),
+        "h265" | "hevc" | "nvh265enc" => Ok("nvh265enc"),
+        other => bail!("unsupported --codec {other} (use h264 or hevc)"),
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
     let args = Args::parse();
-    let launch = build_spike_tee_launch(
+    let video_codec = codec_element(&args.codec)?;
+    let launch = build_spike_tee_launch_codec(
         &args.device,
         &args.output.to_string_lossy(),
         args.preview,
+        video_codec,
     );
 
-    println!("=== Fas 0 spike launch ===");
+    println!("=== Fas 0 spike launch (codec={video_codec}) ===");
     println!("{launch}");
     println!();
     println!("Manual (capture host):");
@@ -98,7 +112,7 @@ fn run_gst(args: &Args, launch: &str) -> Result<()> {
     pipeline
         .set_state(gstreamer::State::Playing)
         .context("PLAYING")?;
-    tracing::info!(secs = args.duration_secs, "spike running");
+    tracing::info!(secs = args.duration_secs, codec = %args.codec, "spike running");
 
     let bus = pipeline.bus().context("bus")?;
     let deadline = std::time::Instant::now() + Duration::from_secs(args.duration_secs);
