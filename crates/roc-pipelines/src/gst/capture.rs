@@ -185,7 +185,7 @@ impl ChannelPipeline {
                     self.status = ChannelStatus::Stopped;
                 }
                 MessageView::StateChanged(sc) => {
-                    if sc.src().map(|s| s == *p).unwrap_or(false)
+                    if sc.src().map(|s| s == p.upcast_ref::<gstreamer::Object>()).unwrap_or(false)
                         && sc.current() == gstreamer::State::Playing
                     {
                         self.status = ChannelStatus::Running;
