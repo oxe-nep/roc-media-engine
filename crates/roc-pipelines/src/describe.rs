@@ -61,6 +61,21 @@ fn decklink_src(device: &str, mode: &str) -> String {
     )
 }
 
+/// Parse `udp://239.255.28.1:21001?...` → (host, port).
+fn udp_host_port(url: &str) -> (String, u32) {
+    let rest = url
+        .strip_prefix("udp://")
+        .or_else(|| url.strip_prefix("UDP://"))
+        .unwrap_or(url);
+    let authority = rest.split(['?', '/']).next().unwrap_or(rest);
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        if let Ok(p) = port.parse::<u32>() {
+            return (host.to_string(), p);
+        }
+    }
+    ("239.255.28.1".into(), 21001)
+}
+
 fn encode_family(video_codec: &str) -> EncodeFamily {
     let c = video_codec.to_ascii_lowercase();
     if c.contains("265") || c.contains("hevc") {
@@ -183,8 +198,10 @@ pub fn build_capture_launch(opts: &CaptureLaunchOpts) -> String {
     }
 
     if opts.udp_egress.is_some() {
+        let url = opts.udp_egress.as_deref().unwrap_or("");
+        let (host, port) = udp_host_port(url);
         branches.push(format!(
-            "t. ! queue name=q_udp ! {enc} ! mpegtsmux alignment=7 ! udpsink host=239.255.28.1 port=21001 sync=false async=false"
+            "t. ! queue name=q_udp ! {enc} ! mpegtsmux alignment=7 ! udpsink host={host} port={port} sync=false async=false"
         ));
     }
 
@@ -233,9 +250,10 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
             "e. ! queue ! {parse} ! mpegtsmux alignment=7 ! srtsink uri=\"{url}\" wait-for-connection=false"
         ));
     }
-    if opts.udp_egress.is_some() {
+    if let Some(url) = &opts.udp_egress {
+        let (host, port) = udp_host_port(url);
         out_branches.push(format!(
-            "e. ! queue ! {parse} ! mpegtsmux alignment=7 ! udpsink host=239.255.28.1 port=21001 sync=false async=false"
+            "e. ! queue ! {parse} ! mpegtsmux alignment=7 ! udpsink host={host} port={port} sync=false async=false"
         ));
     }
     out_branches.push("e. ! queue leaky=downstream ! fakesink sync=false".into());

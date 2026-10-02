@@ -10,6 +10,7 @@ Group=oxe
 WorkingDirectory=/opt/applications/roc-media-engine
 Environment=RUST_LOG=info
 ExecStart=/opt/applications/roc-media-engine/target/release/roc-media-engine --config /opt/applications/roc-media-engine/config.yaml
+# Build with: cargo build --release -p roc-engine --features gst
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536
