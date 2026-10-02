@@ -206,14 +206,25 @@ pub fn build_capture_launch(opts: &CaptureLaunchOpts) -> String {
     }
 
     if opts.with_tee_preview || opts.preview_path.is_some() {
-        let prev = opts
+        let playlist = opts
             .preview_path
             .clone()
-            .unwrap_or_else(|| "/tmp/roc-preview.jpg".into());
+            .unwrap_or_else(|| "/tmp/roc-preview/preview.m3u8".into());
+        let seg = {
+            let path = std::path::Path::new(&playlist);
+            let dir = path
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ".".into());
+            format!("{dir}/seg%05d.ts")
+        };
         branches.push(format!(
-            "t. ! queue max-size-buffers=2 leaky=downstream ! videorate ! video/x-raw,framerate=5/1 ! \
-             videoconvert ! videoscale ! video/x-raw,width=480,height=270 ! jpegenc quality=50 ! \
-             multifilesink location=\"{prev}\" max-files=1 sync=false"
+            "t. ! queue max-size-buffers=3 leaky=downstream ! videorate ! video/x-raw,framerate=10/1 ! \
+             videoconvert ! videoscale ! video/x-raw,width=640,height=360 ! \
+             x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=10 bframes=0 ! \
+             video/x-h264,profile=baseline ! h264parse ! \
+             hlssink2 location=\"{seg}\" playlist-location=\"{playlist}\" \
+             target-duration=1 max-files=6 playlist-length=6"
         ));
     }
 
@@ -259,14 +270,25 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
     out_branches.push("e. ! queue leaky=downstream ! fakesink sync=false".into());
 
     let preview = if opts.with_tee_preview || opts.preview_path.is_some() {
-        let prev = opts
+        let playlist = opts
             .preview_path
             .clone()
-            .unwrap_or_else(|| "/tmp/roc-preview.jpg".into());
+            .unwrap_or_else(|| "/tmp/roc-preview/preview.m3u8".into());
+        let seg = {
+            let path = std::path::Path::new(&playlist);
+            let dir = path
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ".".into());
+            format!("{dir}/seg%05d.ts")
+        };
         format!(
-            "t. ! queue max-size-buffers=2 leaky=downstream ! videorate ! video/x-raw,framerate=5/1 ! \
-             videoconvert ! videoscale ! video/x-raw,width=480,height=270 ! jpegenc quality=50 ! \
-             multifilesink location=\"{prev}\" max-files=1 sync=false"
+            "t. ! queue max-size-buffers=3 leaky=downstream ! videorate ! video/x-raw,framerate=10/1 ! \
+             videoconvert ! videoscale ! video/x-raw,width=640,height=360 ! \
+             x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=10 bframes=0 ! \
+             video/x-h264,profile=baseline ! h264parse ! \
+             hlssink2 location=\"{seg}\" playlist-location=\"{playlist}\" \
+             target-duration=1 max-files=6 playlist-length=6"
         )
     } else {
         String::new()

@@ -126,18 +126,28 @@ impl ChannelPipeline {
     }
 
     fn launch_locked(&mut self, locked: &str) -> Result<()> {
-        let preview = format!(
-            "/opt/application/roc-recording/backend/preview/ch{}.jpg",
-            self.id
-        );
-        if let Some(parent) = std::path::Path::new(&preview).parent() {
-            let _ = std::fs::create_dir_all(parent);
+        let hls_dir = format!("/opt/application/roc-recording/backend/hls/{}", self.id);
+        let _ = std::fs::create_dir_all(&hls_dir);
+        // Drop stale preview playlists/segments so players don't stick on old gens.
+        if let Ok(rd) = std::fs::read_dir(&hls_dir) {
+            for ent in rd.flatten() {
+                let name = ent.file_name();
+                let n = name.to_string_lossy();
+                if n == "preview.m3u8"
+                    || n.ends_with(".ts")
+                    || n.starts_with("listen_")
+                    || n == "thumb.jpg"
+                {
+                    let _ = std::fs::remove_file(ent.path());
+                }
+            }
         }
+        let playlist = format!("{hls_dir}/preview.m3u8");
         let launch = build_capture_encode_once_launch(&CaptureLaunchOpts {
             device: self.device.clone(),
             mode: locked.to_string(),
             preset: self.preset.clone(),
-            preview_path: Some(preview),
+            preview_path: Some(playlist),
             record_path: None,
             srt_url: None,
             udp_egress: self.udp_egress.clone(),
