@@ -7,6 +7,8 @@ use crate::parse_bitrate;
 #[derive(Debug, Clone)]
 pub struct CaptureLaunchOpts {
     pub device: String,
+    /// GStreamer DeckLink mode enum name, e.g. `1080p50`, `1080i50`, `auto`.
+    pub mode: String,
     pub preset: EncodePreset,
     pub preview_path: Option<String>,
     pub record_path: Option<String>,
@@ -44,12 +46,18 @@ pub fn decklink_device_number(device: &str) -> u32 {
     0
 }
 
-fn decklink_src(device: &str) -> String {
+fn decklink_src(device: &str, mode: &str) -> String {
     // Lock mode to avoid auto-detect renegotiation (SD→HD) which breaks live graphs.
     // drop-no-signal-frames keeps the pipeline alive across brief ST 2110 gaps.
+    let mode = if mode.trim().is_empty() {
+        "1080p50"
+    } else {
+        mode.trim()
+    };
     format!(
-        "decklinkvideosrc device-number={} mode=1080i50 drop-no-signal-frames=true",
-        decklink_device_number(device)
+        "decklinkvideosrc device-number={} mode={} drop-no-signal-frames=true",
+        decklink_device_number(device),
+        mode
     )
 }
 
@@ -122,7 +130,17 @@ pub fn build_spike_tee_launch_codec(
     with_preview: bool,
     video_codec: &str,
 ) -> String {
-    let src = decklink_src(device);
+    build_spike_tee_launch_codec_mode(device, output_mp4, with_preview, video_codec, "1080p50")
+}
+
+pub fn build_spike_tee_launch_codec_mode(
+    device: &str,
+    output_mp4: &str,
+    with_preview: bool,
+    video_codec: &str,
+    mode: &str,
+) -> String {
+    let src = decklink_src(device, mode);
     let enc = nvenc_chain(video_codec, "low-latency-hq", 12_000, 50);
     if with_preview {
         format!(
@@ -148,7 +166,7 @@ pub fn build_capture_launch(opts: &CaptureLaunchOpts) -> String {
     let gop = opts.preset.video_gop;
     let preset = &opts.preset.video_preset;
     let enc = nvenc_chain(&opts.preset.video_codec, preset, bitrate_kbit, gop);
-    let src = decklink_src(&opts.device);
+    let src = decklink_src(&opts.device, &opts.mode);
 
     let mut branches = Vec::new();
 
@@ -202,7 +220,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
     let preset = &opts.preset.video_preset;
     let family = encode_family(&opts.preset.video_codec);
     let parse = family.parse_element();
-    let src = decklink_src(&opts.device);
+    let src = decklink_src(&opts.device, &opts.mode);
 
     let mut out_branches = Vec::new();
     if let Some(path) = &opts.record_path {

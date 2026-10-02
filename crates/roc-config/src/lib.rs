@@ -147,7 +147,7 @@ impl Config {
                     encode_preset: Some("hq".into()),
                     device: format!("DeckLink IP 100G ({id})"),
                     connection: None,
-                    mode: None,
+                    mode: Some("1080p50".into()),
                     udp_egress: Some(format!(
                         "udp://239.255.28.{id}:{}?pkt_size=1316&reuse=1&ttl=1",
                         21000 + id

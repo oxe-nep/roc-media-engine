@@ -18,6 +18,7 @@ pub struct ChannelPipeline {
     pub srt_url: Option<String>,
     pub last_error: Option<String>,
     device: String,
+    mode: String,
     preset: EncodePreset,
     udp_egress: Option<String>,
     parse_element: String,
@@ -53,6 +54,7 @@ impl ChannelPipeline {
             srt_url: ch.srt_url.clone(),
             last_error: None,
             device: ch.device.clone(),
+            mode: ch.mode.clone().unwrap_or_else(|| "1080p50".into()),
             parse_element: parse_element_for_codec(&preset.video_codec).to_string(),
             preset: preset.clone(),
             udp_egress: ch.udp_egress.clone(),
@@ -65,6 +67,7 @@ impl ChannelPipeline {
     pub fn update_config(&mut self, ch: &ChannelConfig, preset: &EncodePreset) {
         self.name = ch.name.clone();
         self.device = ch.device.clone();
+        self.mode = ch.mode.clone().unwrap_or_else(|| "1080p50".into());
         self.preset = preset.clone();
         self.encode_preset_label = preset.label.clone();
         self.parse_element = parse_element_for_codec(&preset.video_codec).to_string();
@@ -80,6 +83,7 @@ impl ChannelPipeline {
         }
         let launch = build_capture_encode_once_launch(&CaptureLaunchOpts {
             device: self.device.clone(),
+            mode: self.mode.clone(),
             preset: self.preset.clone(),
             preview_path: Some(format!("/tmp/roc-ch{}-preview.ts", self.id)),
             record_path: None,
@@ -347,6 +351,11 @@ impl ChannelPipeline {
         let Some(p) = self.pipeline.as_ref() else {
             return;
         };
+        // Authoritative state — don't rely only on catching StateChanged transitions.
+        let (_, cur, _) = p.state(gstreamer::ClockTime::ZERO);
+        if cur == gstreamer::State::Playing && self.status != ChannelStatus::Error {
+            self.status = ChannelStatus::Running;
+        }
         let bus = p.bus().expect("pipeline bus");
         while let Some(msg) = bus.timed_pop(gstreamer::ClockTime::ZERO) {
             use gstreamer::MessageView;
@@ -360,12 +369,7 @@ impl ChannelPipeline {
                     ));
                     tracing::error!(channel = self.id, error = ?self.last_error, "gst error");
                 }
-                MessageView::Eos(_) => {
-                    // Branch EOS during record stop should not kill channel status.
-                    if !self.recording && self.rec_branch.is_none() && self.pipeline.is_some() {
-                        // ignore
-                    }
-                }
+                MessageView::Eos(_) => {}
                 MessageView::StateChanged(sc) => {
                     if sc
                         .src()
@@ -378,11 +382,6 @@ impl ChannelPipeline {
                 }
                 MessageView::Warning(w) => {
                     let text = format!("{} ({})", w.error(), w.debug().unwrap_or_default());
-                    if text.to_lowercase().contains("signal")
-                        || text.to_lowercase().contains("no input")
-                    {
-                        self.status = ChannelStatus::Waiting;
-                    }
                     tracing::warn!(channel = self.id, %text, "gst warning");
                 }
                 _ => {}
