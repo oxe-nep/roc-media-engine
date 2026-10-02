@@ -94,18 +94,29 @@ fn stereo_pair_matrix(pair: usize) -> String {
     format!("<{}>", rows.join(", "))
 }
 
+/// Bus-message peak meters for the 8ch audio tee (`level` → Element "level").
+fn meter_branch() -> &'static str {
+    "a. ! queue max-size-buffers=8 leaky=downstream ! \
+     level name=ameter interval=80000000 post-messages=true ! \
+     fakesink sync=false async=false"
+}
+
 /// Four audio-only listen HLS playlists (`listen_0.m3u8` … `listen_3.m3u8`).
-fn listen_hls_branches(hls_dir: &str) -> String {
+///
+/// Uses `audioconvert mix-matrix` (not `audiomixmatrix`): manual mixmatrix emits
+/// `channel-mask=0`, which `voaacenc` rejects for stereo (needs `0x3`).
+fn listen_hls_branches(hls_dir: &str, gen: u64) -> String {
     let mut parts = Vec::with_capacity(4);
     for pair in 0..4 {
         let matrix = stereo_pair_matrix(pair);
         let playlist = format!("{hls_dir}/listen_{pair}.m3u8");
-        let seg = format!("{hls_dir}/l{pair}_%05d.ts");
+        // Generation stamp matches FFmpeg preview.go — avoids stale segment reuse in hls.js.
+        let seg = format!("{hls_dir}/l{gen}_{pair}_%05d.ts");
         parts.push(format!(
             "a. ! queue max-size-buffers=64 leaky=downstream ! \
-             audiomixmatrix in-channels=8 out-channels=2 mode=manual matrix=\"{matrix}\" ! \
-             audioconvert ! voaacenc bitrate=128000 ! aacparse ! mpegtsmux alignment=7 ! \
-             hlssink location=\"{seg}\" playlist-location=\"{playlist}\" \
+             audioconvert mix-matrix=\"{matrix}\" ! audio/x-raw,channels=2 ! \
+             voaacenc bitrate=128000 ! aacparse ! \
+             hlssink2 location=\"{seg}\" playlist-location=\"{playlist}\" \
              target-duration=1 max-files=6 playlist-length=6"
         ));
     }
@@ -117,6 +128,13 @@ fn hls_dir_from_playlist(playlist: &str) -> String {
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| ".".into())
+}
+
+fn hls_generation() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn encode_family(video_codec: &str) -> EncodeFamily {
@@ -148,17 +166,36 @@ impl EncodeFamily {
             Self::Hevc => "nvh265enc",
         }
     }
+
+    /// Caps name for Annex-B (in-band VPS/SPS/PPS). Required for MPEG-TS / mid-join.
+    fn byte_stream_caps(self) -> &'static str {
+        match self {
+            Self::H264 => "video/x-h264,stream-format=byte-stream,alignment=au",
+            Self::Hevc => "video/x-h265,stream-format=byte-stream,alignment=au",
+        }
+    }
 }
 
 /// NVENC encode chain (H.264 or H.265) via NV12 + cudaupload.
+///
+/// Flags mirror FFmpeg capture (`-bf 0`, `-forced-idr`, mid-join friendly):
+/// force `byte-stream` so `repeat-sequence-header` is honored (ignored for avc/hvc1)
+/// and MPEG-TS players get in-band parameter sets on every IDR.
 fn nvenc_chain(video_codec: &str, preset: &str, bitrate_kbit: u64, gop: u32) -> String {
     let family = encode_family(video_codec);
     let enc = family.encoder_element();
     let parse = family.parse_element();
+    let caps = family.byte_stream_caps();
+    // nvh265enc has no `bframes` property; H.264 needs an explicit 0 (hq defaults to B-frames).
+    let bframes = match family {
+        EncodeFamily::H264 => " bframes=0",
+        EncodeFamily::Hevc => "",
+    };
     format!(
         "videoconvert ! video/x-raw,format=NV12 ! cudaupload ! \
-         {enc} preset={preset} bitrate={bitrate_kbit} gop-size={gop} ! \
-         {parse} config-interval=-1"
+         {enc} preset={preset} bitrate={bitrate_kbit} gop-size={gop} \
+         zerolatency=true aud=true repeat-sequence-header=true{bframes} ! \
+         {caps} ! {parse} config-interval=-1"
     )
 }
 
@@ -259,13 +296,17 @@ pub fn build_capture_launch(opts: &CaptureLaunchOpts) -> String {
                 .parent()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|| ".".into());
-            format!("{dir}/seg%05d.ts")
+            let gen = hls_generation();
+            format!("{dir}/pv{gen}_%05d.ts")
         };
+        // CFR 10 fps (no drop-only): drop-only + hlssink2 produced EXTINF ~0.1/1.0
+        // alternation that made hls.js hang. Match FFmpeg `fps=10`.
         branches.push(format!(
-            "t. ! queue max-size-buffers=3 leaky=downstream ! videorate ! video/x-raw,framerate=10/1 ! \
-             videoconvert ! videoscale ! video/x-raw,width=640,height=360 ! \
+            "t. ! queue max-size-buffers=3 leaky=downstream ! \
+             videoconvert ! videoscale ! videorate ! \
+             video/x-raw,width=640,height=360,framerate=10/1 ! \
              x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=10 bframes=0 ! \
-             video/x-h264,profile=baseline ! h264parse ! \
+             video/x-h264,profile=baseline ! h264parse config-interval=-1 ! \
              hlssink2 location=\"{seg}\" playlist-location=\"{playlist}\" \
              target-duration=1 max-files=6 playlist-length=6"
         ));
@@ -306,24 +347,40 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
     }
     if let Some(url) = &opts.udp_egress {
         let (host, port) = udp_host_port(url);
+        let matrix = stereo_pair_matrix(0);
+        let aac_bps = parse_bitrate(&opts.preset.audio_bitrate).unwrap_or(192_000);
+        // Named mux so program AAC (pair 1–2) can join the same MPEG-TS as video.
+        // Force Annex-B: mpegtsmux + players need byte-stream (not avc/hvc1).
         out_branches.push(format!(
-            "e. ! queue ! {parse} ! mpegtsmux alignment=7 ! udpsink host={host} port={port} sync=false async=false"
+            "e. ! queue ! {parse} config-interval=-1 ! {bs} ! mpegtsmux name=udpmux alignment=7 ! \
+             udpsink host={host} port={port} sync=false async=false \
+             a. ! queue max-size-buffers=64 leaky=downstream ! \
+             audioconvert mix-matrix=\"{matrix}\" ! audio/x-raw,channels=2 ! \
+             voaacenc bitrate={aac_bps} ! aacparse ! udpmux.",
+            bs = family.byte_stream_caps(),
         ));
     }
     out_branches.push("e. ! queue leaky=downstream ! fakesink sync=false".into());
 
-    let preview = if opts.with_tee_preview || opts.preview_path.is_some() {
+    let preview_gen = if opts.with_tee_preview || opts.preview_path.is_some() {
+        Some(hls_generation())
+    } else {
+        None
+    };
+
+    let preview = if let Some(gen) = preview_gen {
         let playlist = opts
             .preview_path
             .clone()
             .unwrap_or_else(|| "/tmp/roc-preview/preview.m3u8".into());
         let dir = hls_dir_from_playlist(&playlist);
-        let seg = format!("{dir}/seg%05d.ts");
+        let seg = format!("{dir}/pv{gen}_%05d.ts");
         format!(
-            "t. ! queue max-size-buffers=3 leaky=downstream ! videorate ! video/x-raw,framerate=10/1 ! \
-             videoconvert ! videoscale ! video/x-raw,width=640,height=360 ! \
+            "t. ! queue max-size-buffers=3 leaky=downstream ! \
+             videoconvert ! videoscale ! videorate ! \
+             video/x-raw,width=640,height=360,framerate=10/1 ! \
              x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=10 bframes=0 ! \
-             video/x-h264,profile=baseline ! h264parse ! \
+             video/x-h264,profile=baseline ! h264parse config-interval=-1 ! \
              hlssink2 location=\"{seg}\" playlist-location=\"{playlist}\" \
              target-duration=1 max-files=6 playlist-length=6"
         )
@@ -331,22 +388,31 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         String::new()
     };
 
-    let (audio_src, listen) = if opts.with_tee_preview || opts.preview_path.is_some() {
+    let need_audio = opts.with_tee_preview
+        || opts.preview_path.is_some()
+        || opts.udp_egress.is_some();
+    let (audio_src, listen, meter) = if need_audio {
         let playlist = opts
             .preview_path
             .clone()
             .unwrap_or_else(|| "/tmp/roc-preview/preview.m3u8".into());
         let dir = hls_dir_from_playlist(&playlist);
         let num = decklink_device_number(&opts.device);
+        let listen = if let Some(gen) = preview_gen {
+            listen_hls_branches(&dir, gen)
+        } else {
+            String::new()
+        };
         (
             format!(
                 "decklinkaudiosrc device-number={num} channels=8 ! \
                  audioconvert ! audio/x-raw,channels=8,rate=48000,layout=interleaved ! tee name=a"
             ),
-            listen_hls_branches(&dir),
+            listen,
+            meter_branch().to_string(),
         )
     } else {
-        (String::new(), String::new())
+        (String::new(), String::new(), String::new())
     };
 
     format!(
@@ -357,7 +423,8 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
          tee name=e \
          {out_branches} \
          {preview} \
-         {listen}",
+         {listen} \
+         {meter}",
         enc = nvenc_chain(&opts.preset.video_codec, preset, bitrate_kbit, gop),
         out_branches = out_branches.join(" "),
     )
@@ -373,23 +440,40 @@ pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
     };
 
     // GST mode enums use names like 1080p50, not BMD Hp50 — map common codes.
+    // Encode path deinterlaces to progressive; prefer progressive sink modes so
+    // DeckLink OUT actually shows frames (Hi50 + progressive decode → black video).
     let mode = match opts.format_code.as_str() {
-        "Hp50" | "hp50" => "1080p50",
-        "Hi50" | "hi50" => "1080i50",
+        "Hp50" | "hp50" | "1080p50" => "1080p50",
+        // Map interlaced UI codes to progressive equivalents for our progressive encode.
+        "Hi50" | "hi50" | "1080i50" => "1080p50",
         "Hp25" | "hp25" => "1080p25",
-        "Hp59.94" | "Hp5994" => "1080p5994",
-        "Hi59.94" | "Hi5994" => "1080i5994",
+        "Hp59.94" | "Hp5994" | "1080p5994" => "1080p5994",
+        "Hi59.94" | "Hi5994" | "1080i5994" => "1080p5994",
         other => other,
     };
 
+    // Progressive vs interlaced sink geometry for forced caps.
+    // Our encode path is progressive; avoid forcing interleaved caps (breaks negotiation).
+    let (height, fr) = match mode {
+        "1080i50" | "1080p25" => ("1080", "25/1"),
+        "1080i5994" => ("1080", "30000/1001"),
+        "1080p5994" => ("1080", "60000/1001"),
+        _ => ("1080", "50/1"),
+    };
+
+    // Caps on demux pads are required: our MPEG-TS often exposes AAC before H.264,
+    // so untyped `d.` can latch the audio pad onto the video branch → audio-only OUT.
     format!(
         "{src} \
-         d. ! queue ! h264parse ! avdec_h264 ! videoconvert ! \
-         video/x-raw,format=v210 ! \
-         {vsink} \
-         d. ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! \
-         audio/x-raw,format=S16LE,channels=2 ! \
-         {asink}",
+         d. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
+           video/x-h264 ! h264parse config-interval=-1 ! avdec_h264 ! \
+           videoconvert ! videoscale ! videorate ! \
+           video/x-raw,format=UYVY,width=1920,height={height},framerate={fr} ! \
+           {vsink} \
+         d. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
+           audio/mpeg ! aacparse ! avdec_aac ! audioconvert ! audioresample ! \
+           audio/x-raw,format=S16LE,channels=2,rate=48000 ! \
+           {asink}",
         vsink = decklink_video_sink(&opts.device, mode),
         asink = decklink_audio_sink(&opts.device),
     )
@@ -413,5 +497,21 @@ mod tests {
         assert!(m0.contains("1.0, 0.0, 0.0"));
         let m1 = stereo_pair_matrix(1);
         assert!(m1.contains("0.0, 0.0, 1.0, 0.0"));
+    }
+
+    #[test]
+    fn nvenc_chain_is_player_friendly() {
+        let h264 = nvenc_chain("nvh264enc", "hq", 4000, 50);
+        assert!(h264.contains("repeat-sequence-header=true"));
+        assert!(h264.contains("zerolatency=true"));
+        assert!(h264.contains("bframes=0"));
+        assert!(h264.contains("stream-format=byte-stream"));
+        assert!(h264.contains("h264parse config-interval=-1"));
+        let hevc = nvenc_chain("nvh265enc", "hq", 8000, 50);
+        assert!(hevc.contains("repeat-sequence-header=true"));
+        assert!(hevc.contains("zerolatency=true"));
+        assert!(hevc.contains("stream-format=byte-stream"));
+        assert!(!hevc.contains("bframes="));
+        assert!(hevc.contains("h265parse config-interval=-1"));
     }
 }

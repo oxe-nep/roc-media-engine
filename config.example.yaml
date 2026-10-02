@@ -1,4 +1,6 @@
 bind: "0.0.0.0:8090"
+# Fallback only when callers omit `?path=` (soak / direct API).
+# Production: Go passes absolute paths under the UI recordings directory.
 recordings_dir: "./recordings"
 preview_dir: "./preview"
 max_nvenc_sessions: 8
@@ -119,3 +121,8 @@ playout:
     name: "Decode 1"
     device: "DeckLink IP 100G (1)"
     format_code: Hp50
+  - id: decode-2
+    name: "Decode 2"
+    device: "DeckLink IP 100G (2)"
+    format_code: Hp50
+  # … decode-3..8 as needed; Go maps client N → decode-N via MEDIA_ENGINE_PLAYOUT

@@ -72,7 +72,10 @@ impl PipelineBackend for MockBackend {
         let mut map = self.channels.lock();
         map.entry(ch.id).or_insert_with(|| Chan {
             name: ch.name.clone(),
-            encode_preset: preset.label.clone(),
+            encode_preset: ch
+                .encode_preset
+                .clone()
+                .unwrap_or_else(|| "hq".into()),
             status: ChannelStatus::Stopped,
             recording: false,
             srt: false,
@@ -84,12 +87,33 @@ impl PipelineBackend for MockBackend {
         });
         if let Some(existing) = map.get_mut(&ch.id) {
             existing.name = ch.name.clone();
-            existing.encode_preset = preset.label.clone();
+            existing.encode_preset = ch
+                .encode_preset
+                .clone()
+                .unwrap_or_else(|| preset.label.clone());
             existing.udp_egress = ch.udp_egress.clone();
             if existing.srt_url.is_none() {
                 existing.srt_url = ch.srt_url.clone();
             }
         }
+        Ok(())
+    }
+
+    fn apply_encode_preset(
+        &self,
+        channel_id: u32,
+        preset_id: &str,
+        preset: &EncodePreset,
+    ) -> Result<()> {
+        let mut map = self.channels.lock();
+        let ch = map
+            .get_mut(&channel_id)
+            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+        if ch.recording {
+            bail!("stop recording before changing encode preset");
+        }
+        ch.encode_preset = preset_id.to_string();
+        let _ = preset; // mock ignores encode params
         Ok(())
     }
 
@@ -194,6 +218,12 @@ impl PipelineBackend for MockBackend {
             name: ch.name.clone(),
             status: ch.status,
             encode_preset: ch.encode_preset.clone(),
+            video_bitrate_kbps: if matches!(ch.status, ChannelStatus::Running) {
+                Some(11_500.0)
+            } else {
+                None
+            },
+            srt_bitrate_kbps: if ch.srt { Some(11_800.0) } else { None },
             recording: ch.recording,
             srt: ch.srt,
             recording_path: ch.recording_path.clone(),
@@ -203,6 +233,7 @@ impl PipelineBackend for MockBackend {
             configured_mode: "auto".into(),
             locked_mode: Some("mock".into()),
             input_format: Some("1920x1080p50/1 (mock)".into()),
+            audio_peaks: Some(vec![-90.0; 8]),
         })
     }
 
@@ -221,6 +252,12 @@ impl PipelineBackend for MockBackend {
                     name: ch.name.clone(),
                     status: ch.status,
                     encode_preset: ch.encode_preset.clone(),
+                    video_bitrate_kbps: if matches!(ch.status, ChannelStatus::Running) {
+                        Some(11_500.0)
+                    } else {
+                        None
+                    },
+                    srt_bitrate_kbps: if ch.srt { Some(11_800.0) } else { None },
                     recording: ch.recording,
                     srt: ch.srt,
                     recording_path: ch.recording_path.clone(),
@@ -230,6 +267,7 @@ impl PipelineBackend for MockBackend {
                     configured_mode: "auto".into(),
                     locked_mode: Some("mock".into()),
                     input_format: Some("1920x1080p50/1 (mock)".into()),
+                    audio_peaks: Some(vec![-90.0; 8]),
                 })
             })
             .collect()

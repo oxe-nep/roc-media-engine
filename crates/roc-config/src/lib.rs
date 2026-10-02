@@ -63,6 +63,54 @@ pub struct EncodePreset {
     pub audio_channels: u32,
 }
 
+impl EncodePreset {
+    /// Map FFmpeg-oriented codec/preset ids (from Go UI) onto GST nvh264enc/nvh265enc values.
+    pub fn normalize_for_gst(&mut self) {
+        self.video_codec = map_video_codec(&self.video_codec);
+        self.video_preset = map_nvenc_preset(&self.video_preset);
+        if self.video_gop == 0 {
+            self.video_gop = default_gop();
+        }
+        if self.audio_channels == 0 {
+            self.audio_channels = default_audio_channels();
+        }
+        if self.audio_bitrate.trim().is_empty() {
+            self.audio_bitrate = default_audio_bitrate();
+        }
+    }
+}
+
+/// FFmpeg `h264_nvenc` / `hevc_nvenc` → GST encoder element names.
+pub fn map_video_codec(raw: &str) -> String {
+    let c = raw.trim().to_ascii_lowercase();
+    if c.is_empty() {
+        return default_video_codec();
+    }
+    if c.contains("265") || c.contains("hevc") {
+        "nvh265enc".into()
+    } else if c == "nvh264enc" || c.contains("264") || c.contains("avc") {
+        "nvh264enc".into()
+    } else {
+        // Unknown (e.g. av1_nvenc): fall back to H.264 NVENC until supported.
+        "nvh264enc".into()
+    }
+}
+
+/// FFmpeg NVENC `p1`–`p7` / `llhq` → GST `nvh264enc` preset enum names.
+pub fn map_nvenc_preset(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" => default_video_preset(),
+        "p1" | "p2" | "hp" => "hp".into(),
+        "p3" | "ll" | "llhq" | "low-latency-hq" => "low-latency-hq".into(),
+        "llhp" | "low-latency-hp" => "low-latency-hp".into(),
+        "low-latency" => "low-latency".into(),
+        "p4" | "p5" | "p6" | "p7" | "hq" | "default" => "hq".into(),
+        "lossless" => "lossless".into(),
+        "lossless-hp" => "lossless-hp".into(),
+        other => other.to_string(),
+    }
+}
+
 fn default_video_codec() -> String {
     "nvh264enc".into()
 }
@@ -267,5 +315,29 @@ mod tests {
         let cfg = Config::example();
         assert_eq!(cfg.channels.len(), 8);
         assert!(cfg.encode_presets.contains_key("hq"));
+    }
+
+    #[test]
+    fn maps_ffmpeg_codec_and_preset() {
+        assert_eq!(map_video_codec("h264_nvenc"), "nvh264enc");
+        assert_eq!(map_video_codec("hevc_nvenc"), "nvh265enc");
+        assert_eq!(map_nvenc_preset("p4"), "hq");
+        assert_eq!(map_nvenc_preset("p1"), "hp");
+        assert_eq!(map_nvenc_preset("llhq"), "low-latency-hq");
+        assert_eq!(map_nvenc_preset("low-latency-hq"), "low-latency-hq");
+        let mut p = EncodePreset {
+            label: "t".into(),
+            video_codec: "h264_nvenc".into(),
+            video_bitrate: "12M".into(),
+            video_maxrate: None,
+            video_bufsize: None,
+            video_preset: "p4".into(),
+            video_gop: 50,
+            audio_bitrate: "192k".into(),
+            audio_channels: 2,
+        };
+        p.normalize_for_gst();
+        assert_eq!(p.video_codec, "nvh264enc");
+        assert_eq!(p.video_preset, "hq");
     }
 }

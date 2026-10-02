@@ -10,6 +10,14 @@ pub trait PipelineBackend: Send + Sync {
 
     fn ensure_channel(&self, ch: &ChannelConfig, preset: &EncodePreset) -> Result<()>;
 
+    /// Hot-swap encode preset (relaunch graph if capture is live). `preset_id` is the config key.
+    fn apply_encode_preset(
+        &self,
+        channel_id: u32,
+        preset_id: &str,
+        preset: &EncodePreset,
+    ) -> Result<()>;
+
     fn start_capture(&self, channel_id: u32) -> Result<()>;
     fn stop_capture(&self, channel_id: u32) -> Result<()>;
 

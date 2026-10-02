@@ -22,6 +22,12 @@ pub struct ChannelSnapshot {
     pub name: String,
     pub status: ChannelStatus,
     pub encode_preset: String,
+    /// Live encoded video bitrate (kbps) from pad probe — omit until first sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_bitrate_kbps: Option<f64>,
+    /// Live SRT MPEG-TS bitrate (kbps) while SRT branch is attached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_bitrate_kbps: Option<f64>,
     pub recording: bool,
     pub srt: bool,
     pub recording_path: Option<String>,
@@ -37,6 +43,9 @@ pub struct ChannelSnapshot {
     /// Last detected input format summary (from live caps).
     #[serde(default)]
     pub input_format: Option<String>,
+    /// Peak levels in dBFS for up to 8 discrete channels (−90 = silence).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_peaks: Option<Vec<f64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

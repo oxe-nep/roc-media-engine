@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
-use roc_config::Config;
+use anyhow::{bail, Context, Result};
+use parking_lot::Mutex;
+use roc_config::{Config, EncodePreset};
 use roc_devices::DeviceProbeReport;
 use roc_pipelines::{
     ChannelSnapshot, PipelineBackend, PlayoutSnapshot, WorkflowKind, WorkflowSnapshot,
@@ -22,9 +24,32 @@ fn stamp_now() -> String {
     format!("epoch{days}_{h:02}{m:02}{s:02}")
 }
 
+fn sanitize_category(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "_unsorted" {
+        return "_unsorted".into();
+    }
+    let cleaned: String = raw
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' => c,
+            ' ' => '_',
+            _ => '_',
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches('.').to_string();
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        "_unsorted".into()
+    } else {
+        cleaned
+    }
+}
+
 pub struct Orchestrator {
     pub cfg: Config,
     backend: Arc<dyn PipelineBackend>,
+    /// Runtime encode presets (seeded from YAML; mutable via API for Go sync).
+    presets: Mutex<HashMap<String, EncodePreset>>,
 }
 
 impl Orchestrator {
@@ -33,7 +58,77 @@ impl Orchestrator {
             let preset = cfg.preset_for_channel(ch)?;
             backend.ensure_channel(ch, preset)?;
         }
-        Ok(Self { cfg, backend })
+        let presets = Mutex::new(cfg.encode_presets.clone());
+        Ok(Self {
+            cfg,
+            backend,
+            presets,
+        })
+    }
+
+    pub fn list_presets(&self) -> Vec<(String, EncodePreset)> {
+        let map = self.presets.lock();
+        let mut out: Vec<_> = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Upsert a full preset body (Go/FFmpeg field names accepted; normalized to GST).
+    pub fn upsert_preset(
+        &self,
+        id: &str,
+        mut preset: EncodePreset,
+        create_only: bool,
+    ) -> Result<EncodePreset> {
+        let id = id.trim();
+        if id.is_empty() {
+            bail!("preset id is required");
+        }
+        if preset.label.trim().is_empty() {
+            preset.label = id.to_string();
+        }
+        if preset.video_bitrate.trim().is_empty() {
+            bail!("video_bitrate is required");
+        }
+        preset.normalize_for_gst();
+        {
+            let mut map = self.presets.lock();
+            let exists = map.contains_key(id);
+            if create_only && exists {
+                bail!("encode preset `{id}` already exists");
+            }
+            map.insert(id.to_string(), preset.clone());
+        }
+        // Relunch channels already assigned to this id so bitrate/codec take effect.
+        for ch in self.backend.list_channels() {
+            if ch.encode_preset == id {
+                if let Err(e) = self.backend.apply_encode_preset(ch.id, id, &preset) {
+                    tracing::warn!(
+                        channel = ch.id,
+                        preset_id = id,
+                        error = %e,
+                        "failed to reapply updated encode preset"
+                    );
+                }
+            }
+        }
+        Ok(preset)
+    }
+
+    pub fn delete_preset(&self, id: &str) -> Result<()> {
+        let id = id.trim();
+        if id.is_empty() {
+            bail!("preset id is required");
+        }
+        let mut map = self.presets.lock();
+        if !map.contains_key(id) {
+            bail!("encode preset `{id}` not found");
+        }
+        if map.len() <= 1 {
+            bail!("cannot delete the last encode preset");
+        }
+        map.remove(id);
+        Ok(())
     }
 
     pub fn health(&self) -> serde_json::Value {
@@ -68,14 +163,32 @@ impl Orchestrator {
         self.backend.channel_snapshot(id)
     }
 
-    pub fn start_recording(&self, id: u32, label: Option<String>) -> Result<ChannelSnapshot> {
-        let ch = self.cfg.channel(id)?;
-        let name = label.unwrap_or_else(|| ch.name.replace(' ', "_"));
-        let stamp = stamp_now();
-        let dir = self.cfg.recordings_dir.join("_unsorted");
-        std::fs::create_dir_all(&dir)?;
-        let path: PathBuf = dir.join(format!("{name}_{stamp}.mp4"));
-        let path_str = path.to_string_lossy().to_string();
+    pub fn start_recording(
+        &self,
+        id: u32,
+        path: Option<String>,
+        label: Option<String>,
+        category: Option<String>,
+    ) -> Result<ChannelSnapshot> {
+        let path_str = if let Some(p) = path.filter(|s| !s.trim().is_empty()) {
+            let pb = PathBuf::from(&p);
+            if let Some(parent) = pb.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create recording parent {}", parent.display()))?;
+            }
+            p
+        } else {
+            // Fallback when called without Go/UI path (soak scripts / direct API).
+            let ch = self.cfg.channel(id)?;
+            let name = label.unwrap_or_else(|| ch.name.replace(' ', "_"));
+            let stamp = stamp_now();
+            let cat = sanitize_category(category.as_deref().unwrap_or("_unsorted"));
+            let dir = self.cfg.recordings_dir.join(&cat);
+            std::fs::create_dir_all(&dir)?;
+            dir.join(format!("{name}_ch{id}_{stamp}.mp4"))
+                .to_string_lossy()
+                .into_owned()
+        };
         self.backend.start_recording(id, &path_str)?;
         self.backend.channel_snapshot(id)
     }
@@ -99,6 +212,18 @@ impl Orchestrator {
         self.backend.channel_snapshot(id)
     }
 
+    pub fn set_encode_preset(&self, id: u32, preset_id: &str) -> Result<ChannelSnapshot> {
+        let preset = self
+            .presets
+            .lock()
+            .get(preset_id)
+            .cloned()
+            .with_context(|| format!("encode preset `{preset_id}` not found"))?;
+        self.backend
+            .apply_encode_preset(id, preset_id, &preset)?;
+        self.backend.channel_snapshot(id)
+    }
+
     pub fn list_playout(&self) -> Vec<PlayoutSnapshot> {
         let mut live = self.backend.list_playout();
         for c in &self.cfg.playout {
@@ -117,14 +242,23 @@ impl Orchestrator {
         live
     }
 
-    pub fn start_playout(&self, client_id: &str, source: String) -> Result<PlayoutSnapshot> {
+    pub fn start_playout(
+        &self,
+        client_id: &str,
+        source: String,
+        format_code: Option<String>,
+    ) -> Result<PlayoutSnapshot> {
         let client = self
             .cfg
             .playout
             .iter()
             .find(|c| c.id == client_id)
             .with_context(|| format!("playout client {client_id} not in config"))?;
-        self.backend.start_playout(client, &source)?;
+        let mut client = client.clone();
+        if let Some(fc) = format_code.filter(|s| !s.trim().is_empty()) {
+            client.format_code = Some(fc);
+        }
+        self.backend.start_playout(&client, &source)?;
         self.list_playout()
             .into_iter()
             .find(|p| p.id == client_id)

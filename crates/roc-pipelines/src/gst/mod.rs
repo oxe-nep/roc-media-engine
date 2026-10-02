@@ -1,5 +1,6 @@
 //! GStreamer-backed pipelines (in-process, no FFmpeg child processes).
 
+mod bitrate;
 mod capture;
 mod probe;
 
@@ -82,6 +83,24 @@ impl PipelineBackend for GstBackend {
             p.update_config(ch, preset);
         }
         Ok(())
+    }
+
+    fn apply_encode_preset(
+        &self,
+        channel_id: u32,
+        preset_id: &str,
+        preset: &EncodePreset,
+    ) -> Result<()> {
+        let _gst = self.gst_op.lock();
+        self.presets.lock().insert(channel_id, preset.clone());
+        if let Some(ch) = self.configs.lock().get_mut(&channel_id) {
+            ch.encode_preset = Some(preset_id.to_string());
+        }
+        let mut map = self.channels.lock();
+        let pipe = map
+            .get_mut(&channel_id)
+            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+        pipe.apply_encode_preset(preset_id, preset)
     }
 
     fn start_capture(&self, channel_id: u32) -> Result<()> {
