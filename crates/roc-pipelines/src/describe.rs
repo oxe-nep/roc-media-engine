@@ -23,12 +23,53 @@ pub struct PlayoutLaunchOpts {
     pub format_code: String,
 }
 
+/// Map `"DeckLink IP 100G (1)"` / `"1"` / `"0"` → DeckLink `device-number` (0-based).
+pub fn decklink_device_number(device: &str) -> u32 {
+    let s = device.trim();
+    if let Ok(n) = s.parse::<u32>() {
+        // Treat bare 1..=8 as display index; 0 stays 0.
+        return if (1..=32).contains(&n) { n - 1 } else { n };
+    }
+    if let Some(start) = s.rfind('(') {
+        if let Some(end) = s.rfind(')') {
+            if end > start + 1 {
+                if let Ok(n) = s[start + 1..end].parse::<u32>() {
+                    if n >= 1 {
+                        return n - 1;
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+fn decklink_src(device: &str) -> String {
+    format!("decklinkvideosrc device-number={}", decklink_device_number(device))
+}
+
+fn decklink_video_sink(device: &str, mode: &str) -> String {
+    format!(
+        "decklinkvideosink device-number={} mode={}",
+        decklink_device_number(device),
+        mode
+    )
+}
+
+fn decklink_audio_sink(device: &str) -> String {
+    format!(
+        "decklinkaudiosink device-number={}",
+        decklink_device_number(device)
+    )
+}
+
 /// Spike: DeckLink → deinterlace → NVENC → optional tee → file (+ preview).
 pub fn build_spike_tee_launch(device: &str, output_mp4: &str, with_preview: bool) -> String {
+    let src = decklink_src(device);
     let enc = "nvh264enc preset=low-latency-hq bitrate=12000 gop-size=50 ! h264parse config-interval=-1";
     if with_preview {
         format!(
-            "decklinkvideosrc device-name=\"{device}\" ! \
+            "{src} ! \
              deinterlace ! videoconvert ! video/x-raw,format=NV12 ! \
              tee name=t \
              t. ! queue ! {enc} ! mp4mux fragment-duration=1000 ! filesink location=\"{output_mp4}\" \
@@ -38,7 +79,7 @@ pub fn build_spike_tee_launch(device: &str, output_mp4: &str, with_preview: bool
         )
     } else {
         format!(
-            "decklinkvideosrc device-name=\"{device}\" ! \
+            "{src} ! \
              deinterlace ! videoconvert ! video/x-raw,format=NV12 ! \
              {enc} ! mp4mux fragment-duration=1000 ! filesink location=\"{output_mp4}\""
         )
@@ -54,6 +95,7 @@ pub fn build_capture_launch(opts: &CaptureLaunchOpts) -> String {
     let enc = format!(
         "nvh264enc preset={preset} bitrate={bitrate_kbit} gop-size={gop} ! h264parse config-interval=-1"
     );
+    let src = decklink_src(&opts.device);
 
     let mut branches = Vec::new();
 
@@ -64,19 +106,15 @@ pub fn build_capture_launch(opts: &CaptureLaunchOpts) -> String {
     }
 
     if let Some(url) = &opts.srt_url {
-        // Re-use same encoded pattern: separate encode branch for SRT if no shared encoded tee yet.
-        // Production path: encode once, tee Annex-B into mpegtsmux → srtsink.
         branches.push(format!(
             "t. ! queue name=q_srt ! {enc} ! mpegtsmux alignment=7 ! srtsink uri=\"{url}\" wait-for-connection=false"
         ));
     }
 
-    if let Some(udp) = &opts.udp_egress {
-        let _ = udp;
-        branches.push(
+    if opts.udp_egress.is_some() {
+        branches.push(format!(
             "t. ! queue name=q_udp ! {enc} ! mpegtsmux alignment=7 ! udpsink host=239.255.28.1 port=21001 sync=false async=false"
-                .replace("{enc}", &enc),
-        );
+        ));
     }
 
     if opts.with_tee_preview || opts.preview_path.is_some() {
@@ -91,15 +129,13 @@ pub fn build_capture_launch(opts: &CaptureLaunchOpts) -> String {
         ));
     }
 
-    // Always keep a fakesink branch so tee has at least one consumer when idle.
     branches.push("t. ! queue name=q_idle leaky=downstream ! fakesink sync=false".into());
 
     format!(
-        "decklinkvideosrc device-name=\"{device}\" ! \
+        "{src} ! \
          deinterlace mode=auto ! videoconvert ! video/x-raw,format=NV12 ! \
          tee name=t \
          {branches}",
-        device = opts.device,
         branches = branches.join(" ")
     )
 }
@@ -111,6 +147,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         .unwrap_or(12_000);
     let gop = opts.preset.video_gop;
     let preset = &opts.preset.video_preset;
+    let src = decklink_src(&opts.device);
 
     let mut out_branches = Vec::new();
     if let Some(path) = &opts.record_path {
@@ -124,7 +161,6 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         ));
     }
     if opts.udp_egress.is_some() {
-        // Caller should set host/port from config; placeholder uses channel-style defaults.
         out_branches.push(
             "e. ! queue ! h264parse ! mpegtsmux alignment=7 ! udpsink host=239.255.28.1 port=21001 sync=false async=false"
                 .into(),
@@ -147,14 +183,13 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
     };
 
     format!(
-        "decklinkvideosrc device-name=\"{device}\" ! \
+        "{src} ! \
          deinterlace mode=auto ! videoconvert ! video/x-raw,format=NV12 ! \
          tee name=t \
          t. ! queue ! nvh264enc preset={preset} bitrate={bitrate_kbit} gop-size={gop} ! \
          tee name=e \
          {out_branches} \
          {preview}",
-        device = opts.device,
         out_branches = out_branches.join(" "),
     )
 }
@@ -163,26 +198,43 @@ pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
     let src = if opts.source.starts_with("srt://") {
         format!("srtsrc uri=\"{}\" ! tsdemux name=d", opts.source)
     } else if opts.source.ends_with(".ts") {
-        format!(
-            "filesrc location=\"{}\" ! tsdemux name=d",
-            opts.source
-        )
+        format!("filesrc location=\"{}\" ! tsdemux name=d", opts.source)
     } else {
-        format!(
-            "filesrc location=\"{}\" ! qtdemux name=d",
-            opts.source
-        )
+        format!("filesrc location=\"{}\" ! qtdemux name=d", opts.source)
+    };
+
+    // GST mode enums use names like 1080p50, not BMD Hp50 — map common codes.
+    let mode = match opts.format_code.as_str() {
+        "Hp50" | "hp50" => "1080p50",
+        "Hi50" | "hi50" => "1080i50",
+        "Hp25" | "hp25" => "1080p25",
+        "Hp59.94" | "Hp5994" => "1080p5994",
+        "Hi59.94" | "Hi5994" => "1080i5994",
+        other => other,
     };
 
     format!(
         "{src} \
          d. ! queue ! h264parse ! avdec_h264 ! videoconvert ! \
          video/x-raw,format=v210 ! \
-         decklinkvideosink device-name=\"{device}\" mode={mode} \
+         {vsink} \
          d. ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! \
          audio/x-raw,format=S16LE,channels=2 ! \
-         decklinkaudiosink device-name=\"{device}\"",
-        device = opts.device,
-        mode = opts.format_code,
+         {asink}",
+        vsink = decklink_video_sink(&opts.device, mode),
+        asink = decklink_audio_sink(&opts.device),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_display_name() {
+        assert_eq!(decklink_device_number("DeckLink IP 100G (1)"), 0);
+        assert_eq!(decklink_device_number("DeckLink IP 100G (8)"), 7);
+        assert_eq!(decklink_device_number("3"), 2);
+        assert_eq!(decklink_device_number("0"), 0);
+    }
 }
