@@ -1,0 +1,24 @@
+[package]
+name = "roc-pipelines"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GStreamer (and mock) pipeline builders for capture/REC/SRT/playout"
+
+[features]
+default = []
+gst = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+
+[dependencies]
+anyhow.workspace = true
+parking_lot.workspace = true
+roc-config.workspace = true
+roc-devices.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+gstreamer = { workspace = true, optional = true }
+gstreamer-app = { workspace = true, optional = true }
+gstreamer-video = { workspace = true, optional = true }

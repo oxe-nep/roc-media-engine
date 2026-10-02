@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/roc-config",
+    "crates/roc-devices",
+    "crates/roc-pipelines",
+    "crates/roc-engine",
+    "spikes/decklink_nvenc",
+    "spikes/list_devices",
+]
+default-members = [
+    "crates/roc-config",
+    "crates/roc-devices",
+    "crates/roc-pipelines",
+    "crates/roc-engine",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["ROC"]
+
+[workspace.dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Enable via crate features (`gst`). Not optional at workspace level (Cargo rule).
+gstreamer = "0.23"
+gstreamer-app = "0.23"
+gstreamer-video = "0.23"
+
+roc-config = { path = "crates/roc-config" }
+roc-devices = { path = "crates/roc-devices" }
+roc-pipelines = { path = "crates/roc-pipelines" }

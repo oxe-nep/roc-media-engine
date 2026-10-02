@@ -1,0 +1,22 @@
+[Unit]
+Description=ROC media engine (GStreamer in-process)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=roc
+Group=roc
+WorkingDirectory=/opt/roc-media-engine
+EnvironmentFile=-/etc/roc-media-engine.env
+ExecStart=/opt/roc-media-engine/roc-media-engine --config /etc/roc-media-engine/config.yaml
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+# Single process owns all pipelines — kill the cgroup on stop.
+KillMode=control-group
+TimeoutStopSec=30
+SendSIGKILL=yes
+
+[Install]
+WantedBy=multi-user.target

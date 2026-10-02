@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+.cargo-cache
+config.yaml
+recordings/
+preview/
+.idea/
+.vscode/
+*.mp4
+*.ts

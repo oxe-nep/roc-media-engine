@@ -1,0 +1,24 @@
+[package]
+name = "spike-list-devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fas 0 spike: list DeckLink / encoder elements via GStreamer"
+
+[[bin]]
+name = "spike-list-devices"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+roc-pipelines = { path = "../../crates/roc-pipelines", default-features = false }
+roc-devices = { path = "../../crates/roc-devices" }
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+gstreamer = { workspace = true, optional = true }
+
+[features]
+default = []
+gst = ["roc-pipelines/gst", "dep:gstreamer"]

@@ -1,0 +1,24 @@
+[package]
+name = "spike-decklink-nvenc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fas 0 spike: DeckLink → NVENC → file/tee"
+
+[[bin]]
+name = "spike-decklink-nvenc"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+roc-config.workspace = true
+roc-devices.workspace = true
+roc-pipelines = { path = "../../crates/roc-pipelines", default-features = false }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+gstreamer = { workspace = true, optional = true }
+
+[features]
+default = []
+gst = ["roc-pipelines/gst", "dep:gstreamer"]

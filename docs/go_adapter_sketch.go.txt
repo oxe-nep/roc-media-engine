@@ -1,0 +1,21 @@
+# Go adapter sketch for roc-recording (copy ideas into backend/internal/mediaengine).
+# Not compiled here — lives in the greenfield repo as reference for Fas 5.
+
+package mediaengine
+
+/*
+Client talks to roc-media-engine over HTTP.
+
+    base := os.Getenv("MEDIA_ENGINE_URL") // http://127.0.0.1:8090
+    POST {base}/api/channels/{id}/start
+    GET  {base}/api/channels
+
+Feature flag per channel (runtime-state or env MEDIA_ENGINE_CHANNELS=1,2):
+
+    if mediaengine.Enabled(channelID) {
+        return mediaengine.StartCapture(ctx, channelID)
+    }
+    return legacyCapture.Start(channelID)
+
+Dashboard WS should tag snapshots with Backend: "media_engine" | "ffmpeg".
+*/
