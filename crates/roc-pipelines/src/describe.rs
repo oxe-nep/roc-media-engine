@@ -447,42 +447,34 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
     // mpegtsmux races A/V and emits a poison first PMT that MediaMTX locks on.
     // Docs: https://gstreamer.freedesktop.org/documentation/mpegtsmux/mpegtsmux.html
     // (alignment=7 for UDP/SRT packetization; no property waits for both pads).
+    //
+    // Always expose `appsink srt_in` on the TS tee when UDP (or SRT-only) is
+    // configured. Rust arms appsrc→srtsink on start_srt / tears it down on
+    // stop_srt — no capture relaunch, so REC on tee `e` keeps running.
     let bs = family.byte_stream_caps();
     let has_udp = opts.udp_egress.is_some();
-    let has_srt = opts.srt_url.is_some();
-    match (&opts.udp_egress, &opts.srt_url) {
-        (Some(udp), Some(_srt)) => {
+    let has_ts_egress = has_udp || opts.srt_url.is_some();
+    let srt_appsink = "queue name=q_srt max-size-buffers=8 max-size-time=0 max-size-bytes=0 \
+         leaky=downstream ! \
+         appsink name=srt_in emit-signals=true sync=false async=false \
+         max-buffers=8 drop=true";
+    match &opts.udp_egress {
+        Some(udp) => {
             let (host, port) = udp_host_port(udp);
-            // SRT URI is applied in Rust (appsink → appsrc → srtsink gate).
             out_branches.push(format!(
                 "e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
                  mpegtsmux name=tsmux alignment=7 ! tee name=ts_out allow-not-linked=true \
                  ts_out. ! queue ! udpsink host={host} port={port} sync=false async=false \
-                 ts_out. ! queue name=q_srt max-size-buffers=8 max-size-time=0 max-size-bytes=0 \
-                 leaky=downstream ! \
-                 appsink name=srt_in emit-signals=true sync=false async=false \
-                 max-buffers=8 drop=true"
+                 ts_out. ! {srt_appsink}"
             ));
         }
-        (Some(udp), None) => {
-            let (host, port) = udp_host_port(udp);
+        None if opts.srt_url.is_some() => {
             out_branches.push(format!(
                 "e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
-                 mpegtsmux name=tsmux alignment=7 ! \
-                 udpsink host={host} port={port} sync=false async=false"
+                 mpegtsmux name=tsmux alignment=7 ! {srt_appsink}"
             ));
         }
-        (None, Some(_srt)) => {
-            out_branches.push(format!(
-                "e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
-                 mpegtsmux name=tsmux alignment=7 ! \
-                 queue name=q_srt max-size-buffers=8 max-size-time=0 max-size-bytes=0 \
-                 leaky=downstream ! \
-                 appsink name=srt_in emit-signals=true sync=false async=false \
-                 max-buffers=8 drop=true"
-            ));
-        }
-        (None, None) => {}
+        None => {}
     }
     out_branches.push("e. ! queue leaky=downstream ! fakesink sync=false".into());
 
@@ -493,7 +485,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
     };
     let feed_listen = pairs >= 4 && preview_gen.is_some() && has_udp;
     let mut aac_parts = Vec::new();
-    if has_udp || has_srt {
+    if has_ts_egress {
         // One program AAC into the single tsmux (Hydra: MediaLane::Program).
         aac_parts.push(mpegts_program_aac(
             "prog",
@@ -713,6 +705,34 @@ mod tests {
         assert!(with_listen.matches("voaacenc").count() >= 4);
         assert!(with_listen.contains("hls_l0.audio"));
         assert!(with_listen.contains("prog_aac0"));
+        assert!(with_listen.contains("appsink name=srt_in"));
+        // UDP-only graphs still expose srt_in so SRT can hot-attach without relaunch.
+        let udp_only = build_capture_encode_once_launch(&CaptureLaunchOpts {
+            device: "DeckLink IP 100G (1)".into(),
+            mode: "auto".into(),
+            preset: {
+                let mut p = EncodePreset {
+                    label: "HQ".into(),
+                    video_codec: "nvh264enc".into(),
+                    video_bitrate: "12M".into(),
+                    video_maxrate: None,
+                    video_bufsize: None,
+                    video_preset: "low-latency-hq".into(),
+                    video_gop: 50,
+                    audio_bitrate: "192k".into(),
+                    audio_channels: 2,
+                };
+                p.normalize_for_gst();
+                p
+            },
+            preview_path: None,
+            record_path: None,
+            srt_url: None,
+            udp_egress: Some("udp://239.255.28.1:21001".into()),
+            with_tee_preview: false,
+        });
+        assert!(udp_only.contains("appsink name=srt_in"), "{udp_only}");
+        assert!(udp_only.contains("tee name=ts_out"), "{udp_only}");
     }
 
     #[test]

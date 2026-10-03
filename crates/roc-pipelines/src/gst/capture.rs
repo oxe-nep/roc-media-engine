@@ -1,8 +1,9 @@
 //! Per-channel GStreamer capture graph.
 //!
-//! REC attaches as a dynamic branch on the encoded tee. SRT relaunches the
-//! graph so one `mpegtsmux` is teed to UDP + a gated appsink→appsrc→srtsink
-//! path (Hydra-style opaque TS; MediaMTX locks the first PMT).
+//! REC attaches as a dynamic branch on the encoded tee `e` and is independent
+//! of SRT. Program MPEG-TS is muxed once (Hydra-style) to `ts_out` → UDP +
+//! `appsink srt_in`. SRT start/stop only arms/disarms appsrc→srtsink on that
+//! appsink — no capture relaunch, so an active REC is never torn down.
 
 use anyhow::{anyhow, bail, Context, Result};
 use gstreamer::prelude::*;
@@ -245,6 +246,38 @@ fn arm_srt_appsink_gate(
 
     tracing::info!(channel, %srt_uri, "SRT appsink↔appsrc gate armed");
     Ok(())
+}
+
+/// Drop appsrc→srtsink and clear appsink callbacks so TS keeps flowing to UDP
+/// while SRT is idle (appsink drops with max-buffers).
+fn disarm_srt_appsink_gate(channel: u32, pipeline: &gstreamer::Pipeline) {
+    use gstreamer::prelude::*;
+    use gstreamer_app::{AppSink, AppSinkCallbacks};
+
+    for name in [
+        format!("srt_sink_{channel}"),
+        format!("srt_out_{channel}"),
+    ] {
+        if let Some(el) = pipeline.by_name(&name) {
+            let _ = el.set_state(gstreamer::State::Null);
+            if let Some(pad) = el.static_pad("sink") {
+                if let Some(peer) = pad.peer() {
+                    let _ = peer.unlink(&pad);
+                }
+            }
+            if let Some(pad) = el.static_pad("src") {
+                if let Some(peer) = pad.peer() {
+                    let _ = pad.unlink(&peer);
+                }
+            }
+            let _ = pipeline.remove(&el);
+        }
+    }
+    if let Some(el) = pipeline.by_name("srt_in") {
+        if let Ok(appsink) = el.downcast::<AppSink>() {
+            appsink.set_callbacks(AppSinkCallbacks::builder().build());
+        }
+    }
 }
 
 /// Collect PMT PIDs declared in PAT (PID 0). Avoids false "PMT" matches inside
@@ -922,20 +955,15 @@ impl ChannelPipeline {
             }
         }
         let playlist = format!("{hls_dir}/preview.m3u8");
-        let srt_for_launch = if self.srt {
-            self.srt_url
-                .as_deref()
-                .map(normalize_srt_uri_for_gst)
-        } else {
-            None
-        };
+        // Graph always includes `appsink srt_in` when UDP is configured. SRT
+        // publish is armed separately so REC never needs a relaunch.
         let launch = build_capture_encode_once_launch(&CaptureLaunchOpts {
             device: self.device.clone(),
             mode: locked.to_string(),
             preset: self.preset.clone(),
             preview_path: Some(playlist),
             record_path: None,
-            srt_url: srt_for_launch.clone(),
+            srt_url: None,
             udp_egress: self.udp_egress.clone(),
             with_tee_preview: true,
         });
@@ -945,20 +973,22 @@ impl ChannelPipeline {
             .downcast::<gstreamer::Pipeline>()
             .map_err(|_| anyhow!("capture launch did not yield Pipeline"))?;
 
-        // Arm SRT PMT gate *before* PLAYING so the first mux packets are probed.
+        // Re-arm SRT after preset/adapt relaunch if it was already publishing.
         self.srt_bitrate = None;
-        if let Some(uri) = srt_for_launch.as_deref() {
-            let meter = BitrateMeter::new();
-            if let Err(err) = arm_srt_appsink_gate(self.id, &pipeline, uri, 1) {
-                let _ = pipeline.set_state(gstreamer::State::Null);
-                return Err(err).context(format!("SRT appsink gate ch{}", self.id));
-            }
-            if let Some(src) = pipeline.by_name(&format!("srt_out_{}", self.id)) {
-                if let Some(pad) = src.static_pad("src") {
-                    let _ = meter.attach_probe(&pad);
+        if self.srt {
+            if let Some(uri) = self.srt_url.as_deref().map(normalize_srt_uri_for_gst) {
+                if let Err(err) = arm_srt_appsink_gate(self.id, &pipeline, &uri, 1) {
+                    let _ = pipeline.set_state(gstreamer::State::Null);
+                    return Err(err).context(format!("SRT appsink gate ch{}", self.id));
                 }
+                let meter = BitrateMeter::new();
+                if let Some(src) = pipeline.by_name(&format!("srt_out_{}", self.id)) {
+                    if let Some(pad) = src.static_pad("src") {
+                        let _ = meter.attach_probe(&pad);
+                    }
+                }
+                self.srt_bitrate = Some(meter);
             }
-            self.srt_bitrate = Some(meter);
         }
 
         if let Err(err) = pipeline.set_state(gstreamer::State::Playing) {
@@ -1019,40 +1049,50 @@ impl ChannelPipeline {
     }
 
     pub fn start_srt(&mut self, url: &str) -> Result<()> {
-        if self.pipeline.is_none() {
-            bail!("capture not running");
+        let pipeline = self
+            .pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow!("capture not running"))?
+            .clone();
+        if pipeline.by_name("srt_in").is_none() {
+            bail!("SRT appsink missing — channel has no MPEG-TS egress");
         }
-        if self.recording {
-            bail!("stop recording before starting SRT");
-        }
-        let prev_srt = self.srt;
-        let prev_url = self.srt_url.clone();
+        let gst_url = normalize_srt_uri_for_gst(url);
         self.srt_url = Some(url.to_string());
+        if self.srt {
+            if let Some(sink) = pipeline.by_name(&format!("srt_sink_{}", self.id)) {
+                sink.set_property("uri", &gst_url);
+                tracing::info!(channel = self.id, %gst_url, "updated SRT sink URI");
+            }
+            return Ok(());
+        }
+        // Hot-attach publish path only — REC / UDP / preview keep running.
+        disarm_srt_appsink_gate(self.id, &pipeline);
+        arm_srt_appsink_gate(self.id, &pipeline, &gst_url, 1)
+            .context("SRT appsink gate")?;
+        let meter = BitrateMeter::new();
+        if let Some(src) = pipeline.by_name(&format!("srt_out_{}", self.id)) {
+            if let Some(pad) = src.static_pad("src") {
+                let _ = meter.attach_probe(&pad);
+            }
+        }
+        self.srt_bitrate = Some(meter);
         self.srt = true;
-        let mode = self.relaunch_mode();
-        // Relaunch with SRT in the encode-once graph so mpegtsmux sees A+V from t=0.
-        self.relaunch_or_recover(&mode, |slf| {
-            slf.srt = prev_srt;
-            slf.srt_url = prev_url;
-            slf.srt_bitrate = None;
-        })
+        tracing::info!(channel = self.id, %url, gst_uri = %gst_url, "SRT publish attached (no relaunch)");
+        Ok(())
     }
 
     pub fn stop_srt(&mut self) -> Result<()> {
         if !self.srt {
             return Ok(());
         }
-        if self.recording {
-            bail!("stop recording before stopping SRT");
+        if let Some(pipeline) = self.pipeline.as_ref() {
+            disarm_srt_appsink_gate(self.id, pipeline);
         }
-        let prev_url = self.srt_url.clone();
         self.srt = false;
         self.srt_bitrate = None;
-        let mode = self.relaunch_mode();
-        self.relaunch_or_recover(&mode, |slf| {
-            slf.srt = true;
-            slf.srt_url = prev_url;
-        })
+        tracing::info!(channel = self.id, "SRT publish detached (REC undisturbed)");
+        Ok(())
     }
 
     fn encoded_tee(&self) -> Result<gstreamer::Element> {
