@@ -85,6 +85,19 @@ fn arm_av_gate_on_keyframe(video_identity: &gstreamer::Element, gate: std::sync:
 /// 2. Drop mux-src until A/V is ready, then open egress (never hold forever —
 ///    a stuck drop backpressures the encode tee and crackles UDP/preview).
 /// 3. Prefer joint A/V input valves; fall back to PMT parse on mux-src.
+/// Replace probe payload while preserving Buffer vs BufferList type.
+/// gstreamer-rs asserts the returned data type matches the probe invocation.
+fn replace_probe_ts(info: &mut gstreamer::PadProbeInfo, bytes: Vec<u8>) {
+    let buf = gstreamer::Buffer::from_mut_slice(bytes);
+    if info.buffer_list().is_some() {
+        let mut list = gstreamer::BufferList::new_sized(1);
+        list.add(buf);
+        info.data = Some(gstreamer::PadProbeData::BufferList(list));
+    } else {
+        info.data = Some(gstreamer::PadProbeData::Buffer(buf));
+    }
+}
+
 fn arm_srt_valve_on_full_pmt(
     channel: u32,
     out_valve: &gstreamer::Element,
@@ -249,24 +262,19 @@ fn arm_srt_valve_on_full_pmt(
                 w.clone()
             };
 
-            // After open: re-attach bytes; strip poison PMT prefixes if present.
+            // After open: strip poison PMT prefixes if present; else pass through.
             if opened.load(Ordering::SeqCst) {
-                let out = if !first_pmt_is_full_av(&chunk, min_audio_es)
+                if !first_pmt_is_full_av(&chunk, min_audio_es)
                     && chunk_has_incomplete_pmt(&chunk, min_audio_es)
                 {
                     if let Some(trimmed) = trim_ts_to_first_av_pmt(&chunk, min_audio_es) {
                         tracing::warn!(channel, "SRT trimmed poison PMT prefix after open");
-                        trimmed
-                    } else {
-                        tracing::warn!(channel, "SRT dropping poison PMT chunk after valve open");
-                        return PadProbeReturn::Drop;
+                        replace_probe_ts(info, trimmed);
+                        return PadProbeReturn::Ok;
                     }
-                } else {
-                    chunk
-                };
-                info.data = Some(gstreamer::PadProbeData::Buffer(
-                    gstreamer::Buffer::from_mut_slice(out),
-                ));
+                    tracing::warn!(channel, "SRT dropping poison PMT chunk after valve open");
+                    return PadProbeReturn::Drop;
+                }
                 return PadProbeReturn::Ok;
             }
 
@@ -288,9 +296,7 @@ fn arm_srt_valve_on_full_pmt(
                             window_bytes = window_bytes.len(),
                             "SRT open emitting PAT + first A/V PMT"
                         );
-                        info.data = Some(gstreamer::PadProbeData::Buffer(
-                            gstreamer::Buffer::from_mut_slice(emit),
-                        ));
+                        replace_probe_ts(info, emit);
                         return PadProbeReturn::Ok;
                     }
                 }
@@ -304,9 +310,7 @@ fn arm_srt_valve_on_full_pmt(
                         if let Ok(mut w) = window.lock() {
                             w.clear();
                         }
-                        info.data = Some(gstreamer::PadProbeData::Buffer(
-                            gstreamer::Buffer::from_mut_slice(emit),
-                        ));
+                        replace_probe_ts(info, emit);
                         return PadProbeReturn::Ok;
                     }
                 }
