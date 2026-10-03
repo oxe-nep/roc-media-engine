@@ -354,9 +354,12 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         // attaching AAC later makes mpegtsmux emit an incomplete first PMT —
         // MediaMTX then reports "undeclared track" and WebRTC gets no Opus.
         out_branches.push(format!(
-            "e. ! queue name=q_srt_v ! {parse} config-interval=-1 ! {bs} ! \
+            "e. ! queue name=q_srt_v max-size-buffers=30 leaky=downstream ! \
+             {parse} config-interval=-1 ! {bs} ! \
              mpegtsmux name=srtmux alignment=7 ! \
+             queue max-size-buffers=30 leaky=downstream ! \
              srtsink uri=\"{url}\" wait-for-connection=false auto-reconnect=true \
+             async=false sync=false \
              a. ! queue max-size-buffers=64 leaky=downstream ! \
              audioconvert mix-matrix=\"{matrix}\" ! audio/x-raw,channels=2 ! \
              voaacenc bitrate={aac_bps} ! aacparse ! \
