@@ -46,6 +46,9 @@ pub struct ChannelSnapshot {
     /// Peak levels in dBFS for up to 8 discrete channels (−90 = silence).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_peaks: Option<Vec<f64>>,
+    /// Bumps on each capture graph launch so the UI remounts HLS after relaunch.
+    #[serde(default)]
+    pub preview_epoch: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

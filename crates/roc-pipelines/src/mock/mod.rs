@@ -234,6 +234,7 @@ impl PipelineBackend for MockBackend {
             locked_mode: Some("mock".into()),
             input_format: Some("1920x1080p50/1 (mock)".into()),
             audio_peaks: Some(vec![-90.0; 8]),
+            preview_epoch: 0,
         })
     }
 
@@ -268,6 +269,7 @@ impl PipelineBackend for MockBackend {
                     locked_mode: Some("mock".into()),
                     input_format: Some("1920x1080p50/1 (mock)".into()),
                     audio_peaks: Some(vec![-90.0; 8]),
+                    preview_epoch: 0,
                 })
             })
             .collect()

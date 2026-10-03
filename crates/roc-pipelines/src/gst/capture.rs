@@ -686,6 +686,8 @@ pub struct ChannelPipeline {
     encode_bitrate: BitrateMeter,
     /// Live SRT MPEG-TS rate (appsrc → srtsink), only while SRT is enabled.
     srt_bitrate: Option<BitrateMeter>,
+    /// Incremented on each successful `launch_locked` (SRT/preset/adapt relaunch).
+    preview_epoch: u64,
 }
 
 struct Branch {
@@ -737,7 +739,36 @@ impl ChannelPipeline {
             audio_peaks: [-90.0; 8],
             encode_bitrate: BitrateMeter::new(),
             srt_bitrate: None,
+            preview_epoch: 0,
         })
+    }
+
+    fn relaunch_mode(&self) -> String {
+        if self.locked_mode.is_empty() {
+            self.configured_mode.clone()
+        } else {
+            self.locked_mode.clone()
+        }
+    }
+
+    /// Relaunch capture; on failure leave flags as-is and try to bring the graph back.
+    fn relaunch_or_recover(&mut self, mode: &str, rollback: impl FnOnce(&mut Self)) -> Result<()> {
+        match self.relaunch_preserving_branches(mode) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                rollback(self);
+                if self.pipeline.is_none() {
+                    if let Err(recov) = self.relaunch_preserving_branches(mode) {
+                        tracing::error!(
+                            channel = self.id,
+                            error = %recov,
+                            "failed to recover capture after relaunch error"
+                        );
+                    }
+                }
+                Err(err)
+            }
+        }
     }
 
     pub fn update_config(&mut self, ch: &ChannelConfig, preset: &EncodePreset) {
@@ -811,14 +842,27 @@ impl ChannelPipeline {
         } else {
             self.locked_mode.clone()
         };
-        self.launch_locked(&launch_mode)?;
-
-        if was_rec {
-            if let Some(path) = rec_path {
-                let _ = self.start_recording(&path);
+        match self.launch_locked(&launch_mode) {
+            Ok(()) => {
+                if was_rec {
+                    if let Some(path) = rec_path {
+                        if let Err(err) = self.start_recording(&path) {
+                            tracing::error!(
+                                channel = self.id,
+                                error = %err,
+                                "failed to re-attach recording after relaunch"
+                            );
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Err(err) => {
+                self.status = ChannelStatus::Error;
+                self.last_error = Some(err.to_string());
+                Err(err)
             }
         }
-        Ok(())
     }
 
     pub fn start(&mut self) -> Result<()> {
@@ -906,8 +950,10 @@ impl ChannelPipeline {
         if let Some(uri) = srt_for_launch.as_deref() {
             let meter = BitrateMeter::new();
             if let Err(err) = arm_srt_appsink_gate(self.id, &pipeline, uri, 1) {
-                tracing::error!(channel = self.id, error = %err, "SRT appsink gate failed");
-            } else if let Some(src) = pipeline.by_name(&format!("srt_out_{}", self.id)) {
+                let _ = pipeline.set_state(gstreamer::State::Null);
+                return Err(err).context(format!("SRT appsink gate ch{}", self.id));
+            }
+            if let Some(src) = pipeline.by_name(&format!("srt_out_{}", self.id)) {
                 if let Some(pad) = src.static_pad("src") {
                     let _ = meter.attach_probe(&pad);
                 }
@@ -915,9 +961,10 @@ impl ChannelPipeline {
             self.srt_bitrate = Some(meter);
         }
 
-        pipeline
-            .set_state(gstreamer::State::Playing)
-            .context("capture set PLAYING")?;
+        if let Err(err) = pipeline.set_state(gstreamer::State::Playing) {
+            let _ = pipeline.set_state(gstreamer::State::Null);
+            return Err(err).context("capture set PLAYING");
+        }
         // Live encode bitrate: count buffers into encoded tee `e`.
         self.encode_bitrate.reset();
         if let Some(tee) = pipeline.by_name("e") {
@@ -925,6 +972,7 @@ impl ChannelPipeline {
                 let _ = self.encode_bitrate.attach_probe(&sink);
             }
         }
+        self.preview_epoch = self.preview_epoch.wrapping_add(1);
         self.pipeline = Some(pipeline);
         self.status = ChannelStatus::Waiting;
         self.last_error = None;
@@ -974,31 +1022,37 @@ impl ChannelPipeline {
         if self.pipeline.is_none() {
             bail!("capture not running");
         }
+        if self.recording {
+            bail!("stop recording before starting SRT");
+        }
+        let prev_srt = self.srt;
+        let prev_url = self.srt_url.clone();
         self.srt_url = Some(url.to_string());
         self.srt = true;
-        let mode = if self.locked_mode.is_empty() {
-            self.configured_mode.clone()
-        } else {
-            self.locked_mode.clone()
-        };
+        let mode = self.relaunch_mode();
         // Relaunch with SRT in the encode-once graph so mpegtsmux sees A+V from t=0.
-        self.relaunch_preserving_branches(&mode)?;
-        Ok(())
+        self.relaunch_or_recover(&mode, |slf| {
+            slf.srt = prev_srt;
+            slf.srt_url = prev_url;
+            slf.srt_bitrate = None;
+        })
     }
 
     pub fn stop_srt(&mut self) -> Result<()> {
         if !self.srt {
             return Ok(());
         }
+        if self.recording {
+            bail!("stop recording before stopping SRT");
+        }
+        let prev_url = self.srt_url.clone();
         self.srt = false;
         self.srt_bitrate = None;
-        let mode = if self.locked_mode.is_empty() {
-            self.configured_mode.clone()
-        } else {
-            self.locked_mode.clone()
-        };
-        self.relaunch_preserving_branches(&mode)?;
-        Ok(())
+        let mode = self.relaunch_mode();
+        self.relaunch_or_recover(&mode, |slf| {
+            slf.srt = true;
+            slf.srt_url = prev_url;
+        })
     }
 
     fn encoded_tee(&self) -> Result<gstreamer::Element> {
@@ -1447,6 +1501,7 @@ impl ChannelPipeline {
             },
             input_format: self.detected.as_ref().map(|f| f.summary()),
             audio_peaks: Some(self.audio_peaks.to_vec()),
+            preview_epoch: self.preview_epoch,
         }
     }
 }

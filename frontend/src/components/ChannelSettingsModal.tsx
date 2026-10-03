@@ -249,6 +249,10 @@ export default function ChannelSettingsModal({
   };
 
   const toggleSrt = async () => {
+    if (recording?.status === "recording") {
+      setError("Stop recording before toggling SRT");
+      return;
+    }
     setSrtBusy(true);
     setError(null);
     try {
@@ -551,8 +555,18 @@ export default function ChannelSettingsModal({
               type="button"
               className={`global-rec-btn ${srtStreaming ? "recording" : ""}`}
               onClick={toggleSrt}
-              disabled={srtBusy || (!isRunning && !srtStreaming)}
-              title={!isRunning && !srtStreaming ? "Start channel first" : undefined}
+              disabled={
+                srtBusy ||
+                recording?.status === "recording" ||
+                (!isRunning && !srtStreaming)
+              }
+              title={
+                recording?.status === "recording"
+                  ? "Stop recording before toggling SRT"
+                  : !isRunning && !srtStreaming
+                    ? "Start channel first"
+                    : undefined
+              }
             >
               {srtBusy ? "…" : srtStreaming ? "Stop" : "Start"}
             </button>

@@ -159,6 +159,7 @@ export default function StreamGrid() {
                     active={captureOn}
                     listenPair={isListeningPair}
                     playlistPath={`/hls/${s.id}/preview.m3u8`}
+                    sessionKey={s.preview_epoch ?? 0}
                   />
                   {rec?.schedule && (
                     <div className="thumb-sched" title={`Scheduled ${formatSchedBadge(rec.schedule)}`}>
@@ -265,13 +266,19 @@ export default function StreamGrid() {
                           type="button"
                           className={`stream-btn ${srtOn ? "streaming" : "idle"}`}
                           onClick={() => toggleSrt(s.id)}
-                          disabled={srtBusy[s.id] || (!hasSignal && !srtOn)}
+                          disabled={
+                            srtBusy[s.id] ||
+                            isRecording ||
+                            (!hasSignal && !srtOn)
+                          }
                           title={
-                            srtOn
-                              ? srtById[s.id]?.publish_url || "Stop SRT"
-                              : !hasSignal
-                                ? "No signal"
-                                : "Start SRT"
+                            isRecording
+                              ? "Stop recording before toggling SRT"
+                              : srtOn
+                                ? srtById[s.id]?.publish_url || "Stop SRT"
+                                : !hasSignal
+                                  ? "No signal"
+                                  : "Start SRT"
                           }
                         >
                           {srtBusy[s.id] ? "…" : "STREAM"}

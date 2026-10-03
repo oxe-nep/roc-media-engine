@@ -14,6 +14,8 @@ export interface Stream {
   format?: string;
   encode_preset: string;
   hls_url: string;
+  /** Bumps when capture graph relaunches — remount HLS players. */
+  preview_epoch?: number;
   tsl_index?: number;
   tsl_text?: string;
 }
