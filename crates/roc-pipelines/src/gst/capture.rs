@@ -102,8 +102,18 @@ fn arm_srt_pmt_ready_valve(
                     .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
-                    let _ = valve.set_property("drop", false);
-                    tracing::info!("SRT PMT gate open — A/V both seen before first TS out");
+                    // Pads see buffers *before* mpegtsmux rewrites PMT. Wait so the
+                    // first TS that leaves already carries both elementary streams.
+                    std::thread::spawn({
+                        let valve = valve.clone();
+                        move || {
+                            std::thread::sleep(std::time::Duration::from_millis(300));
+                            let _ = valve.set_property("drop", false);
+                            tracing::info!(
+                                "SRT PMT gate open — A/V both seen (+300ms for mux PMT)"
+                            );
+                        }
+                    });
                 }
             }
         }
