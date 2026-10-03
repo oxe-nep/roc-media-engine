@@ -454,7 +454,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
                 "e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
                  mpegtsmux name=tsmux alignment=7 ! tee name=ts_out allow-not-linked=true \
                  ts_out. ! queue ! udpsink host={host} port={port} sync=false async=false \
-                 ts_out. ! queue name=q_srt ! valve name=srt_valve drop=true ! \
+                 ts_out. ! valve name=srt_valve drop=true ! queue name=q_srt ! \
                  srtsink uri=\"{srt}\" wait-for-connection=false auto-reconnect=true \
                  async=false sync=false"
             ));

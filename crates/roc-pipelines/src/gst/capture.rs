@@ -105,7 +105,6 @@ fn arm_srt_valve_on_full_pmt(
 
     let last_log = Arc::new(AtomicU64::new(0));
     let first_ts = Arc::new(AtomicU64::new(0));
-    let window = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     sink.add_probe(
         PadProbeType::BUFFER | PadProbeType::BUFFER_LIST,
         move |_, info| {
@@ -134,20 +133,11 @@ fn arm_srt_valve_on_full_pmt(
                 .unwrap_or(0);
             let _ = first_ts.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
 
-            let window_bytes = {
-                let mut w = window.lock().unwrap_or_else(|e| e.into_inner());
-                w.extend_from_slice(&chunk);
-                const MAX: usize = 64 * 1024;
-                if w.len() > MAX {
-                    let drain = w.len() - MAX;
-                    w.drain(0..drain);
-                }
-                w.clone()
-            };
-
-            let (ready, types, audio_pid_list) =
-                ts_ready_for_mediamtx(std::slice::from_ref(&window_bytes), min_audio_es);
-            if ready {
+            // Open only on a buffer whose *first* PMT is already full A/V so
+            // MediaMTX never locks on a poison prefix (valve sits before q_srt).
+            if first_pmt_is_full_av(&chunk, min_audio_es) {
+                let (_, types, audio_pid_list) =
+                    ts_ready_for_mediamtx(std::slice::from_ref(&chunk), min_audio_es);
                 if opened
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
@@ -158,7 +148,7 @@ fn arm_srt_valve_on_full_pmt(
                         ?types,
                         ?audio_pid_list,
                         min_audio_es,
-                        why = "clean_pmt",
+                        why = "first_pmt_full_av",
                         "SRT valve open (Hydra tee gate)"
                     );
                 }
@@ -172,6 +162,8 @@ fn arm_srt_valve_on_full_pmt(
                     .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
                     .is_ok()
             {
+                let (_, types, audio_pid_list) =
+                    ts_ready_for_mediamtx(std::slice::from_ref(&chunk), min_audio_es);
                 tracing::warn!(
                     channel,
                     bytes = chunk.len(),
@@ -179,11 +171,9 @@ fn arm_srt_valve_on_full_pmt(
                     min_audio_es,
                     audio = audio_pid_list.len(),
                     waited_s = now.saturating_sub(started),
-                    "SRT waiting for full A/V PMT — valve still dropping"
+                    "SRT waiting for buffer starting with full A/V PMT"
                 );
             }
-            // Valve drop=true discards; do not PadProbeReturn::Drop (that would
-            // also starve the shared tee's other branches if mis-wired).
             PadProbeReturn::Ok
         },
     );
@@ -355,7 +345,6 @@ fn chunk_has_incomplete_pmt(ts: &[u8], min_audio: usize) -> bool {
 }
 
 /// True when the first PMT in wire order is full A/V (what MediaMTX locks on).
-#[allow(dead_code)]
 fn first_pmt_is_full_av(ts: &[u8], min_audio: usize) -> bool {
     pmt_sections(ts)
         .into_iter()
@@ -772,12 +761,9 @@ impl ChannelPipeline {
         self.srt_bitrate = None;
         if srt_for_launch.is_some() {
             let meter = BitrateMeter::new();
+            // Meter after the gate so counts reflect what actually leaves toward SRT.
             if let Some(q) = pipeline.by_name("q_srt") {
                 if let Some(pad) = q.static_pad("src") {
-                    let _ = meter.attach_probe(&pad);
-                }
-            } else if let Some(valve) = pipeline.by_name("srt_valve") {
-                if let Some(pad) = valve.static_pad("sink") {
                     let _ = meter.attach_probe(&pad);
                 }
             }
