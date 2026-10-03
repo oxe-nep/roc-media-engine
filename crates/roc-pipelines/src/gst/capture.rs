@@ -73,9 +73,112 @@ fn arm_av_gate_on_keyframe(video_identity: &gstreamer::Element, gate: std::sync:
     });
 }
 
+/// Open `srt_valve` only after mpegtsmux has emitted a PMT that lists H.264
+/// (stream type 0x1B). Early PMTs are AAC-only; MediaMTX locks that forever.
+fn arm_srt_valve_on_full_pmt(channel: u32, valve: &gstreamer::Element, mux: &gstreamer::Element) {
+    use gstreamer::{PadProbeReturn, PadProbeType};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let Some(src) = mux.static_pad("src") else {
+        tracing::warn!(channel, "srtmux has no src pad — opening valve immediately");
+        let _ = valve.set_property("drop", false);
+        return;
+    };
+    let opened = Arc::new(AtomicBool::new(false));
+    let valve = valve.clone();
+    src.add_probe(PadProbeType::BUFFER, move |_, info| {
+        if opened.load(Ordering::SeqCst) {
+            return PadProbeReturn::Remove;
+        }
+        let Some(buf) = info.buffer() else {
+            return PadProbeReturn::Ok;
+        };
+        let Ok(map) = buf.map_readable() else {
+            return PadProbeReturn::Ok;
+        };
+        let data = map.as_slice();
+        if pmt_lists_h264(data) {
+            if opened
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                let _ = valve.set_property("drop", false);
+                tracing::info!(channel, "SRT valve open — PMT lists H.264 + AAC");
+            }
+            return PadProbeReturn::Remove;
+        }
+        PadProbeReturn::Ok
+    });
+    // Safety: never block SRT forever.
+    std::thread::spawn({
+        let opened = opened.clone();
+        let valve = valve.clone();
+        move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            if opened
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                let _ = valve.set_property("drop", false);
+                tracing::warn!(channel, "SRT valve timeout — opening after 3s");
+            }
+        }
+    });
+}
+
+fn pmt_lists_h264(ts: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 188 <= ts.len() {
+        if ts[i] != 0x47 {
+            i += 1;
+            continue;
+        }
+        let pkt = &ts[i..i + 188];
+        let pid = (((pkt[1] & 0x1f) as u16) << 8) | pkt[2] as u16;
+        // PMT is usually pid 0x20 in our mux; also scan any payload-unit-start.
+        if pkt[1] & 0x40 == 0 {
+            i += 188;
+            continue;
+        }
+        let afc = (pkt[3] >> 4) & 0x3;
+        let mut off = 4usize;
+        if afc == 2 || afc == 3 {
+            off = 5 + pkt[4] as usize;
+        }
+        if off >= 187 {
+            i += 188;
+            continue;
+        }
+        let ptr = pkt[off] as usize;
+        let p = off + 1 + ptr;
+        if p + 12 >= 188 || pkt[p] != 0x02 {
+            i += 188;
+            continue;
+        }
+        let pil = (((pkt[p + 10] & 0x0f) as usize) << 8) | pkt[p + 11] as usize;
+        let mut q = p + 12 + pil;
+        let sl = (((pkt[p + 1] & 0x0f) as usize) << 8) | pkt[p + 2] as usize;
+        let end = (p + 3 + sl).saturating_sub(4).min(188);
+        while q + 5 <= end {
+            let st = pkt[q];
+            let esil = (((pkt[q + 3] & 0x0f) as usize) << 8) | pkt[q + 4] as usize;
+            if st == 0x1b || st == 0x24 {
+                // 0x1B H.264 / 0x24 H.265
+                let _ = pid; // silence unused in some builds
+                return true;
+            }
+            q += 5 + esil;
+        }
+        i += 188;
+    }
+    false
+}
+
 /// Hold MPEG-TS at a `valve` until video (and audio, if present) have each
 /// delivered one buffer into `mpegtsmux`. MediaMTX locks tracks from the first
 /// PMT it sees — emitting PES before both pads are live → "undeclared track".
+#[allow(dead_code)]
 fn arm_srt_pmt_ready_valve(
     valve: &gstreamer::Element,
     video_src: &gstreamer::Pad,
@@ -464,15 +567,10 @@ impl ChannelPipeline {
                 }
             }
             self.srt_bitrate = Some(meter);
-            if let Some(valve) = pipeline.by_name("srt_valve") {
-                let ch = self.id;
-                std::thread::spawn(move || {
-                    // mpegtsmux emits an AAC-only PMT first; wait until H.264 is
-                    // registered so MediaMTX does not lock a video-less track list.
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let _ = valve.set_property("drop", false);
-                    tracing::info!(channel = ch, "SRT valve open — full A/V PMT should be live");
-                });
+            if let (Some(valve), Some(mux)) =
+                (pipeline.by_name("srt_valve"), pipeline.by_name("srtmux"))
+            {
+                arm_srt_valve_on_full_pmt(self.id, &valve, &mux);
             }
             tracing::info!(
                 channel = self.id,
@@ -846,6 +944,7 @@ impl ChannelPipeline {
         }
     }
 
+    #[allow(dead_code)]
     fn attach_srt(&mut self, url: &str) -> Result<()> {
         let pipeline = self
             .pipeline
