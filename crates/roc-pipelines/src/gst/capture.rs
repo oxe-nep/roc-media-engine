@@ -776,34 +776,6 @@ impl ChannelPipeline {
         })
     }
 
-    fn relaunch_mode(&self) -> String {
-        if self.locked_mode.is_empty() {
-            self.configured_mode.clone()
-        } else {
-            self.locked_mode.clone()
-        }
-    }
-
-    /// Relaunch capture; on failure leave flags as-is and try to bring the graph back.
-    fn relaunch_or_recover(&mut self, mode: &str, rollback: impl FnOnce(&mut Self)) -> Result<()> {
-        match self.relaunch_preserving_branches(mode) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                rollback(self);
-                if self.pipeline.is_none() {
-                    if let Err(recov) = self.relaunch_preserving_branches(mode) {
-                        tracing::error!(
-                            channel = self.id,
-                            error = %recov,
-                            "failed to recover capture after relaunch error"
-                        );
-                    }
-                }
-                Err(err)
-            }
-        }
-    }
-
     pub fn update_config(&mut self, ch: &ChannelConfig, preset: &EncodePreset) {
         self.name = ch.name.clone();
         self.device = ch.device.clone();
