@@ -75,32 +75,25 @@ fn arm_av_gate_on_keyframe(video_identity: &gstreamer::Element, gate: std::sync:
     });
 }
 
-/// Gate SRT egress until the shared MPEG-TS program has a full A/V PMT.
+/// Gate SRT egress until a buffer starts with PAT + full A/V PMT.
 ///
-/// HydraSRT (streamband/hydra-srt) tees an opaque program TS to `srtsink` and
-/// never remuxes. We do the same via `tsmux ! tee ! srt_valve`. MediaMTX still
-/// locks tracks on the first PMT it sees, so keep `srt_valve` closed until the
-/// mux has emitted a full H.264+AAC PMT (GStreamer discourse: drop until both
-/// streams have been seen — there is no mpegtsmux property for this).
-///
-/// No buffer rewrite: gstreamer-rs panics if BUFFER_LIST probes return Buffer,
-/// and Hydra only mutates PAT in-place when needed.
+/// HydraSRT tees opaque program TS to `srtsink` (no second remux). MediaMTX
+/// locks on the first PMT, and mpegtsmux has no property to wait for both pads
+/// (see GStreamer discourse + mpegtsmux docs). We drop on `srt_gate` until the
+/// current buffer itself starts with a full A/V PMT.
 fn arm_srt_valve_on_full_pmt(
     channel: u32,
-    out_valve: &gstreamer::Element,
+    gate: &gstreamer::Element,
     min_audio_es: usize,
 ) {
     use gstreamer::{PadProbeReturn, PadProbeType};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
 
-    // Keep valve open — gating is done only via PadProbeReturn::Drop so the
-    // buffer that unlocks us is not discarded by a drop=true→false race.
-    let _ = out_valve.set_property("drop", false);
     let min_audio_es = min_audio_es.max(1);
     let opened = Arc::new(AtomicBool::new(false));
-    let Some(sink) = out_valve.static_pad("sink") else {
-        tracing::warn!(channel, "srt_valve has no sink pad");
+    let Some(sink) = gate.static_pad("sink") else {
+        tracing::warn!(channel, "srt_gate has no sink pad");
         return;
     };
 
@@ -122,6 +115,7 @@ fn arm_srt_valve_on_full_pmt(
                 }
             }
             if chunk.is_empty() {
+                consume_probe_data(info);
                 return PadProbeReturn::Drop;
             }
 
@@ -133,6 +127,7 @@ fn arm_srt_valve_on_full_pmt(
 
             if opened.load(Ordering::SeqCst) {
                 if has_poison && !first_ok {
+                    consume_probe_data(info);
                     return PadProbeReturn::Drop;
                 }
                 return PadProbeReturn::Ok;
@@ -144,8 +139,9 @@ fn arm_srt_valve_on_full_pmt(
                 .unwrap_or(0);
             let _ = first_ts.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
 
-            // Discourse/GStreamer: drop until a buffer starts with full A/V PMT.
-            if first_ok && !has_poison {
+            // Require PAT + full A/V as the first SI so the wire order MediaMTX
+            // sees cannot start on a poison PMT-only burst.
+            if first_ok && !has_poison && ts_starts_with_pat(&chunk) {
                 let (_, types, audio_pid_list) =
                     ts_ready_for_mediamtx(std::slice::from_ref(&chunk), min_audio_es);
                 if opened
@@ -157,7 +153,9 @@ fn arm_srt_valve_on_full_pmt(
                         ?types,
                         ?audio_pid_list,
                         min_audio_es,
-                        why = "first_pmt_full_av",
+                        bytes = chunk.len(),
+                        head = format!("{:02x?}", &chunk[..chunk.len().min(8)]),
+                        why = "pat_plus_full_av",
                         "SRT gate open (Hydra tee / probe drop)"
                     );
                 }
@@ -183,9 +181,17 @@ fn arm_srt_valve_on_full_pmt(
                     "SRT waiting for buffer starting with full A/V PMT"
                 );
             }
+            // take_* so BUFFER_LIST cannot leak past a Drop return.
+            consume_probe_data(info);
             PadProbeReturn::Drop
         },
     );
+}
+
+fn consume_probe_data(info: &mut gstreamer::PadProbeInfo) {
+    if info.take_buffer_list().is_none() {
+        let _ = info.take_buffer();
+    }
 }
 
 /// Collect PMT PIDs declared in PAT (PID 0). Avoids false "PMT" matches inside
@@ -472,6 +478,19 @@ fn pmt_sections_at(ts: &[u8], start: usize) -> Vec<Vec<(u8, u16)>> {
     } else {
         vec![found]
     }
+}
+
+/// True when the first aligned TS packet is a PAT (PID 0, PUSI).
+fn ts_starts_with_pat(ts: &[u8]) -> bool {
+    let Some(i) = ts.iter().position(|&b| b == 0x47) else {
+        return false;
+    };
+    if i + 188 > ts.len() {
+        return false;
+    }
+    let pkt = &ts[i..i + 188];
+    let pid = (((pkt[1] & 0x1f) as u16) << 8) | pkt[2] as u16;
+    pid == 0 && pkt[1] & 0x40 != 0
 }
 
 /// True when the first PMT in wire order is full A/V (what MediaMTX locks on).
@@ -891,21 +910,17 @@ impl ChannelPipeline {
         self.srt_bitrate = None;
         if srt_for_launch.is_some() {
             let meter = BitrateMeter::new();
-            // Meter after the gate so counts reflect what actually leaves toward SRT.
-            if let Some(q) = pipeline.by_name("q_srt") {
-                if let Some(pad) = q.static_pad("src") {
+            if let Some(gate) = pipeline.by_name("srt_gate") {
+                if let Some(pad) = gate.static_pad("src") {
                     let _ = meter.attach_probe(&pad);
                 }
+                arm_srt_valve_on_full_pmt(self.id, &gate, 1);
             }
             self.srt_bitrate = Some(meter);
-            if let Some(valve) = pipeline.by_name("srt_valve") {
-                // Gate until shared tsmux has full A/V PMT (Hydra tee model).
-                arm_srt_valve_on_full_pmt(self.id, &valve, 1);
-            }
             tracing::info!(
                 channel = self.id,
                 gst_uri = srt_for_launch.as_deref().unwrap_or(""),
-                "SRT baked into capture launch (teed TS + PMT valve)"
+                "SRT baked into capture launch (teed TS + srt_gate)"
             );
         }
 

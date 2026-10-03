@@ -454,7 +454,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
                 "e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
                  mpegtsmux name=tsmux alignment=7 ! tee name=ts_out allow-not-linked=true \
                  ts_out. ! queue ! udpsink host={host} port={port} sync=false async=false \
-                 ts_out. ! valve name=srt_valve drop=true ! queue name=q_srt ! \
+                 ts_out. ! queue name=q_srt ! identity name=srt_gate silent=true ! \
                  srtsink uri=\"{srt}\" wait-for-connection=false auto-reconnect=true \
                  async=false sync=false"
             ));
@@ -471,7 +471,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
             out_branches.push(format!(
                 "e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
                  mpegtsmux name=tsmux alignment=7 ! \
-                 valve name=srt_valve drop=true ! \
+                 identity name=srt_gate silent=true ! \
                  srtsink uri=\"{srt}\" wait-for-connection=false auto-reconnect=true \
                  async=false sync=false"
             ));
@@ -669,7 +669,7 @@ mod tests {
         assert_eq!(launch.matches("voaacenc").count(), 4);
         assert!(launch.contains("tsmux"));
         assert!(launch.contains("ts_out"));
-        assert!(launch.contains("srt_valve"));
+        assert!(launch.contains("srt_gate"));
         assert!(!launch.contains("srtmux"));
         assert!(!launch.contains("srt_v_valve"));
         assert_eq!(launch.matches("tsmux.").count(), 4);
