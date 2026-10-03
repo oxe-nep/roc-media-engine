@@ -109,6 +109,12 @@ fn arm_srt_valve_on_full_pmt(
         PadProbeType::BUFFER | PadProbeType::BUFFER_LIST,
         move |_, info| {
             if opened.load(Ordering::SeqCst) {
+                // After open, still block SI bursts that start with a poison PMT.
+                if chunk_has_incomplete_pmt(&chunk, min_audio_es)
+                    && !first_pmt_is_full_av(&chunk, min_audio_es)
+                {
+                    return PadProbeReturn::Drop;
+                }
                 return PadProbeReturn::Ok;
             }
             let mut chunk = Vec::new();
@@ -133,8 +139,8 @@ fn arm_srt_valve_on_full_pmt(
                 .unwrap_or(0);
             let _ = first_ts.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
 
-            // Open only on a buffer whose *first* PMT is already full A/V so
-            // MediaMTX never locks on a poison prefix (valve sits before q_srt).
+            // Discourse/GStreamer guidance: drop until both A/V are present.
+            // Only pass a buffer whose *first* PMT is already full A/V.
             if first_pmt_is_full_av(&chunk, min_audio_es) {
                 let (_, types, audio_pid_list) =
                     ts_ready_for_mediamtx(std::slice::from_ref(&chunk), min_audio_es);
@@ -174,7 +180,8 @@ fn arm_srt_valve_on_full_pmt(
                     "SRT waiting for buffer starting with full A/V PMT"
                 );
             }
-            PadProbeReturn::Ok
+            // Drop before the valve so poison never sits in q_srt.
+            PadProbeReturn::Drop
         },
     );
 }
@@ -337,7 +344,6 @@ fn pmt_has_av(es: &[(u8, u16)], min_audio: usize) -> bool {
 }
 
 /// True when the payload contains at least one PMT that is not full A/V.
-#[allow(dead_code)] // kept for MediaMTX PMT diagnostics / future harden
 fn chunk_has_incomplete_pmt(ts: &[u8], min_audio: usize) -> bool {
     pmt_sections(ts)
         .into_iter()
