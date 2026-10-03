@@ -86,9 +86,10 @@ fn arm_srt_valve_on_full_pmt(channel: u32, valve: &gstreamer::Element, mux: &gst
         return;
     };
     let opened = Arc::new(AtomicBool::new(false));
-    let valve = valve.clone();
+    let valve_probe = valve.clone();
+    let opened_probe = opened.clone();
     src.add_probe(PadProbeType::BUFFER, move |_, info| {
-        if opened.load(Ordering::SeqCst) {
+        if opened_probe.load(Ordering::SeqCst) {
             return PadProbeReturn::Remove;
         }
         let Some(buf) = info.buffer() else {
@@ -99,11 +100,11 @@ fn arm_srt_valve_on_full_pmt(channel: u32, valve: &gstreamer::Element, mux: &gst
         };
         let data = map.as_slice();
         if pmt_lists_h264(data) {
-            if opened
+            if opened_probe
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
-                let _ = valve.set_property("drop", false);
+                let _ = valve_probe.set_property("drop", false);
                 tracing::info!(channel, "SRT valve open — PMT lists H.264 + AAC");
             }
             return PadProbeReturn::Remove;
@@ -111,18 +112,15 @@ fn arm_srt_valve_on_full_pmt(channel: u32, valve: &gstreamer::Element, mux: &gst
         PadProbeReturn::Ok
     });
     // Safety: never block SRT forever.
-    std::thread::spawn({
-        let opened = opened.clone();
-        let valve = valve.clone();
-        move || {
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            if opened
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                let _ = valve.set_property("drop", false);
-                tracing::warn!(channel, "SRT valve timeout — opening after 3s");
-            }
+    let valve_timeout = valve.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        if opened
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let _ = valve_timeout.set_property("drop", false);
+            tracing::warn!(channel, "SRT valve timeout — opening after 3s");
         }
     });
 }
