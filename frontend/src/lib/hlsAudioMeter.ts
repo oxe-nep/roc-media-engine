@@ -5,8 +5,8 @@ type TapGraph = {
   gain: GainNode;
   analyserL: AnalyserNode;
   analyserR: AnalyserNode;
-  bufL: Float32Array;
-  bufR: Float32Array;
+  bufL: Float32Array<ArrayBuffer>;
+  bufR: Float32Array<ArrayBuffer>;
 };
 
 const graphs = new WeakMap<HTMLMediaElement, TapGraph>();
@@ -67,8 +67,8 @@ function ensureGraph(el: HTMLMediaElement): TapGraph {
     gain,
     analyserL,
     analyserR,
-    bufL: new Float32Array(analyserL.fftSize),
-    bufR: new Float32Array(analyserR.fftSize),
+    bufL: new Float32Array(new ArrayBuffer(analyserL.fftSize * 4)),
+    bufR: new Float32Array(new ArrayBuffer(analyserR.fftSize * 4)),
   };
   graphs.set(el, graph);
   return graph;
