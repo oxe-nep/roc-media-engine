@@ -73,6 +73,78 @@ fn arm_av_gate_on_keyframe(video_identity: &gstreamer::Element, gate: std::sync:
     });
 }
 
+/// Hold MPEG-TS at a `valve` until video (and audio, if present) have each
+/// delivered one buffer into `mpegtsmux`. MediaMTX locks tracks from the first
+/// PMT it sees — emitting PES before both pads are live → "undeclared track".
+fn arm_srt_pmt_ready_valve(
+    valve: &gstreamer::Element,
+    video_src: &gstreamer::Pad,
+    audio_src: Option<&gstreamer::Pad>,
+) {
+    use gstreamer::{PadProbeReturn, PadProbeType};
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+    use std::sync::Arc;
+
+    let _ = valve.set_property("drop", true);
+    let video_ok = Arc::new(AtomicBool::new(false));
+    let audio_ok = Arc::new(AtomicBool::new(audio_src.is_none()));
+    let opened = Arc::new(AtomicU8::new(0));
+    let valve = valve.clone();
+
+    let try_open = {
+        let video_ok = video_ok.clone();
+        let audio_ok = audio_ok.clone();
+        let opened = opened.clone();
+        let valve = valve.clone();
+        move || {
+            if video_ok.load(Ordering::SeqCst) && audio_ok.load(Ordering::SeqCst) {
+                if opened
+                    .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    let _ = valve.set_property("drop", false);
+                    tracing::info!("SRT PMT gate open — A/V both seen before first TS out");
+                }
+            }
+        }
+    };
+
+    {
+        let video_ok = video_ok.clone();
+        let try_open = try_open.clone();
+        video_src.add_probe(PadProbeType::BUFFER, move |_, _| {
+            video_ok.store(true, Ordering::SeqCst);
+            try_open();
+            PadProbeReturn::Ok
+        });
+    }
+    if let Some(ap) = audio_src {
+        let audio_ok = audio_ok.clone();
+        let try_open = try_open.clone();
+        ap.add_probe(PadProbeType::BUFFER, move |_, _| {
+            audio_ok.store(true, Ordering::SeqCst);
+            try_open();
+            PadProbeReturn::Ok
+        });
+    }
+
+    // Never leave SRT silent forever if one pad never produces (e.g. silent audio).
+    std::thread::spawn({
+        let opened = opened.clone();
+        let valve = valve.clone();
+        move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if opened
+                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                let _ = valve.set_property("drop", false);
+                tracing::warn!("SRT PMT gate timeout — opening after 2s");
+            }
+        }
+    });
+}
+
 /// Go/FFmpeg `OutputURL` puts `latency` in **microseconds**; GStreamer/libsrt URI
 /// expects **milliseconds**. Values > 8000 are treated as µs (same heuristic as Go).
 fn normalize_srt_uri_for_gst(raw: &str) -> String {
@@ -779,6 +851,12 @@ impl ChannelPipeline {
             .property("alignment", 7i32)
             .build()
             .context("mpegtsmux")?;
+        // Drop TS until both A/V have entered the mux (complete first PMT).
+        let valve = gstreamer::ElementFactory::make("valve")
+            .name(format!("valve_srt_{}", self.id))
+            .property("drop", true)
+            .build()
+            .context("srt pmt valve")?;
         // Bounded leaky queue so a disconnected peer cannot grow RAM forever.
         let q_br = gstreamer::ElementFactory::make("queue")
             .name(format!("q_srt_br_{}", self.id))
@@ -798,20 +876,44 @@ impl ChannelPipeline {
             .build()
             .context("srtsink")?;
 
-        // Mux + sink first; register AAC on mpegtsmux *before* the video pad so the
-        // initial PMT includes PID audio (MediaMTX locks tracks from the first PMT —
-        // late audio → "undeclared track with PID 66").
-        let mut elements = vec![mux.clone(), q_br.clone(), sink.clone()];
-        pipeline.add_many([&mux, &q_br, &sink])?;
-        mux.link(&q_br).context("link srt mux→bitrate queue")?;
+        let mut elements = vec![
+            queue_v.clone(),
+            parse.clone(),
+            capsfilter.clone(),
+            mux.clone(),
+            valve.clone(),
+            q_br.clone(),
+            sink.clone(),
+        ];
+        pipeline.add_many([
+            &queue_v,
+            &parse,
+            &capsfilter,
+            &mux,
+            &valve,
+            &q_br,
+            &sink,
+        ])?;
+        queue_v.link(&parse).context("link srt queue→parse")?;
+        parse
+            .link(&capsfilter)
+            .context("link srt parse→capsfilter")?;
+        capsfilter.link(&mux).context("link srt capsfilter→mux")?;
+        mux.link(&valve).context("link srt mux→valve")?;
+        valve.link(&q_br).context("link srt valve→bitrate queue")?;
         q_br.link(&sink).context("link srt bitrate queue→sink")?;
 
-        // Do not keyframe-gate / single-segment here — that lets video reach the mux
-        // alone and many players lock onto a video-only PMT.
+        // Do not keyframe-gate / single-segment here — that delays AAC and yields
+        // a video-only first PMT (MediaMTX then ignores audio PID 66).
         let mut audio_tee_pad = None;
+        let mut audio_src_pad = None;
         if let Some(a_tee) = audio_tee {
             match self.link_program_aac(&pipeline, &a_tee, &mux, "srt", false) {
                 Ok((a_pad, audio_els)) => {
+                    // Last element before mux is the AAC bin (or identity if aligned).
+                    if let Some(last) = audio_els.last() {
+                        audio_src_pad = last.static_pad("src");
+                    }
                     audio_tee_pad = Some(a_pad);
                     elements.extend(audio_els);
                 }
@@ -830,24 +932,14 @@ impl ChannelPipeline {
             );
         }
 
-        // Start AAC→mux so PMT can advertise audio before any video PES.
+        let video_src = capsfilter
+            .static_pad("src")
+            .ok_or_else(|| anyhow!("srt video capsfilter src"))?;
+        arm_srt_pmt_ready_valve(&valve, &video_src, audio_src_pad.as_ref());
+
         for el in &elements {
             el.sync_state_with_parent()
-                .context("sync_state_with_parent srt audio/mux")?;
-        }
-
-        pipeline.add_many([&queue_v, &parse, &capsfilter])?;
-        elements.insert(0, capsfilter.clone());
-        elements.insert(0, parse.clone());
-        elements.insert(0, queue_v.clone());
-        queue_v.link(&parse).context("link srt queue→parse")?;
-        parse
-            .link(&capsfilter)
-            .context("link srt parse→capsfilter")?;
-        capsfilter.link(&mux).context("link srt capsfilter→mux")?;
-        for el in [&queue_v, &parse, &capsfilter] {
-            el.sync_state_with_parent()
-                .context("sync_state_with_parent srt video")?;
+                .context("sync_state_with_parent srt")?;
         }
 
         let srt_meter = BitrateMeter::new();
