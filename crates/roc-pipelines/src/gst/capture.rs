@@ -214,14 +214,16 @@ fn arm_srt_valve_on_full_pmt(
     src.add_probe(
         PadProbeType::BUFFER | PadProbeType::BUFFER_LIST,
         move |_, info| {
+            // Take ownership so an original BUFFER_LIST cannot leak past us when
+            // we rewrite to a single Buffer (MediaMTX locks on the first PMT).
             let mut chunk = Vec::new();
-            if let Some(list) = info.buffer_list() {
+            if let Some(list) = info.take_buffer_list() {
                 for buf in list.iter() {
                     if let Ok(map) = buf.map_readable() {
                         chunk.extend_from_slice(map.as_slice());
                     }
                 }
-            } else if let Some(buf) = info.buffer() {
+            } else if let Some(buf) = info.take_buffer() {
                 if let Ok(map) = buf.map_readable() {
                     chunk.extend_from_slice(map.as_slice());
                 }
@@ -229,13 +231,14 @@ fn arm_srt_valve_on_full_pmt(
             if chunk.is_empty() {
                 return PadProbeReturn::Drop;
             }
+
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             let _ = first_ts.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
 
-            {
+            let window_bytes = {
                 let mut w = window.lock().unwrap_or_else(|e| e.into_inner());
                 w.extend_from_slice(&chunk);
                 const MAX: usize = 64 * 1024;
@@ -243,54 +246,69 @@ fn arm_srt_valve_on_full_pmt(
                     let drain = w.len() - MAX;
                     w.drain(0..drain);
                 }
-            }
+                w.clone()
+            };
 
-            // After open: drop/trim chunks whose first PMT is incomplete.
+            // After open: re-attach bytes; strip poison PMT prefixes if present.
             if opened.load(Ordering::SeqCst) {
-                if chunk_has_incomplete_pmt(&chunk, min_audio_es)
-                    && !first_pmt_is_full_av(&chunk, min_audio_es)
+                let out = if !first_pmt_is_full_av(&chunk, min_audio_es)
+                    && chunk_has_incomplete_pmt(&chunk, min_audio_es)
                 {
                     if let Some(trimmed) = trim_ts_to_first_av_pmt(&chunk, min_audio_es) {
-                        let new_buf = gstreamer::Buffer::from_mut_slice(trimmed);
-                        info.data = Some(gstreamer::PadProbeData::Buffer(new_buf));
                         tracing::warn!(channel, "SRT trimmed poison PMT prefix after open");
-                        return PadProbeReturn::Ok;
+                        trimmed
+                    } else {
+                        tracing::warn!(channel, "SRT dropping poison PMT chunk after valve open");
+                        return PadProbeReturn::Drop;
                     }
-                    tracing::warn!(channel, "SRT dropping poison PMT chunk after valve open");
-                    return PadProbeReturn::Drop;
-                }
+                } else {
+                    chunk
+                };
+                info.data = Some(gstreamer::PadProbeData::Buffer(
+                    gstreamer::Buffer::from_mut_slice(out),
+                ));
                 return PadProbeReturn::Ok;
             }
 
-            let (ready, types, audio_pid_list) = {
-                let w = window.lock().unwrap_or_else(|e| e.into_inner());
-                ts_ready_for_mediamtx(std::slice::from_ref(&w.clone()), min_audio_es)
-            };
+            let (ready, types, audio_pid_list) =
+                ts_ready_for_mediamtx(std::slice::from_ref(&window_bytes), min_audio_es);
 
+            // Open from the *window* (not the current list alone) so a clean
+            // PAT+A/V PMT is always the first bytes MediaMTX sees.
             if ready {
-                let emit = if first_pmt_is_full_av(&chunk, min_audio_es) {
-                    Some(chunk.clone())
-                } else {
-                    trim_ts_to_first_av_pmt(&chunk, min_audio_es)
-                };
-                if let Some(emit) = emit {
-                    open_egress(types, audio_pid_list, "clean_pmt");
-                    if emit.len() != chunk.len() || !first_pmt_is_full_av(&chunk, min_audio_es) {
-                        let new_buf = gstreamer::Buffer::from_mut_slice(emit);
-                        info.data = Some(gstreamer::PadProbeData::Buffer(new_buf));
-                        tracing::info!(channel, "SRT trimmed to first A/V PAT/PMT");
+                if let Some(emit) = trim_ts_to_first_av_pmt(&window_bytes, min_audio_es) {
+                    if first_pmt_is_full_av(&emit, min_audio_es) {
+                        open_egress(types, audio_pid_list, "clean_pmt");
+                        if let Ok(mut w) = window.lock() {
+                            w.clear();
+                        }
+                        tracing::info!(
+                            channel,
+                            emit_bytes = emit.len(),
+                            window_bytes = window_bytes.len(),
+                            "SRT open emitting PAT + first A/V PMT"
+                        );
+                        info.data = Some(gstreamer::PadProbeData::Buffer(
+                            gstreamer::Buffer::from_mut_slice(emit),
+                        ));
+                        return PadProbeReturn::Ok;
                     }
-                    return PadProbeReturn::Ok;
                 }
             }
 
             let started = first_ts.load(Ordering::Relaxed);
             if started > 0 && now.saturating_sub(started) >= 8 {
-                if let Some(emit) = trim_ts_to_first_av_pmt(&chunk, min_audio_es) {
-                    open_egress(types, audio_pid_list, "timeout_trimmed");
-                    let new_buf = gstreamer::Buffer::from_mut_slice(emit);
-                    info.data = Some(gstreamer::PadProbeData::Buffer(new_buf));
-                    return PadProbeReturn::Ok;
+                if let Some(emit) = trim_ts_to_first_av_pmt(&window_bytes, min_audio_es) {
+                    if first_pmt_is_full_av(&emit, min_audio_es) {
+                        open_egress(types, audio_pid_list, "timeout_trimmed");
+                        if let Ok(mut w) = window.lock() {
+                            w.clear();
+                        }
+                        info.data = Some(gstreamer::PadProbeData::Buffer(
+                            gstreamer::Buffer::from_mut_slice(emit),
+                        ));
+                        return PadProbeReturn::Ok;
+                    }
                 }
                 tracing::warn!(
                     channel,
@@ -314,6 +332,7 @@ fn arm_srt_valve_on_full_pmt(
                     "SRT still waiting for full A/V PMT — dropping TS"
                 );
             }
+            // Data already taken — Drop leaves nothing for the valve.
             PadProbeReturn::Drop
         },
     );
