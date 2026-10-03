@@ -470,16 +470,20 @@ impl ChannelPipeline {
             .with_context(|| format!("make {}", self.parse_element))?;
         // Keep SPS/PPS (or VPS/SPS/PPS for HEVC) in-band for mid-stream joiners.
         let _ = parse.set_property_from_str("config-interval", "-1");
+        // Progressive MP4 (moov at end). Fragmented/streamable files often look
+        // "corrupt" in browsers and desktop players when finalize is incomplete.
         let mux = gstreamer::ElementFactory::make("mp4mux")
             .name(format!("mux_rec_{}", self.id))
-            .property("fragment-duration", 200u32)
-            .property("streamable", true)
+            .property("fragment-duration", 0u32)
+            .property("streamable", false)
             .build()
             .context("mp4mux")?;
         let sink = gstreamer::ElementFactory::make("filesink")
             .name(format!("fs_rec_{}", self.id))
             .property("location", path)
             .property("sync", false)
+            // Ensure CIFS/NFS sees bytes promptly; helps avoid 0-byte stubs on stop.
+            .property("async", false)
             .build()
             .context("filesink")?;
 
@@ -658,14 +662,25 @@ impl ChannelPipeline {
                 });
             drop(tx);
 
+            // Inject EOS *into* each record queue sink (downstream). Element-level
+            // send_event(EOS) on a filter goes to its sink pads (upstream) and
+            // never reaches mp4mux — leaving a moov-less "corrupt" file.
             for el in &branch.elements {
                 let name = el.name();
                 if name.starts_with("q_rec") {
-                    let _ = el.send_event(gstreamer::event::Eos::new());
+                    if let Some(sink) = el.static_pad("sink") {
+                        let _ = sink.send_event(gstreamer::event::Eos::new());
+                    }
                 }
             }
-            // Wait for mux→filesink EOS (moov/footer), then fall through.
-            let _ = rx.recv_timeout(std::time::Duration::from_millis(1500));
+            // Progressive mp4mux writes moov only on EOS — wait generously.
+            match rx.recv_timeout(std::time::Duration::from_millis(3000)) {
+                Ok(()) => tracing::info!(channel = self.id, "record EOS reached filesink"),
+                Err(_) => tracing::warn!(
+                    channel = self.id,
+                    "record EOS timeout — moov may be missing"
+                ),
+            }
             drop(eos_probe);
         }
 
