@@ -10,6 +10,7 @@ import {
   unlockHlsAudio,
   type StereoPeaks,
 } from "@/lib/hlsAudioMeter";
+import { registerPreviewTile } from "@/lib/previewGridSync";
 import {
   HLS_METER_PAIR_COUNT,
   useReportHlsMeters,
@@ -69,12 +70,15 @@ export default function HlsPreview({
 
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let unregisterSync: (() => void) | null = null;
 
     const stop = () => {
       if (retryTimer != null) {
         clearTimeout(retryTimer);
         retryTimer = null;
       }
+      unregisterSync?.();
+      unregisterSync = null;
       stopMedia(video, videoHls.current);
       videoHls.current = null;
     };
@@ -91,9 +95,13 @@ export default function HlsPreview({
       if (cancelled || !videoRef.current) return;
       stop();
       videoRef.current.muted = true;
-      videoHls.current = attachHls(videoRef.current, src, () => {
+      const hls = attachHls(videoRef.current, src, () => {
         if (!cancelled) retryTimer = setTimeout(attach, 1000);
       });
+      videoHls.current = hls;
+      if (hls && videoRef.current) {
+        unregisterSync = registerPreviewTile(videoRef.current, hls);
+      }
     };
 
     attach();

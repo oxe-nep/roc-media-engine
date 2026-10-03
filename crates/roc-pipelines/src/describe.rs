@@ -209,8 +209,11 @@ fn listen_hls_branches(hls_dir: &str, gen: u64, audio_from_program: bool) -> Str
                  voaacenc bitrate=128000 ! aacparse ! hls_l{pair}.audio"
             )
         };
+        // Deeper time-based queue: tiny buffer=3 leaked unevenly under SRT load
+        // and skewed channel-to-channel preview by hundreds of ms.
         parts.push(format!(
-            "pv. ! queue max-size-buffers=3 leaky=downstream ! \
+            "pv. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=500000000 \
+             leaky=downstream ! \
              h264parse config-interval=-1 ! \
              hlssink2 name=hls_l{pair} location=\"{seg}\" playlist-location=\"{playlist}\" \
              target-duration=1 max-files=6 playlist-length=6{audio}"
@@ -515,13 +518,15 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         // Encode once → tee `pv`: muted video-only preview + A+V listen_* muxes.
         // Match Go/FFmpeg preview: fps=10, g=10, ~800k (see roc-recording preview.go).
         format!(
-            "t. ! queue max-size-buffers=3 leaky=downstream ! \
+            "t. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=500000000 \
+             leaky=downstream ! \
              videoconvert ! videoscale ! videorate ! \
              video/x-raw,width=640,height=360,framerate=10/1 ! \
              x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=10 bframes=0 threads=1 ! \
              video/x-h264,profile=baseline ! h264parse config-interval=-1 ! \
              tee name=pv \
-             pv. ! queue max-size-buffers=3 leaky=downstream ! \
+             pv. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=500000000 \
+             leaky=downstream ! \
              hlssink2 location=\"{seg}\" playlist-location=\"{playlist}\" \
              target-duration=1 max-files=6 playlist-length=6"
         )
