@@ -196,7 +196,7 @@ fn arm_srt_valve_on_full_pmt(
                     tracing::info!(
                         channel,
                         ?types,
-                        "SRT valve open — first TS to MediaMTX has clean A/V PMT"
+                        "SRT valve open — first TS has clean A/V PMT"
                     );
                 }
                 // Forward THIS list — every PMT in it is full A/V, so MTX locks correctly.

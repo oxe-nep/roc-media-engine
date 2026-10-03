@@ -67,6 +67,25 @@ cargo run -p spike-decklink-nvenc --release --features gst -- \
 | GET/POST | `/api/workflows…` | TC/commentator stubs |
 | GET | `/api/adapter/manifest` | Go/UI migration contract |
 
+## SRT (8 channels)
+
+Each channel can publish MPEG-TS over SRT (H.264 + AAC ADTS). The mux waits
+until both A/V are present so picky receivers (MediaMTX) and players (VLC) see
+a complete first PMT.
+
+Default listener bind (config): `srt://0.0.0.0:910N?mode=listener` for channel N.
+
+VLC / ffplay (caller):
+
+```text
+srt://<engine-host>:9101?mode=caller&latency=120
+…
+srt://<engine-host>:9108?mode=caller&latency=120
+```
+
+Caller mode (e.g. MediaMTX) is the same encode path — set the URL via
+`POST /api/channels/{id}/srt/start` with `{"url":"srt://…"}`.
+
 ## Phases
 
 | Fas | Status in tree |
