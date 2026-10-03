@@ -353,10 +353,12 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         // Bake A+V into the initial graph (same pattern as UDP). Dynamically
         // attaching AAC later makes mpegtsmux emit an incomplete first PMT —
         // MediaMTX then reports "undeclared track" and WebRTC gets no Opus.
-        // valve starts closed — engine opens it after ~500ms so the first TS
-        // MediaMTX sees already has H.264+AAC in the PMT (early PMT is AAC-only).
+        // srt_v_valve + srt_a_valve stay closed until both A/V have a buffer,
+        // then open together so the first PMT is born with H.264+AAC.
+        // srt_valve stays closed until mux src shows a clean A/V PMT.
         out_branches.push(format!(
             "e. ! queue name=q_srt_v ! {parse} config-interval=-1 ! {bs} ! \
+             valve name=srt_v_valve drop=true ! \
              mpegtsmux name=srtmux alignment=7 ! \
              valve name=srt_valve drop=true ! \
              srtsink uri=\"{url}\" wait-for-connection=false auto-reconnect=true \
@@ -364,7 +366,8 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
              a. ! queue max-size-buffers=64 leaky=downstream ! \
              audioconvert mix-matrix=\"{matrix}\" ! audio/x-raw,channels=2 ! \
              voaacenc bitrate={aac_bps} ! aacparse ! \
-             capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts ! srtmux.",
+             capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts ! \
+             valve name=srt_a_valve drop=true ! srtmux.",
             bs = family.byte_stream_caps(),
         ));
     }

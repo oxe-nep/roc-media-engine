@@ -73,59 +73,162 @@ fn arm_av_gate_on_keyframe(video_identity: &gstreamer::Element, gate: std::sync:
     });
 }
 
-/// Open `srt_valve` only after mpegtsmux has emitted a PMT that lists H.264
-/// (stream type 0x1B). Early PMTs are AAC-only; MediaMTX locks that forever.
-fn arm_srt_valve_on_full_pmt(channel: u32, valve: &gstreamer::Element, mux: &gstreamer::Element) {
+/// Gate SRT egress so MediaMTX never sees an incomplete first PMT.
+///
+/// MediaMTX locks tracks from the first PAT/PMT. `mpegtsmux` often emits a
+/// single-stream PMT when one branch wins the race — VLC re-parses later, MTX
+/// does not. Strategy:
+/// 1. Hold both `srt_v_valve` and `srt_a_valve` until each branch has a buffer,
+///    then open them together so the first PMT is born with H.264+AAC.
+/// 2. Drop every TS buffer on mux src until every PMT in the payload is A+V.
+/// 3. Forward that clean list as the first bytes MediaMTX sees. No timer open.
+fn arm_srt_valve_on_full_pmt(
+    channel: u32,
+    out_valve: &gstreamer::Element,
+    mux: &gstreamer::Element,
+    audio_valve: Option<&gstreamer::Element>,
+    video_valve: Option<&gstreamer::Element>,
+    video_branch_src: Option<&gstreamer::Pad>,
+    audio_branch_src: Option<&gstreamer::Pad>,
+) {
     use gstreamer::{PadProbeReturn, PadProbeType};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
 
+    let _ = out_valve.set_property("drop", true);
+
+    // Release A+V into the mux together once both branches have produced.
+    if let (Some(v_valve), Some(a_valve), Some(vpad), Some(apad)) = (
+        video_valve,
+        audio_valve,
+        video_branch_src,
+        audio_branch_src,
+    ) {
+        let _ = v_valve.set_property("drop", true);
+        let _ = a_valve.set_property("drop", true);
+        let video_ready = Arc::new(AtomicBool::new(false));
+        let audio_ready = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
+        let try_release = {
+            let video_ready = video_ready.clone();
+            let audio_ready = audio_ready.clone();
+            let released = released.clone();
+            let v_valve = v_valve.clone();
+            let a_valve = a_valve.clone();
+            move || {
+                if video_ready.load(Ordering::SeqCst)
+                    && audio_ready.load(Ordering::SeqCst)
+                    && released
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                {
+                    let _ = v_valve.set_property("drop", false);
+                    let _ = a_valve.set_property("drop", false);
+                    tracing::info!(channel, "SRT A/V input valves open together");
+                }
+            }
+        };
+        {
+            let video_ready = video_ready.clone();
+            let try_release = try_release.clone();
+            vpad.add_probe(PadProbeType::BUFFER, move |_, _| {
+                video_ready.store(true, Ordering::SeqCst);
+                try_release();
+                PadProbeReturn::Remove
+            });
+        }
+        {
+            let audio_ready = audio_ready.clone();
+            let try_release = try_release.clone();
+            apad.add_probe(PadProbeType::BUFFER, move |_, _| {
+                audio_ready.store(true, Ordering::SeqCst);
+                try_release();
+                PadProbeReturn::Remove
+            });
+        }
+    } else {
+        if let Some(v) = video_valve {
+            let _ = v.set_property("drop", false);
+        }
+        if let Some(a) = audio_valve {
+            let _ = a.set_property("drop", false);
+        }
+    }
+
     let Some(src) = mux.static_pad("src") else {
-        tracing::warn!(channel, "srtmux has no src pad — opening valve immediately");
-        let _ = valve.set_property("drop", false);
+        tracing::warn!(channel, "srtmux has no src pad — opening SRT valve");
+        let _ = out_valve.set_property("drop", false);
         return;
     };
+
     let opened = Arc::new(AtomicBool::new(false));
-    let valve_probe = valve.clone();
-    let opened_probe = opened.clone();
-    src.add_probe(PadProbeType::BUFFER, move |_, info| {
-        if opened_probe.load(Ordering::SeqCst) {
-            return PadProbeReturn::Remove;
-        }
-        let Some(buf) = info.buffer() else {
-            return PadProbeReturn::Ok;
-        };
-        let Ok(map) = buf.map_readable() else {
-            return PadProbeReturn::Ok;
-        };
-        let data = map.as_slice();
-        if pmt_lists_h264(data) {
-            if opened_probe
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                let _ = valve_probe.set_property("drop", false);
-                tracing::info!(channel, "SRT valve open — PMT lists H.264 + AAC");
+    let out_valve = out_valve.clone();
+    let last_log = Arc::new(AtomicU64::new(0));
+    // mpegtsmux alignment=7 pushes BUFFER_LIST — BUFFER-only probes never fire.
+    src.add_probe(
+        PadProbeType::BUFFER | PadProbeType::BUFFER_LIST,
+        move |_, info| {
+            if opened.load(Ordering::SeqCst) {
+                return PadProbeReturn::Remove;
             }
-            return PadProbeReturn::Remove;
-        }
-        PadProbeReturn::Ok
-    });
-    // Safety: never block SRT forever.
-    let valve_timeout = valve.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(3));
-        if opened
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            let _ = valve_timeout.set_property("drop", false);
-            tracing::warn!(channel, "SRT valve timeout — opening after 3s");
-        }
-    });
+            let mut chunks: Vec<Vec<u8>> = Vec::new();
+            if let Some(list) = info.buffer_list() {
+                for buf in list.iter() {
+                    if let Ok(map) = buf.map_readable() {
+                        chunks.push(map.as_slice().to_vec());
+                    }
+                }
+            } else if let Some(buf) = info.buffer() {
+                if let Ok(map) = buf.map_readable() {
+                    chunks.push(map.as_slice().to_vec());
+                }
+            }
+            if chunks.is_empty() {
+                return PadProbeReturn::Drop;
+            }
+            let (ready, types) = ts_ready_for_mediamtx(&chunks);
+            if ready {
+                if opened
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    let _ = out_valve.set_property("drop", false);
+                    tracing::info!(
+                        channel,
+                        ?types,
+                        "SRT valve open — first TS to MediaMTX has clean A/V PMT"
+                    );
+                }
+                // Forward THIS list — every PMT in it is full A/V, so MTX locks correctly.
+                return PadProbeReturn::Ok;
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let prev = last_log.load(Ordering::Relaxed);
+            if now != prev
+                && last_log
+                    .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                let bytes: usize = chunks.iter().map(|c| c.len()).sum();
+                tracing::warn!(
+                    channel,
+                    bytes,
+                    ?types,
+                    sync = chunks.first().and_then(|c| c.first()).copied(),
+                    "SRT still waiting for full A/V PMT — dropping TS"
+                );
+            }
+            PadProbeReturn::Drop
+        },
+    );
 }
 
-fn pmt_lists_h264(ts: &[u8]) -> bool {
+/// Per-PMT stream-type lists found in a TS buffer (one entry per PMT section start).
+fn pmt_sections(ts: &[u8]) -> Vec<Vec<u8>> {
+    let mut sections = Vec::new();
     let mut i = 0;
     while i + 188 <= ts.len() {
         if ts[i] != 0x47 {
@@ -133,8 +236,6 @@ fn pmt_lists_h264(ts: &[u8]) -> bool {
             continue;
         }
         let pkt = &ts[i..i + 188];
-        let pid = (((pkt[1] & 0x1f) as u16) << 8) | pkt[2] as u16;
-        // PMT is usually pid 0x20 in our mux; also scan any payload-unit-start.
         if pkt[1] & 0x40 == 0 {
             i += 188;
             continue;
@@ -142,7 +243,8 @@ fn pmt_lists_h264(ts: &[u8]) -> bool {
         let afc = (pkt[3] >> 4) & 0x3;
         let mut off = 4usize;
         if afc == 2 || afc == 3 {
-            off = 5 + pkt[4] as usize;
+            let afl = pkt[4] as usize;
+            off = 5 + afl;
         }
         if off >= 187 {
             i += 188;
@@ -154,106 +256,53 @@ fn pmt_lists_h264(ts: &[u8]) -> bool {
             i += 188;
             continue;
         }
+        let sl = (((pkt[p + 1] & 0x0f) as usize) << 8) | pkt[p + 2] as usize;
         let pil = (((pkt[p + 10] & 0x0f) as usize) << 8) | pkt[p + 11] as usize;
         let mut q = p + 12 + pil;
-        let sl = (((pkt[p + 1] & 0x0f) as usize) << 8) | pkt[p + 2] as usize;
         let end = (p + 3 + sl).saturating_sub(4).min(188);
+        let mut found = Vec::new();
         while q + 5 <= end {
             let st = pkt[q];
             let esil = (((pkt[q + 3] & 0x0f) as usize) << 8) | pkt[q + 4] as usize;
-            if st == 0x1b || st == 0x24 {
-                // 0x1B H.264 / 0x24 H.265
-                let _ = pid; // silence unused in some builds
-                return true;
+            if !found.contains(&st) {
+                found.push(st);
             }
             q += 5 + esil;
         }
+        if !found.is_empty() {
+            sections.push(found);
+        }
         i += 188;
     }
-    false
+    sections
 }
 
-/// Hold MPEG-TS at a `valve` until video (and audio, if present) have each
-/// delivered one buffer into `mpegtsmux`. MediaMTX locks tracks from the first
-/// PMT it sees — emitting PES before both pads are live → "undeclared track".
-#[allow(dead_code)]
-fn arm_srt_pmt_ready_valve(
-    valve: &gstreamer::Element,
-    video_src: &gstreamer::Pad,
-    audio_src: Option<&gstreamer::Pad>,
-) {
-    use gstreamer::{PadProbeReturn, PadProbeType};
-    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-    use std::sync::Arc;
+fn pmt_has_av(types: &[u8]) -> bool {
+    let video = types.iter().any(|&t| t == 0x1b || t == 0x24);
+    let audio = types.iter().any(|&t| t == 0x0f || t == 0x11);
+    video && audio
+}
 
-    let _ = valve.set_property("drop", true);
-    let video_ok = Arc::new(AtomicBool::new(false));
-    let audio_ok = Arc::new(AtomicBool::new(audio_src.is_none()));
-    let opened = Arc::new(AtomicU8::new(0));
-    let valve = valve.clone();
-
-    let try_open = {
-        let video_ok = video_ok.clone();
-        let audio_ok = audio_ok.clone();
-        let opened = opened.clone();
-        let valve = valve.clone();
-        move || {
-            if video_ok.load(Ordering::SeqCst) && audio_ok.load(Ordering::SeqCst) {
-                if opened
-                    .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-                {
-                    // Pads see buffers *before* mpegtsmux rewrites PMT. Wait so the
-                    // first TS that leaves already carries both elementary streams.
-                    std::thread::spawn({
-                        let valve = valve.clone();
-                        move || {
-                            std::thread::sleep(std::time::Duration::from_millis(300));
-                            let _ = valve.set_property("drop", false);
-                            tracing::info!(
-                                "SRT PMT gate open — A/V both seen (+300ms for mux PMT)"
-                            );
-                        }
-                    });
+/// Safe to release to MediaMTX only when every PMT in the payload is full A/V
+/// (a mixed list with an older video-only PMT would still poison MTX).
+fn ts_ready_for_mediamtx(chunks: &[Vec<u8>]) -> (bool, Vec<u8>) {
+    let mut any_pmt = false;
+    let mut all_av = true;
+    let mut union = Vec::new();
+    for data in chunks {
+        for sec in pmt_sections(data) {
+            any_pmt = true;
+            if !pmt_has_av(&sec) {
+                all_av = false;
+            }
+            for t in sec {
+                if !union.contains(&t) {
+                    union.push(t);
                 }
             }
         }
-    };
-
-    {
-        let video_ok = video_ok.clone();
-        let try_open = try_open.clone();
-        video_src.add_probe(PadProbeType::BUFFER, move |_, _| {
-            video_ok.store(true, Ordering::SeqCst);
-            try_open();
-            PadProbeReturn::Ok
-        });
     }
-    if let Some(ap) = audio_src {
-        let audio_ok = audio_ok.clone();
-        let try_open = try_open.clone();
-        ap.add_probe(PadProbeType::BUFFER, move |_, _| {
-            audio_ok.store(true, Ordering::SeqCst);
-            try_open();
-            PadProbeReturn::Ok
-        });
-    }
-
-    // Never leave SRT silent forever if one pad never produces (e.g. silent audio).
-    std::thread::spawn({
-        let opened = opened.clone();
-        let valve = valve.clone();
-        move || {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            if opened
-                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                let _ = valve.set_property("drop", false);
-                tracing::warn!("SRT PMT gate timeout — opening after 2s");
-            }
-        }
-    });
+    (any_pmt && all_av, union)
 }
 
 /// Go/FFmpeg `OutputURL` puts `latency` in **microseconds**; GStreamer/libsrt URI
@@ -283,7 +332,15 @@ fn normalize_srt_uri_for_gst(raw: &str) -> String {
 
 #[cfg(test)]
 mod srt_uri_tests {
-    use super::normalize_srt_uri_for_gst;
+    use super::{normalize_srt_uri_for_gst, pmt_has_av};
+
+    #[test]
+    fn pmt_requires_both_video_and_aac() {
+        assert!(!pmt_has_av(&[0x0f]));
+        assert!(!pmt_has_av(&[0x1b]));
+        assert!(pmt_has_av(&[0x1b, 0x0f]));
+        assert!(pmt_has_av(&[0x24, 0x0f]));
+    }
 
     #[test]
     fn converts_ffmpeg_micros_to_gst_millis() {
@@ -568,7 +625,23 @@ impl ChannelPipeline {
             if let (Some(valve), Some(mux)) =
                 (pipeline.by_name("srt_valve"), pipeline.by_name("srtmux"))
             {
-                arm_srt_valve_on_full_pmt(self.id, &valve, &mux);
+                let a_valve = pipeline.by_name("srt_a_valve");
+                let v_valve = pipeline.by_name("srt_v_valve");
+                let video_branch = pipeline
+                    .by_name("q_srt_v")
+                    .and_then(|q| q.static_pad("src"));
+                let audio_branch = a_valve
+                    .as_ref()
+                    .and_then(|v| v.static_pad("sink"));
+                arm_srt_valve_on_full_pmt(
+                    self.id,
+                    &valve,
+                    &mux,
+                    a_valve.as_ref(),
+                    v_valve.as_ref(),
+                    video_branch.as_ref(),
+                    audio_branch.as_ref(),
+                );
             }
             tracing::info!(
                 channel = self.id,
@@ -1072,10 +1145,9 @@ impl ChannelPipeline {
             );
         }
 
-        let video_src = capsfilter
-            .static_pad("src")
-            .ok_or_else(|| anyhow!("srt video capsfilter src"))?;
-        arm_srt_pmt_ready_valve(&valve, &video_src, audio_src_pad.as_ref());
+        // Dynamic attach path: no pre-mux input valves — mux-src Drop is the gate.
+        arm_srt_valve_on_full_pmt(self.id, &valve, &mux, None, None, None, None);
+        let _ = audio_src_pad;
 
         for el in &elements {
             el.sync_state_with_parent()
