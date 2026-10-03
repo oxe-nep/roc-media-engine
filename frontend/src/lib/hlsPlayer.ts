@@ -6,11 +6,13 @@ const live = new Set<Hls>();
 export const HLS_LIVE_CONFIG = {
   enableWorker: false,
   lowLatencyMode: false,
-  liveSyncDurationCount: 3,
-  liveMaxLatencyDurationCount: 10,
-  maxLiveSyncPlaybackRate: 1,
-  maxBufferLength: 8,
-  maxMaxBufferLength: 16,
+  // Stay ~2×1s segments behind live; catch up if a tile drifts so the
+  // 8-channel grid stays wall-clock aligned (maxLiveSyncPlaybackRate=1 never recovered).
+  liveSyncDurationCount: 2,
+  liveMaxLatencyDurationCount: 5,
+  maxLiveSyncPlaybackRate: 1.5,
+  maxBufferLength: 6,
+  maxMaxBufferLength: 12,
   startFragPrefetch: true,
 } as const;
 

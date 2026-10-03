@@ -513,11 +513,12 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         let dir = hls_dir_from_playlist(&playlist);
         let seg = format!("{dir}/pv{gen}_%05d.ts");
         // Encode once → tee `pv`: muted video-only preview + A+V listen_* muxes.
+        // Match Go/FFmpeg preview: fps=10, g=10, ~800k (see roc-recording preview.go).
         format!(
             "t. ! queue max-size-buffers=3 leaky=downstream ! \
              videoconvert ! videoscale ! videorate ! \
-             video/x-raw,width=640,height=360,framerate=5/1 ! \
-             x264enc tune=zerolatency speed-preset=ultrafast bitrate=400 key-int-max=5 bframes=0 threads=1 ! \
+             video/x-raw,width=640,height=360,framerate=10/1 ! \
+             x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=10 bframes=0 threads=1 ! \
              video/x-h264,profile=baseline ! h264parse config-interval=-1 ! \
              tee name=pv \
              pv. ! queue max-size-buffers=3 leaky=downstream ! \
