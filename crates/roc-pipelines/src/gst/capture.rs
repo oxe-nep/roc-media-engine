@@ -141,36 +141,41 @@ fn arm_srt_valve_on_full_pmt(
             .iter()
             .map(|_| Arc::new(AtomicBool::new(false)))
             .collect();
-        let released = Arc::new(AtomicBool::new(false));
+        let audio_opened = Arc::new(AtomicBool::new(false));
+        let video_opened = Arc::new(AtomicBool::new(false));
         let a_valves: Vec<_> = audio_valves.to_vec();
-            let try_release = {
+        // Open AAC into the mux *before* video so mpegtsmux's first PMT that
+        // includes video already lists audio (avoids video-only → A/V flicker).
+        let try_release = {
             let video_ready = video_ready.clone();
             let audio_ready = audio_ready.clone();
-            let released = released.clone();
+            let audio_opened = audio_opened.clone();
+            let video_opened = video_opened.clone();
             let v_valve = v_valve.clone();
             let a_valves = a_valves.clone();
             Arc::new(move || {
-                if !video_ready.load(Ordering::SeqCst) {
-                    return;
-                }
-                if !audio_ready.iter().all(|f| f.load(Ordering::SeqCst)) {
-                    return;
-                }
-                if released
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
+                if audio_ready.iter().all(|f| f.load(Ordering::SeqCst))
+                    && audio_opened
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
                 {
-                    let _ = v_valve.set_property("drop", false);
                     for a in &a_valves {
                         let _ = a.set_property("drop", false);
                     }
-                    // Do *not* open egress here — wait for clean_pmt on mux-src so
-                    // MediaMTX never sees an AAC-only first PMT if mux still races.
                     tracing::info!(
                         channel,
                         audio_pairs = a_valves.len(),
-                        "SRT A/V input valves open together"
+                        "SRT audio input valve(s) open first"
                     );
+                }
+                if video_ready.load(Ordering::SeqCst)
+                    && audio_opened.load(Ordering::SeqCst)
+                    && video_opened
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                {
+                    let _ = v_valve.set_property("drop", false);
+                    tracing::info!(channel, "SRT video input valve open after audio");
                 }
             })
         };
@@ -475,8 +480,7 @@ fn first_pmt_is_full_av(ts: &[u8], min_audio: usize) -> bool {
         .is_some_and(|sec| pmt_has_av(&sec, min_audio))
 }
 
-/// Safe to release to MediaMTX only when every PMT in the payload is full A/V
-/// (a mixed list with an older video-only PMT would still poison MTX).
+/// Ready when the *latest* PMT in the payload is full A/V.
 fn ts_ready_for_mediamtx(
     chunks: &[Vec<u8>],
     min_audio: usize,
@@ -487,12 +491,10 @@ fn ts_ready_for_mediamtx(
     for c in chunks {
         data.extend_from_slice(c);
     }
-    let mut any_pmt = false;
-    let mut all_av = true;
     let mut union = Vec::new();
     let mut best_audio: Vec<u16> = Vec::new();
+    let mut last: Option<Vec<(u8, u16)>> = None;
     for sec in pmt_sections(&data) {
-        any_pmt = true;
         let mut uniq = Vec::new();
         for &(t, pid) in &sec {
             if (t == 0x0f || t == 0x11) && !uniq.contains(&pid) {
@@ -502,16 +504,17 @@ fn ts_ready_for_mediamtx(
         if uniq.len() > best_audio.len() {
             best_audio = uniq;
         }
-        if !pmt_has_av(&sec, min_audio) {
-            all_av = false;
-        }
         for (t, _) in &sec {
             if !union.contains(t) {
                 union.push(*t);
             }
         }
+        last = Some(sec);
     }
-    (any_pmt && all_av, union, best_audio)
+    let ready = last
+        .as_ref()
+        .is_some_and(|sec| pmt_has_av(sec, min_audio));
+    (ready, union, best_audio)
 }
 
 /// Go/FFmpeg `OutputURL` puts `latency` in **microseconds**; GStreamer/libsrt URI
