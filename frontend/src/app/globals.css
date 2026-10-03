@@ -1454,6 +1454,16 @@ html {
   display: none;
 }
 
+/* Extra listen_* taps used only for 8ch HLS peak meters. */
+.hls-meter-tap {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
 .listen-btn {
   font-size: 0.62rem !important;
   padding: 0 6px !important;

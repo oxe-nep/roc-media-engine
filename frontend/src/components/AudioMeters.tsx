@@ -2,10 +2,14 @@
 
 import { useEffect, useRef, type ReactNode } from "react";
 import { useMeterLevels, type MeterBus } from "@/hooks/useDashboard";
+import type { AudioLevels } from "@/lib/api";
 import {
+  HLS_METER_PAIR_COUNT,
   PreviewLatencyProvider,
   useDelayedMeterLevels,
+  useHlsMeterBanks,
   usePreviewDelayMs,
+  type HlsMeterBanks,
 } from "@/lib/previewLatency";
 
 const METER_SEGMENTS = 24;
@@ -135,6 +139,24 @@ function MeterBank({ dbs, labels, title }: { dbs: number[]; labels: string[]; ti
   );
 }
 
+/** Prefer HLS listen-pair peaks for all 8 channels; WS delay only as fallback. */
+function mergeHlsBanks(
+  levels: AudioLevels | undefined,
+  banks: HlsMeterBanks,
+): AudioLevels | undefined {
+  const anyHls = banks.some((p) => p != null);
+  if (!anyHls) return levels;
+  const ch = meterChannels(levels);
+  for (let pair = 0; pair < HLS_METER_PAIR_COUNT; pair++) {
+    const p = banks[pair];
+    if (!p) continue;
+    const i = pair * 2;
+    ch[i] = p.l;
+    ch[i + 1] = p.r;
+  }
+  return { l: ch[0] ?? -90, r: ch[1] ?? -90, channels: ch };
+}
+
 function AudioMetersInner({
   channelId,
   bus,
@@ -148,7 +170,9 @@ function AudioMetersInner({
 }) {
   const live = useMeterLevels(channelId, bus);
   const delayMs = usePreviewDelayMs();
-  const levels = useDelayedMeterLevels(live, delayMs);
+  const delayed = useDelayedMeterLevels(live, delayMs);
+  const hlsBanks = useHlsMeterBanks();
+  const levels = mergeHlsBanks(delayed, hlsBanks);
   const ch = meterChannels(levels);
   if (channels === 2) {
     return (
@@ -173,7 +197,7 @@ function AudioMetersInner({
   );
 }
 
-/** Peak meters delayed to match HLS preview latency (live peaks are ~seconds ahead). */
+/** Meters: HLS peaks for the playing listen pair; delayed WS for the rest. */
 export default function AudioMeters(props: {
   channelId: number;
   bus: MeterBus;

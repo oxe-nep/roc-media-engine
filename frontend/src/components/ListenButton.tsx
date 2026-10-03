@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { unlockHlsAudio } from "@/lib/hlsAudioMeter";
 
 export const LISTEN_PAIRS = [
   { id: 0, label: "1–2" },
@@ -38,7 +39,10 @@ export default function ListenButton({ pair, onChange, disabled, stereoOnly }: P
         type="button"
         className={`badge listen-btn ${listening ? "active" : ""}`}
         disabled={disabled}
-        onClick={() => onChange(listening ? null : 0)}
+        onClick={() => {
+          unlockHlsAudio();
+          onChange(listening ? null : 0);
+        }}
         title={listening ? "Listening 1–2" : "Listen 1–2"}
       >
         {listening ? "🔊" : "🔈"}
@@ -47,6 +51,7 @@ export default function ListenButton({ pair, onChange, disabled, stereoOnly }: P
   }
 
   const pick = (id: number) => {
+    unlockHlsAudio();
     onChange(pair === id ? null : id);
     setOpen(false);
   };
@@ -57,7 +62,10 @@ export default function ListenButton({ pair, onChange, disabled, stereoOnly }: P
         type="button"
         className={`badge listen-btn ${listening ? "active" : ""}`}
         disabled={disabled}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          unlockHlsAudio();
+          setOpen((v) => !v);
+        }}
         title={listening ? `Listening ${label}` : "Listen — choose pair"}
         aria-expanded={open}
         aria-haspopup="menu"

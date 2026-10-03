@@ -142,6 +142,7 @@ export default function DecodeGrid() {
                       listenPair={listenAt}
                       playlistPath={`/hls/playout/${c.id}/preview.m3u8?s=${encodeURIComponent(previewKey)}`}
                       sessionKey={previewKey}
+                      meterPairs={1}
                     />
                     {on && isFile && (c.duration_sec ?? 0) > 0 && (
                       <div className="thumb-badges">
