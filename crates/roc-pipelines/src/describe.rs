@@ -448,15 +448,17 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
     let has_udp = opts.udp_egress.is_some();
     let has_srt = opts.srt_url.is_some();
     match (&opts.udp_egress, &opts.srt_url) {
-        (Some(udp), Some(srt)) => {
+        (Some(udp), Some(_srt)) => {
             let (host, port) = udp_host_port(udp);
+            // SRT URI is applied in Rust (appsink → appsrc → srtsink gate).
             out_branches.push(format!(
                 "e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
                  mpegtsmux name=tsmux alignment=7 ! tee name=ts_out allow-not-linked=true \
                  ts_out. ! queue ! udpsink host={host} port={port} sync=false async=false \
-                 ts_out. ! identity name=srt_gate silent=true ! queue name=q_srt ! \
-                 srtsink uri=\"{srt}\" wait-for-connection=false auto-reconnect=true \
-                 async=false sync=false"
+                 ts_out. ! queue name=q_srt max-size-buffers=8 max-size-time=0 max-size-bytes=0 \
+                 leaky=downstream ! \
+                 appsink name=srt_in emit-signals=true sync=false async=false \
+                 max-buffers=8 drop=true"
             ));
         }
         (Some(udp), None) => {
@@ -467,13 +469,14 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
                  udpsink host={host} port={port} sync=false async=false"
             ));
         }
-        (None, Some(srt)) => {
+        (None, Some(_srt)) => {
             out_branches.push(format!(
                 "e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
                  mpegtsmux name=tsmux alignment=7 ! \
-                 identity name=srt_gate silent=true ! \
-                 srtsink uri=\"{srt}\" wait-for-connection=false auto-reconnect=true \
-                 async=false sync=false"
+                 queue name=q_srt max-size-buffers=8 max-size-time=0 max-size-bytes=0 \
+                 leaky=downstream ! \
+                 appsink name=srt_in emit-signals=true sync=false async=false \
+                 max-buffers=8 drop=true"
             ));
         }
         (None, None) => {}
@@ -669,7 +672,8 @@ mod tests {
         assert_eq!(launch.matches("voaacenc").count(), 4);
         assert!(launch.contains("tsmux"));
         assert!(launch.contains("ts_out"));
-        assert!(launch.contains("srt_gate"));
+        assert!(launch.contains("srt_in"));
+        assert!(launch.contains("appsink"));
         assert!(!launch.contains("srtmux"));
         assert!(!launch.contains("srt_v_valve"));
         assert_eq!(launch.matches("tsmux.").count(), 4);

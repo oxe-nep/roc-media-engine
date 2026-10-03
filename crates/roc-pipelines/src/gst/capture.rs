@@ -75,126 +75,172 @@ fn arm_av_gate_on_keyframe(video_identity: &gstreamer::Element, gate: std::sync:
     });
 }
 
-/// Gate SRT egress until a buffer starts with PAT + full A/V PMT.
+/// Wire `appsink srt_in` → gated `appsrc` → `srtsink`.
 ///
-/// HydraSRT tees opaque program TS to `srtsink` (no second remux). MediaMTX
-/// locks on the first PMT, and mpegtsmux has no property to wait for both pads
-/// (see GStreamer discourse + mpegtsmux docs). We drop on `srt_gate` until the
-/// current buffer itself starts with a full A/V PMT.
-fn arm_srt_valve_on_full_pmt(
+/// Pad-probe Drop was leaking poison BUFFER_LISTs (open-chunk dump was clean A/V
+/// while the SRT capture still started with an older AAC-only PMT). Pulling in
+/// userspace and only pushing approved buffers matches how we must control the
+/// first bytes MediaMTX locks on. HydraSRT avoids this by never remuxing; we
+/// still encode, so the gate stays.
+fn arm_srt_appsink_gate(
     channel: u32,
-    gate: &gstreamer::Element,
+    pipeline: &gstreamer::Pipeline,
+    srt_uri: &str,
     min_audio_es: usize,
-) {
-    use gstreamer::{PadProbeReturn, PadProbeType};
+) -> anyhow::Result<()> {
+    use gstreamer::prelude::*;
+    use gstreamer::{Caps, FlowError, FlowSuccess, Format};
+    use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
+    use std::str::FromStr;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
 
+    let appsink_el = pipeline
+        .by_name("srt_in")
+        .ok_or_else(|| anyhow::anyhow!("appsink srt_in missing"))?;
+    let appsink = appsink_el
+        .downcast::<AppSink>()
+        .map_err(|_| anyhow::anyhow!("srt_in is not AppSink"))?;
+
+    let appsrc_el = gstreamer::ElementFactory::make("appsrc")
+        .name(format!("srt_out_{channel}"))
+        .build()
+        .map_err(|e| anyhow::anyhow!("appsrc: {e}"))?;
+    let appsrc = appsrc_el
+        .clone()
+        .downcast::<AppSrc>()
+        .map_err(|_| anyhow::anyhow!("appsrc downcast"))?;
+    appsrc.set_format(Format::Bytes);
+    appsrc.set_is_live(true);
+    appsrc.set_block(false);
+    appsrc.set_property("emit-signals", false);
+    let _ = appsrc.set_caps(Some(
+        &Caps::from_str("video/mpegts,systemstream=(boolean)true")
+            .map_err(|e| anyhow::anyhow!("mpegts caps: {e}"))?,
+    ));
+
+    let srtsink = gstreamer::ElementFactory::make("srtsink")
+        .name(format!("srt_sink_{channel}"))
+        .property("uri", srt_uri)
+        .property("wait-for-connection", false)
+        .property("auto-reconnect", true)
+        .property("async", false)
+        .property("sync", false)
+        .build()
+        .map_err(|e| anyhow::anyhow!("srtsink: {e}"))?;
+
+    pipeline
+        .add_many([&appsrc_el, &srtsink])
+        .map_err(|e| anyhow::anyhow!("add srt appsrc/sink: {e}"))?;
+    appsrc_el
+        .link(&srtsink)
+        .map_err(|e| anyhow::anyhow!("link appsrc→srtsink: {e}"))?;
+    appsrc_el
+        .sync_state_with_parent()
+        .map_err(|e| anyhow::anyhow!("sync appsrc: {e}"))?;
+    srtsink
+        .sync_state_with_parent()
+        .map_err(|e| anyhow::anyhow!("sync srtsink: {e}"))?;
+
     let min_audio_es = min_audio_es.max(1);
     let opened = Arc::new(AtomicBool::new(false));
-    let Some(sink) = gate.static_pad("sink") else {
-        tracing::warn!(channel, "srt_gate has no sink pad");
-        return;
-    };
-
     let last_log = Arc::new(AtomicU64::new(0));
     let first_ts = Arc::new(AtomicU64::new(0));
-    sink.add_probe(
-        PadProbeType::BUFFER | PadProbeType::BUFFER_LIST,
-        move |_, info| {
-            let mut chunk = Vec::new();
-            if let Some(list) = info.buffer_list() {
-                for buf in list.iter() {
-                    if let Ok(map) = buf.map_readable() {
-                        chunk.extend_from_slice(map.as_slice());
+    let appsrc_cb = appsrc.clone();
+
+    appsink.set_callbacks(
+        AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = match sink.pull_sample() {
+                    Ok(s) => s,
+                    Err(_) => return Err(FlowError::Error),
+                };
+                let Some(buffer) = sample.buffer() else {
+                    return Ok(FlowSuccess::Ok);
+                };
+                let Ok(map) = buffer.map_readable() else {
+                    return Ok(FlowSuccess::Ok);
+                };
+                let chunk = map.as_slice();
+                if chunk.is_empty() {
+                    return Ok(FlowSuccess::Ok);
+                }
+
+                let has_poison = chunk_has_incomplete_pmt(chunk, min_audio_es);
+                let first_ok = first_pmt_is_full_av(chunk, min_audio_es);
+
+                if opened.load(Ordering::SeqCst) {
+                    if has_poison && !first_ok {
+                        return Ok(FlowSuccess::Ok);
+                    }
+                } else {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let _ = first_ts.compare_exchange(
+                        0,
+                        now,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    );
+                    if !(first_ok && !has_poison && ts_starts_with_pat(chunk)) {
+                        let started = first_ts.load(Ordering::Relaxed);
+                        let prev = last_log.load(Ordering::Relaxed);
+                        if now != prev
+                            && last_log
+                                .compare_exchange(
+                                    prev,
+                                    now,
+                                    Ordering::Relaxed,
+                                    Ordering::Relaxed,
+                                )
+                                .is_ok()
+                        {
+                            let (_, types, audio_pid_list) =
+                                ts_ready_for_mediamtx(std::slice::from_ref(&chunk.to_vec()), min_audio_es);
+                            tracing::warn!(
+                                channel,
+                                bytes = chunk.len(),
+                                ?types,
+                                min_audio_es,
+                                audio = audio_pid_list.len(),
+                                waited_s = now.saturating_sub(started),
+                                "SRT appsink waiting for PAT + full A/V PMT"
+                            );
+                        }
+                        return Ok(FlowSuccess::Ok);
+                    }
+                    if opened
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        let dump = format!("/tmp/srt-gate-open-ch{channel}.ts");
+                        let _ = std::fs::write(&dump, chunk);
+                        let (_, types, audio_pid_list) =
+                            ts_ready_for_mediamtx(std::slice::from_ref(&chunk.to_vec()), min_audio_es);
+                        tracing::info!(
+                            channel,
+                            ?types,
+                            ?audio_pid_list,
+                            bytes = chunk.len(),
+                            %dump,
+                            "SRT appsink gate open — pushing first clean buffer"
+                        );
                     }
                 }
-            } else if let Some(buf) = info.buffer() {
-                if let Ok(map) = buf.map_readable() {
-                    chunk.extend_from_slice(map.as_slice());
+
+                let out = buffer.copy();
+                match appsrc_cb.push_buffer(out) {
+                    Ok(_) => Ok(FlowSuccess::Ok),
+                    Err(_) => Err(FlowError::Flushing),
                 }
-            }
-            if chunk.is_empty() {
-                consume_probe_data(info);
-                return PadProbeReturn::Drop;
-            }
-
-            // Any incomplete PMT in the buffer is poison for MediaMTX (including
-            // PMT-only buffers without a PAT — pat_pmt_pids would miss those if
-            // we only looked at first_pmt_is_full_av).
-            let has_poison = chunk_has_incomplete_pmt(&chunk, min_audio_es);
-            let first_ok = first_pmt_is_full_av(&chunk, min_audio_es);
-
-            if opened.load(Ordering::SeqCst) {
-                if has_poison && !first_ok {
-                    consume_probe_data(info);
-                    return PadProbeReturn::Drop;
-                }
-                return PadProbeReturn::Ok;
-            }
-
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let _ = first_ts.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
-
-            // Require PAT + full A/V as the first SI so the wire order MediaMTX
-            // sees cannot start on a poison PMT-only burst.
-            if first_ok && !has_poison && ts_starts_with_pat(&chunk) {
-                let (_, types, audio_pid_list) =
-                    ts_ready_for_mediamtx(std::slice::from_ref(&chunk), min_audio_es);
-                if opened
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-                {
-                    let dump = format!("/tmp/srt-gate-open-ch{channel}.ts");
-                    let _ = std::fs::write(&dump, &chunk);
-                    tracing::info!(
-                        channel,
-                        ?types,
-                        ?audio_pid_list,
-                        min_audio_es,
-                        bytes = chunk.len(),
-                        %dump,
-                        head = format!("{:02x?}", &chunk[..chunk.len().min(8)]),
-                        why = "pat_plus_full_av",
-                        "SRT gate open (Hydra tee / probe drop)"
-                    );
-                }
-                return PadProbeReturn::Ok;
-            }
-
-            let started = first_ts.load(Ordering::Relaxed);
-            let prev = last_log.load(Ordering::Relaxed);
-            if now != prev
-                && last_log
-                    .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-            {
-                let (_, types, audio_pid_list) =
-                    ts_ready_for_mediamtx(std::slice::from_ref(&chunk), min_audio_es);
-                tracing::warn!(
-                    channel,
-                    bytes = chunk.len(),
-                    ?types,
-                    min_audio_es,
-                    audio = audio_pid_list.len(),
-                    waited_s = now.saturating_sub(started),
-                    "SRT waiting for buffer starting with full A/V PMT"
-                );
-            }
-            // take_* so BUFFER_LIST cannot leak past a Drop return.
-            consume_probe_data(info);
-            PadProbeReturn::Drop
-        },
+            })
+            .build(),
     );
-}
 
-fn consume_probe_data(info: &mut gstreamer::PadProbeInfo) {
-    if info.take_buffer_list().is_none() {
-        let _ = info.take_buffer();
-    }
+    tracing::info!(channel, %srt_uri, "SRT appsink↔appsrc gate armed");
+    Ok(())
 }
 
 /// Collect PMT PIDs declared in PAT (PID 0). Avoids false "PMT" matches inside
@@ -911,20 +957,16 @@ impl ChannelPipeline {
 
         // Arm SRT PMT gate *before* PLAYING so the first mux packets are probed.
         self.srt_bitrate = None;
-        if srt_for_launch.is_some() {
+        if let Some(uri) = srt_for_launch.as_deref() {
             let meter = BitrateMeter::new();
-            if let Some(gate) = pipeline.by_name("srt_gate") {
-                if let Some(pad) = gate.static_pad("src") {
+            if let Err(err) = arm_srt_appsink_gate(self.id, &pipeline, uri, 1) {
+                tracing::error!(channel = self.id, error = %err, "SRT appsink gate failed");
+            } else if let Some(src) = pipeline.by_name(&format!("srt_out_{}", self.id)) {
+                if let Some(pad) = src.static_pad("src") {
                     let _ = meter.attach_probe(&pad);
                 }
-                arm_srt_valve_on_full_pmt(self.id, &gate, 1);
             }
             self.srt_bitrate = Some(meter);
-            tracing::info!(
-                channel = self.id,
-                gst_uri = srt_for_launch.as_deref().unwrap_or(""),
-                "SRT baked into capture launch (teed TS + srt_gate)"
-            );
         }
 
         pipeline
@@ -1442,7 +1484,7 @@ impl ChannelPipeline {
             );
         }
 
-        arm_srt_valve_on_full_pmt(self.id, &valve, pairs.max(1));
+        let _ = (valve, pairs); // legacy attach path unused; relaunch uses appsink gate.
 
         for el in &elements {
             el.sync_state_with_parent()
