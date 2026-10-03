@@ -464,6 +464,16 @@ impl ChannelPipeline {
                 }
             }
             self.srt_bitrate = Some(meter);
+            if let Some(valve) = pipeline.by_name("srt_valve") {
+                let ch = self.id;
+                std::thread::spawn(move || {
+                    // mpegtsmux emits an AAC-only PMT first; wait until H.264 is
+                    // registered so MediaMTX does not lock a video-less track list.
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    let _ = valve.set_property("drop", false);
+                    tracing::info!(channel = ch, "SRT valve open — full A/V PMT should be live");
+                });
+            }
             tracing::info!(
                 channel = self.id,
                 gst_uri = srt_for_launch.as_deref().unwrap_or(""),

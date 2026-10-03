@@ -353,12 +353,12 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         // Bake A+V into the initial graph (same pattern as UDP). Dynamically
         // attaching AAC later makes mpegtsmux emit an incomplete first PMT —
         // MediaMTX then reports "undeclared track" and WebRTC gets no Opus.
-        // Match the working UDP mux exactly (no leaky queue before mpegtsmux —
-        // leaky was dropping the events that register H.264 in the PMT, leaving
-        // only AAC declared → MediaMTX "undeclared track" on the video PID).
+        // valve starts closed — engine opens it after ~500ms so the first TS
+        // MediaMTX sees already has H.264+AAC in the PMT (early PMT is AAC-only).
         out_branches.push(format!(
             "e. ! queue name=q_srt_v ! {parse} config-interval=-1 ! {bs} ! \
              mpegtsmux name=srtmux alignment=7 ! \
+             valve name=srt_valve drop=true ! \
              srtsink uri=\"{url}\" wait-for-connection=false auto-reconnect=true \
              async=false sync=false \
              a. ! queue max-size-buffers=64 leaky=downstream ! \
