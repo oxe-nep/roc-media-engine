@@ -16,7 +16,7 @@ type Tile = {
 };
 
 const tiles = new Set<Tile>();
-let timer: ReturnType<typeof setInterval> | null = null;
+let timer: number | null = null;
 
 function latencySec(tile: Tile): number | null {
   let sec = tile.hls.latency;
@@ -85,7 +85,7 @@ function ensureTimer() {
 
 function stopTimerIfEmpty() {
   if (tiles.size > 0 || timer == null) return;
-  clearInterval(timer);
+  window.clearInterval(timer);
   timer = null;
 }
 
