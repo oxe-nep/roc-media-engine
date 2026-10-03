@@ -75,35 +75,19 @@ fn arm_av_gate_on_keyframe(video_identity: &gstreamer::Element, gate: std::sync:
     });
 }
 
-/// Gate SRT egress so MediaMTX never sees an incomplete first PMT.
+/// Gate SRT egress until the shared MPEG-TS program has a full A/V PMT.
 ///
-/// MediaMTX locks tracks from the first PAT/PMT. `mpegtsmux` often emits a
-/// single-stream PMT when one branch wins the race — VLC re-parses later, MTX
-/// does not. Strategy:
-/// 1. Hold `srt_v_valve` + every `srt_a_valveN` until each branch has a buffer,
-///    then open them together so the first PMT is born with H.264+AAC (1 or 4).
-/// 2. Drop mux-src until A/V is ready, then open egress (never hold forever —
-///    a stuck drop backpressures the encode tee and crackles UDP/preview).
-/// 3. Prefer joint A/V input valves; fall back to PMT parse on mux-src.
-/// Replace probe payload while preserving Buffer vs BufferList type.
-/// gstreamer-rs asserts the returned data type matches the probe invocation.
-fn replace_probe_ts(info: &mut gstreamer::PadProbeInfo, bytes: Vec<u8>) {
-    let buf = gstreamer::Buffer::from_mut_slice(bytes);
-    if info.buffer_list().is_some() {
-        info.data = Some(gstreamer::PadProbeData::BufferList(buf.into()));
-    } else {
-        info.data = Some(gstreamer::PadProbeData::Buffer(buf));
-    }
-}
-
+/// HydraSRT (streamband/hydra-srt) tees an opaque program TS to `srtsink` and
+/// never remuxes. We do the same via `tsmux ! tee ! srt_valve`. MediaMTX still
+/// locks tracks on the first PMT it sees, so keep `srt_valve` closed until the
+/// mux has emitted a full H.264+AAC PMT (GStreamer discourse: drop until both
+/// streams have been seen — there is no mpegtsmux property for this).
+///
+/// No buffer rewrite: gstreamer-rs panics if BUFFER_LIST probes return Buffer,
+/// and Hydra only mutates PAT in-place when needed.
 fn arm_srt_valve_on_full_pmt(
     channel: u32,
     out_valve: &gstreamer::Element,
-    mux: &gstreamer::Element,
-    video_valve: Option<&gstreamer::Element>,
-    audio_valves: &[gstreamer::Element],
-    video_branch_src: Option<&gstreamer::Pad>,
-    audio_branch_srcs: &[gstreamer::Pad],
     min_audio_es: usize,
 ) {
     use gstreamer::{PadProbeReturn, PadProbeType};
@@ -114,119 +98,20 @@ fn arm_srt_valve_on_full_pmt(
     let _ = out_valve.set_property("drop", true);
     let min_audio_es = min_audio_es.max(1);
     let opened = Arc::new(AtomicBool::new(false));
-    let open_egress = {
-        let opened = opened.clone();
-        let out_valve = out_valve.clone();
-        Arc::new(move |types: Vec<u8>, audio_pid_list: Vec<u16>, why: &'static str| {
-            if opened
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                let _ = out_valve.set_property("drop", false);
-                tracing::info!(
-                    channel,
-                    ?types,
-                    ?audio_pid_list,
-                    min_audio_es,
-                    why,
-                    "SRT valve open"
-                );
-            }
-        })
-    };
-
-    // Release A+V into the mux together once every gated branch has produced.
-    let can_joint_open = video_valve.is_some()
-        && video_branch_src.is_some()
-        && !audio_valves.is_empty()
-        && audio_valves.len() == audio_branch_srcs.len();
-    if can_joint_open {
-        let v_valve = video_valve.unwrap().clone();
-        let vpad = video_branch_src.unwrap().clone();
-        let _ = v_valve.set_property("drop", true);
-        for a in audio_valves {
-            let _ = a.set_property("drop", true);
-        }
-        let video_ready = Arc::new(AtomicBool::new(false));
-        let audio_ready: Vec<Arc<AtomicBool>> = audio_valves
-            .iter()
-            .map(|_| Arc::new(AtomicBool::new(false)))
-            .collect();
-        let released = Arc::new(AtomicBool::new(false));
-        let a_valves: Vec<_> = audio_valves.to_vec();
-        let try_release = {
-            let video_ready = video_ready.clone();
-            let audio_ready = audio_ready.clone();
-            let released = released.clone();
-            let v_valve = v_valve.clone();
-            let a_valves = a_valves.clone();
-            Arc::new(move || {
-                if !video_ready.load(Ordering::SeqCst) {
-                    return;
-                }
-                if !audio_ready.iter().all(|f| f.load(Ordering::SeqCst)) {
-                    return;
-                }
-                if released
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-                {
-                    // Release together; egress probe trims any poison PMT prefix.
-                    let _ = v_valve.set_property("drop", false);
-                    for a in &a_valves {
-                        let _ = a.set_property("drop", false);
-                    }
-                    tracing::info!(
-                        channel,
-                        audio_pairs = a_valves.len(),
-                        "SRT A/V input valves open together"
-                    );
-                }
-            })
-        };
-        {
-            let video_ready = video_ready.clone();
-            let try_release = try_release.clone();
-            vpad.add_probe(PadProbeType::BUFFER, move |_, _| {
-                video_ready.store(true, Ordering::SeqCst);
-                try_release();
-                PadProbeReturn::Remove
-            });
-        }
-        for (i, apad) in audio_branch_srcs.iter().enumerate() {
-            let flag = audio_ready[i].clone();
-            let try_release = try_release.clone();
-            apad.add_probe(PadProbeType::BUFFER, move |_, _| {
-                flag.store(true, Ordering::SeqCst);
-                try_release();
-                PadProbeReturn::Remove
-            });
-        }
-    } else {
-        if let Some(v) = video_valve {
-            let _ = v.set_property("drop", false);
-        }
-        for a in audio_valves {
-            let _ = a.set_property("drop", false);
-        }
-    }
-
-    let Some(src) = mux.static_pad("src") else {
-        tracing::warn!(channel, "srtmux has no src pad — opening SRT valve");
-        open_egress(vec![], vec![], "no_mux_src");
+    let Some(sink) = out_valve.static_pad("sink") else {
+        tracing::warn!(channel, "srt_valve has no sink pad — leaving drop=true");
         return;
     };
 
     let last_log = Arc::new(AtomicU64::new(0));
     let first_ts = Arc::new(AtomicU64::new(0));
-    // PMT sections (esp. 4×AAC) often span multiple BUFFER_LIST pushes — keep a
-    // rolling window so reassembly can finish across probe callbacks.
     let window = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-    src.add_probe(
+    sink.add_probe(
         PadProbeType::BUFFER | PadProbeType::BUFFER_LIST,
         move |_, info| {
-            // Borrow only — take_buffer(_list) marks the probe as Dropped and
-            // panics if we assign info.data again (gstreamer-rs pad.rs).
+            if opened.load(Ordering::SeqCst) {
+                return PadProbeReturn::Ok;
+            }
             let mut chunk = Vec::new();
             if let Some(list) = info.buffer_list() {
                 for buf in list.iter() {
@@ -240,7 +125,7 @@ fn arm_srt_valve_on_full_pmt(
                 }
             }
             if chunk.is_empty() {
-                return PadProbeReturn::Drop;
+                return PadProbeReturn::Ok;
             }
 
             let now = std::time::SystemTime::now()
@@ -260,64 +145,27 @@ fn arm_srt_valve_on_full_pmt(
                 w.clone()
             };
 
-            // After open: strip poison PMT prefixes if present; else pass through.
-            if opened.load(Ordering::SeqCst) {
-                if !first_pmt_is_full_av(&chunk, min_audio_es)
-                    && chunk_has_incomplete_pmt(&chunk, min_audio_es)
+            let (ready, types, audio_pid_list) =
+                ts_ready_for_mediamtx(std::slice::from_ref(&window_bytes), min_audio_es);
+            if ready {
+                if opened
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
                 {
-                    if let Some(trimmed) = trim_ts_to_first_av_pmt(&chunk, min_audio_es) {
-                        tracing::warn!(channel, "SRT trimmed poison PMT prefix after open");
-                        replace_probe_ts(info, trimmed);
-                        return PadProbeReturn::Ok;
-                    }
-                    tracing::warn!(channel, "SRT dropping poison PMT chunk after valve open");
-                    return PadProbeReturn::Drop;
+                    let _ = out_valve.set_property("drop", false);
+                    tracing::info!(
+                        channel,
+                        ?types,
+                        ?audio_pid_list,
+                        min_audio_es,
+                        why = "clean_pmt",
+                        "SRT valve open (Hydra tee gate)"
+                    );
                 }
                 return PadProbeReturn::Ok;
             }
 
-            let (ready, types, audio_pid_list) =
-                ts_ready_for_mediamtx(std::slice::from_ref(&window_bytes), min_audio_es);
-
-            // Open from the *window* (not the current list alone) so a clean
-            // PAT+A/V PMT is always the first bytes MediaMTX sees.
-            if ready {
-                if let Some(emit) = trim_ts_to_first_av_pmt(&window_bytes, min_audio_es) {
-                    if first_pmt_is_full_av(&emit, min_audio_es) {
-                        open_egress(types, audio_pid_list, "clean_pmt");
-                        if let Ok(mut w) = window.lock() {
-                            w.clear();
-                        }
-                        tracing::info!(
-                            channel,
-                            emit_bytes = emit.len(),
-                            window_bytes = window_bytes.len(),
-                            "SRT open emitting PAT + first A/V PMT"
-                        );
-                        replace_probe_ts(info, emit);
-                        return PadProbeReturn::Ok;
-                    }
-                }
-            }
-
             let started = first_ts.load(Ordering::Relaxed);
-            if started > 0 && now.saturating_sub(started) >= 8 {
-                if let Some(emit) = trim_ts_to_first_av_pmt(&window_bytes, min_audio_es) {
-                    if first_pmt_is_full_av(&emit, min_audio_es) {
-                        open_egress(types, audio_pid_list, "timeout_trimmed");
-                        if let Ok(mut w) = window.lock() {
-                            w.clear();
-                        }
-                        replace_probe_ts(info, emit);
-                        return PadProbeReturn::Ok;
-                    }
-                }
-                tracing::warn!(
-                    channel,
-                    ?types,
-                    "SRT PMT gate timeout — still dropping (no clean A/V PMT)"
-                );
-            }
             let prev = last_log.load(Ordering::Relaxed);
             if now != prev
                 && last_log
@@ -330,11 +178,13 @@ fn arm_srt_valve_on_full_pmt(
                     ?types,
                     min_audio_es,
                     audio = audio_pid_list.len(),
-                    sync = chunk.first().copied(),
-                    "SRT still waiting for full A/V PMT — dropping TS"
+                    waited_s = now.saturating_sub(started),
+                    "SRT waiting for full A/V PMT — valve still dropping"
                 );
             }
-            PadProbeReturn::Drop
+            // Valve drop=true discards; do not PadProbeReturn::Drop (that would
+            // also starve the shared tee's other branches if mis-wired).
+            PadProbeReturn::Ok
         },
     );
 }
@@ -497,6 +347,7 @@ fn pmt_has_av(es: &[(u8, u16)], min_audio: usize) -> bool {
 }
 
 /// True when the payload contains at least one PMT that is not full A/V.
+#[allow(dead_code)] // kept for MediaMTX PMT diagnostics / future harden
 fn chunk_has_incomplete_pmt(ts: &[u8], min_audio: usize) -> bool {
     pmt_sections(ts)
         .into_iter()
@@ -504,6 +355,7 @@ fn chunk_has_incomplete_pmt(ts: &[u8], min_audio: usize) -> bool {
 }
 
 /// True when the first PMT in wire order is full A/V (what MediaMTX locks on).
+#[allow(dead_code)]
 fn first_pmt_is_full_av(ts: &[u8], min_audio: usize) -> bool {
     pmt_sections(ts)
         .into_iter()
@@ -513,6 +365,7 @@ fn first_pmt_is_full_av(ts: &[u8], min_audio: usize) -> bool {
 
 /// Build a TS slice that starts with PAT + first full A/V PMT, skipping any
 /// poison AAC-only/video-only PMT that mpegtsmux emitted earlier in the chunk.
+#[allow(dead_code)]
 fn trim_ts_to_first_av_pmt(ts: &[u8], min_audio: usize) -> Option<Vec<u8>> {
     let pmt_pids = pat_pmt_pids(ts);
     if pmt_pids.is_empty() {
@@ -919,42 +772,24 @@ impl ChannelPipeline {
         self.srt_bitrate = None;
         if srt_for_launch.is_some() {
             let meter = BitrateMeter::new();
-            if let Some(q) = pipeline.by_name("q_srt_v") {
+            if let Some(q) = pipeline.by_name("q_srt") {
                 if let Some(pad) = q.static_pad("src") {
+                    let _ = meter.attach_probe(&pad);
+                }
+            } else if let Some(valve) = pipeline.by_name("srt_valve") {
+                if let Some(pad) = valve.static_pad("sink") {
                     let _ = meter.attach_probe(&pad);
                 }
             }
             self.srt_bitrate = Some(meter);
-            if let (Some(valve), Some(mux)) =
-                (pipeline.by_name("srt_valve"), pipeline.by_name("srtmux"))
-            {
-                let v_valve = pipeline.by_name("srt_v_valve");
-                let a_valve = pipeline.by_name("srt_a_valve0");
-                let audio_valves: Vec<_> = a_valve.into_iter().collect();
-                let v_src = v_valve
-                    .as_ref()
-                    .and_then(|v| v.static_pad("sink"))
-                    .and_then(|p| p.peer());
-                let a_srcs: Vec<_> = audio_valves
-                    .iter()
-                    .filter_map(|v| v.static_pad("sink").and_then(|p| p.peer()))
-                    .collect();
-                arm_srt_valve_on_full_pmt(
-                    self.id,
-                    &valve,
-                    &mux,
-                    v_valve.as_ref(),
-                    &audio_valves,
-                    v_src.as_ref(),
-                    &a_srcs,
-                    1,
-                );
+            if let Some(valve) = pipeline.by_name("srt_valve") {
+                // Gate until shared tsmux has full A/V PMT (Hydra tee model).
+                arm_srt_valve_on_full_pmt(self.id, &valve, 1);
             }
             tracing::info!(
                 channel = self.id,
                 gst_uri = srt_for_launch.as_deref().unwrap_or(""),
-                audio_pairs = 1u32,
-                "SRT baked into capture launch (stereo AAC + PMT gate; 8ch deferred)"
+                "SRT baked into capture launch (teed TS + PMT valve)"
             );
         }
 
@@ -1473,17 +1308,7 @@ impl ChannelPipeline {
             );
         }
 
-        // Dynamic attach path: no pre-mux input valves — mux-src Drop is the gate.
-        arm_srt_valve_on_full_pmt(
-            self.id,
-            &valve,
-            &mux,
-            None,
-            &[],
-            None,
-            &[],
-            pairs,
-        );
+        arm_srt_valve_on_full_pmt(self.id, &valve, pairs.max(1));
 
         for el in &elements {
             el.sync_state_with_parent()

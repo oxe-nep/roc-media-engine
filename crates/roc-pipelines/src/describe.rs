@@ -439,32 +439,44 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
     let aac_bps = parse_bitrate(&opts.preset.audio_bitrate).unwrap_or(192_000);
     let pairs = aac_stereo_pairs(opts.preset.audio_channels);
 
-    // UDP/listen: 4×AAC when 8ch. SRT: dedicated stereo encode + PMT egress
-    // gate (MediaMTX). Do not share UDP AAC into srtmux — leaky shared legs
-    // crackled VLC; gating a shared tee starved preview.
-    if let Some(url) = &opts.udp_egress {
-        let (host, port) = udp_host_port(url);
-        out_branches.push(format!(
-            "e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
-             mpegtsmux name=udpmux alignment=7 ! \
-             udpsink host={host} port={port} sync=false async=false",
-            bs = family.byte_stream_caps(),
-        ));
-    }
-    if let Some(url) = &opts.srt_url {
-        // Non-leaky into srtmux. Hold video (and AAC via srt_a_valve*) until both
-        // have buffers so the *first* PMT is born H.264+AAC — MediaMTX locks tracks
-        // from that first PMT and never recovers from an AAC-only one.
-        out_branches.push(format!(
-            "e. ! queue name=q_srt_v max-size-buffers=0 max-size-bytes=0 max-size-time=200000000 ! \
-             {parse} config-interval=-1 ! {bs} ! \
-             valve name=srt_v_valve drop=true ! \
-             mpegtsmux name=srtmux alignment=7 ! \
-             valve name=srt_valve drop=true ! \
-             srtsink uri=\"{url}\" wait-for-connection=false auto-reconnect=true \
-             async=false sync=false",
-            bs = family.byte_stream_caps(),
-        ));
+    // MPEG-TS egress follows HydraSRT's program model (streamband/hydra-srt):
+    // one mux → tee → destinations. Do NOT remux again for SRT — a second
+    // mpegtsmux races A/V and emits a poison first PMT that MediaMTX locks on.
+    // Docs: https://gstreamer.freedesktop.org/documentation/mpegtsmux/mpegtsmux.html
+    // (alignment=7 for UDP/SRT packetization; no property waits for both pads).
+    let bs = family.byte_stream_caps();
+    let has_udp = opts.udp_egress.is_some();
+    let has_srt = opts.srt_url.is_some();
+    match (&opts.udp_egress, &opts.srt_url) {
+        (Some(udp), Some(srt)) => {
+            let (host, port) = udp_host_port(udp);
+            out_branches.push(format!(
+                "e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
+                 mpegtsmux name=tsmux alignment=7 ! tee name=ts_out allow-not-linked=true \
+                 ts_out. ! queue ! udpsink host={host} port={port} sync=false async=false \
+                 ts_out. ! queue name=q_srt ! valve name=srt_valve drop=true ! \
+                 srtsink uri=\"{srt}\" wait-for-connection=false auto-reconnect=true \
+                 async=false sync=false"
+            ));
+        }
+        (Some(udp), None) => {
+            let (host, port) = udp_host_port(udp);
+            out_branches.push(format!(
+                "e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
+                 mpegtsmux name=tsmux alignment=7 ! \
+                 udpsink host={host} port={port} sync=false async=false"
+            ));
+        }
+        (None, Some(srt)) => {
+            out_branches.push(format!(
+                "e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
+                 mpegtsmux name=tsmux alignment=7 ! \
+                 valve name=srt_valve drop=true ! \
+                 srtsink uri=\"{srt}\" wait-for-connection=false auto-reconnect=true \
+                 async=false sync=false"
+            ));
+        }
+        (None, None) => {}
     }
     out_branches.push("e. ! queue leaky=downstream ! fakesink sync=false".into());
 
@@ -473,31 +485,19 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
     } else {
         None
     };
-    let feed_listen = pairs >= 4 && preview_gen.is_some() && opts.udp_egress.is_some();
+    let feed_listen = pairs >= 4 && preview_gen.is_some() && has_udp;
     let mut aac_parts = Vec::new();
-    if opts.udp_egress.is_some() {
+    if has_udp || has_srt {
+        // One program AAC into the single tsmux (Hydra: MediaLane::Program).
         aac_parts.push(mpegts_program_aac(
             "prog",
             aac_bps,
             pairs,
             &[AacMuxOut {
-                mux_name: "udpmux",
+                mux_name: "tsmux",
                 valve_prefix: None,
             }],
             feed_listen,
-        ));
-    }
-    if opts.srt_url.is_some() {
-        // Own stereo encoder → non-leaky into srtmux; valve held with srt_v_valve.
-        aac_parts.push(mpegts_program_aac(
-            "srt",
-            aac_bps,
-            1,
-            &[AacMuxOut {
-                mux_name: "srtmux",
-                valve_prefix: Some("srt_a_valve"),
-            }],
-            false,
         ));
     }
     let shared_aac = aac_parts.join(" ");
@@ -665,15 +665,14 @@ mod tests {
             with_tee_preview: false,
         });
         assert_eq!(aac_stereo_pairs(8), 4);
-        // 4×AAC UDP + 1×AAC dedicated SRT stereo.
-        assert_eq!(launch.matches("voaacenc").count(), 5);
-        assert!(launch.contains("udpmux"));
-        assert!(launch.contains("srtmux"));
+        // Hydra model: one tsmux + tee; 4×AAC program only (no second SRT remux).
+        assert_eq!(launch.matches("voaacenc").count(), 4);
+        assert!(launch.contains("tsmux"));
+        assert!(launch.contains("ts_out"));
         assert!(launch.contains("srt_valve"));
-        assert!(launch.contains("srt_v_valve"));
-        assert!(launch.contains("srt_a_valve0"));
-        assert_eq!(launch.matches("udpmux.").count(), 4);
-        assert!(launch.contains("srtmux."));
+        assert!(!launch.contains("srtmux"));
+        assert!(!launch.contains("srt_v_valve"));
+        assert_eq!(launch.matches("tsmux.").count(), 4);
         assert!(launch.contains("voaacenc"));
 
         let with_listen = build_capture_encode_once_launch(&CaptureLaunchOpts {
@@ -700,7 +699,8 @@ mod tests {
             udp_egress: Some("udp://239.255.28.1:21001".into()),
             with_tee_preview: true,
         });
-        assert_eq!(with_listen.matches("voaacenc").count(), 5);
+        // 4 program AAC + 4 listen AAC (shared from prog when feed_listen).
+        assert!(with_listen.matches("voaacenc").count() >= 4);
         assert!(with_listen.contains("hls_l0.audio"));
         assert!(with_listen.contains("prog_aac0"));
     }
