@@ -348,8 +348,20 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         ));
     }
     if let Some(url) = &opts.srt_url {
+        let matrix = stereo_pair_matrix(0);
+        let aac_bps = parse_bitrate(&opts.preset.audio_bitrate).unwrap_or(192_000);
+        // Bake A+V into the initial graph (same pattern as UDP). Dynamically
+        // attaching AAC later makes mpegtsmux emit an incomplete first PMT —
+        // MediaMTX then reports "undeclared track" and WebRTC gets no Opus.
         out_branches.push(format!(
-            "e. ! queue ! {parse} ! mpegtsmux alignment=7 ! srtsink uri=\"{url}\" wait-for-connection=false"
+            "e. ! queue name=q_srt_v ! {parse} config-interval=-1 ! {bs} ! \
+             mpegtsmux name=srtmux alignment=7 ! \
+             srtsink uri=\"{url}\" wait-for-connection=false auto-reconnect=true \
+             a. ! queue max-size-buffers=64 leaky=downstream ! \
+             audioconvert mix-matrix=\"{matrix}\" ! audio/x-raw,channels=2 ! \
+             voaacenc bitrate={aac_bps} ! aacparse ! \
+             capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts ! srtmux.",
+            bs = family.byte_stream_caps(),
         ));
     }
     if let Some(url) = &opts.udp_egress {

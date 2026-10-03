@@ -341,8 +341,7 @@ impl ChannelPipeline {
     fn relaunch_preserving_branches(&mut self, mode: &str) -> Result<()> {
         let was_rec = self.recording;
         let rec_path = self.recording_path.clone();
-        let was_srt = self.srt;
-        let srt_url = self.srt_url.clone();
+        // Keep self.srt / self.srt_url — launch_locked bakes SRT into the graph.
 
         let _ = self.detach_recording(false);
         let _ = self.detach_srt(false);
@@ -350,7 +349,6 @@ impl ChannelPipeline {
             let _ = p.set_state(gstreamer::State::Null);
         }
         self.recording = false;
-        self.srt = false;
         self.recording_path = None;
         if mode != "auto" && !mode.is_empty() {
             self.locked_mode = mode.to_string();
@@ -365,11 +363,6 @@ impl ChannelPipeline {
         if was_rec {
             if let Some(path) = rec_path {
                 let _ = self.start_recording(&path);
-            }
-        }
-        if was_srt {
-            if let Some(url) = srt_url {
-                let _ = self.start_srt(&url);
             }
         }
         Ok(())
@@ -429,13 +422,20 @@ impl ChannelPipeline {
             }
         }
         let playlist = format!("{hls_dir}/preview.m3u8");
+        let srt_for_launch = if self.srt {
+            self.srt_url
+                .as_deref()
+                .map(normalize_srt_uri_for_gst)
+        } else {
+            None
+        };
         let launch = build_capture_encode_once_launch(&CaptureLaunchOpts {
             device: self.device.clone(),
             mode: locked.to_string(),
             preset: self.preset.clone(),
             preview_path: Some(playlist),
             record_path: None,
-            srt_url: None,
+            srt_url: srt_for_launch.clone(),
             udp_egress: self.udp_egress.clone(),
             with_tee_preview: true,
         });
@@ -456,6 +456,20 @@ impl ChannelPipeline {
             }
         }
         self.srt_bitrate = None;
+        if srt_for_launch.is_some() {
+            let meter = BitrateMeter::new();
+            if let Some(q) = pipeline.by_name("q_srt_v") {
+                if let Some(pad) = q.static_pad("src") {
+                    let _ = meter.attach_probe(&pad);
+                }
+            }
+            self.srt_bitrate = Some(meter);
+            tracing::info!(
+                channel = self.id,
+                gst_uri = srt_for_launch.as_deref().unwrap_or(""),
+                "SRT baked into capture launch (A+V ADTS)"
+            );
+        }
         self.pipeline = Some(pipeline);
         self.status = ChannelStatus::Waiting;
         self.last_error = None;
@@ -506,12 +520,15 @@ impl ChannelPipeline {
         if self.pipeline.is_none() {
             bail!("capture not running");
         }
-        if self.srt {
-            let _ = self.detach_srt(false);
-        }
         self.srt_url = Some(url.to_string());
-        self.attach_srt(url)?;
         self.srt = true;
+        let mode = if self.locked_mode.is_empty() {
+            self.configured_mode.clone()
+        } else {
+            self.locked_mode.clone()
+        };
+        // Relaunch with SRT in the encode-once graph so mpegtsmux sees A+V from t=0.
+        self.relaunch_preserving_branches(&mode)?;
         Ok(())
     }
 
@@ -519,8 +536,14 @@ impl ChannelPipeline {
         if !self.srt {
             return Ok(());
         }
-        self.detach_srt(false)?;
+        let _ = self.detach_srt(false);
         self.srt = false;
+        let mode = if self.locked_mode.is_empty() {
+            self.configured_mode.clone()
+        } else {
+            self.locked_mode.clone()
+        };
+        self.relaunch_preserving_branches(&mode)?;
         Ok(())
     }
 
