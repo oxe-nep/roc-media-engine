@@ -1,4 +1,8 @@
-//! Per-channel GStreamer capture graph with dynamic REC/SRT branches (no full relaunch).
+//! Per-channel GStreamer capture graph.
+//!
+//! REC attaches as a dynamic branch on the encoded tee. SRT relaunches the
+//! graph so one `mpegtsmux` is teed to UDP + a gated appsink→appsrc→srtsink
+//! path (Hydra-style opaque TS; MediaMTX locks the first PMT).
 
 use anyhow::{anyhow, bail, Context, Result};
 use gstreamer::prelude::*;
@@ -550,62 +554,6 @@ fn first_pmt_is_full_av(ts: &[u8], min_audio: usize) -> bool {
         .is_some_and(|sec| pmt_has_av(&sec, min_audio))
 }
 
-/// Build a TS slice that starts with PAT + first full A/V PMT, skipping any
-/// poison AAC-only/video-only PMT that mpegtsmux emitted earlier in the chunk.
-#[allow(dead_code)]
-fn trim_ts_to_first_av_pmt(ts: &[u8], min_audio: usize) -> Option<Vec<u8>> {
-    let pmt_pids = pat_pmt_pids(ts);
-    if pmt_pids.is_empty() {
-        return None;
-    }
-    let mut last_pat: Option<usize> = None;
-    let mut i = 0usize;
-    while i + 188 <= ts.len() {
-        if ts[i] != 0x47 {
-            i += 1;
-            continue;
-        }
-        let pkt = &ts[i..i + 188];
-        let pid = (((pkt[1] & 0x1f) as u16) << 8) | pkt[2] as u16;
-        let pusi = pkt[1] & 0x40 != 0;
-        if pid == 0 && pusi {
-            last_pat = Some(i);
-        }
-        if pusi && pmt_pids.contains(&pid) {
-            let afc = (pkt[3] >> 4) & 0x3;
-            let mut off = 4usize;
-            if afc == 2 || afc == 3 {
-                off = 5 + pkt[4] as usize;
-            }
-            if off >= 187 {
-                i += 188;
-                continue;
-            }
-            let ptr = pkt[off] as usize;
-            let p = off + 1 + ptr;
-            if p >= 188 || pkt[p] != 0x02 {
-                i += 188;
-                continue;
-            }
-            let secs = pmt_sections(&ts[i..]);
-            if let Some(sec) = secs.first() {
-                if pmt_has_av(sec, min_audio) {
-                    let pat_off = last_pat?;
-                    // PAT packet + everything from this A/V PMT onward (skip poison).
-                    let mut out = Vec::with_capacity(188 + ts.len() - i);
-                    out.extend_from_slice(&ts[pat_off..pat_off + 188]);
-                    out.extend_from_slice(&ts[i..]);
-                    if first_pmt_is_full_av(&out, min_audio) {
-                        return Some(out);
-                    }
-                }
-            }
-        }
-        i += 188;
-    }
-    None
-}
-
 /// Ready when the *latest* PMT in the payload is full A/V.
 fn ts_ready_for_mediamtx(
     chunks: &[Vec<u8>],
@@ -730,14 +678,13 @@ pub struct ChannelPipeline {
     parse_element: String,
     pipeline: Option<gstreamer::Pipeline>,
     rec_branch: Option<Branch>,
-    srt_branch: Option<Branch>,
     /// Avoid relaunch storms: last adapt attempt.
     last_adapt: Option<std::time::Instant>,
     /// Peak dBFS per discrete channel (8). Updated from `level` bus messages.
     audio_peaks: [f64; 8],
     /// Live encoded bitstream rate (tee `e` sink probe).
     encode_bitrate: BitrateMeter,
-    /// Live SRT MPEG-TS rate (mpegtsmux → srtsink), only while SRT attached.
+    /// Live SRT MPEG-TS rate (appsrc → srtsink), only while SRT is enabled.
     srt_bitrate: Option<BitrateMeter>,
 }
 
@@ -786,7 +733,6 @@ impl ChannelPipeline {
             udp_egress: ch.udp_egress.clone(),
             pipeline: None,
             rec_branch: None,
-            srt_branch: None,
             last_adapt: None,
             audio_peaks: [-90.0; 8],
             encode_bitrate: BitrateMeter::new(),
@@ -851,12 +797,12 @@ impl ChannelPipeline {
         // Keep self.srt / self.srt_url — launch_locked bakes SRT into the graph.
 
         let _ = self.detach_recording(false);
-        let _ = self.detach_srt(false);
         if let Some(p) = self.pipeline.take() {
             let _ = p.set_state(gstreamer::State::Null);
         }
         self.recording = false;
         self.recording_path = None;
+        self.srt_bitrate = None;
         if mode != "auto" && !mode.is_empty() {
             self.locked_mode = mode.to_string();
         }
@@ -987,7 +933,6 @@ impl ChannelPipeline {
 
     pub fn stop(&mut self) -> Result<()> {
         let _ = self.detach_recording(false);
-        let _ = self.detach_srt(false);
         if let Some(p) = self.pipeline.take() {
             let _ = p.send_event(gstreamer::event::Eos::new());
             let _ = p.set_state(gstreamer::State::Null);
@@ -1045,8 +990,8 @@ impl ChannelPipeline {
         if !self.srt {
             return Ok(());
         }
-        let _ = self.detach_srt(false);
         self.srt = false;
+        self.srt_bitrate = None;
         let mode = if self.locked_mode.is_empty() {
             self.configured_mode.clone()
         } else {
@@ -1356,198 +1301,6 @@ impl ChannelPipeline {
                 a_tee.release_request_pad(audio_pad);
             }
         }
-    }
-
-    #[allow(dead_code)]
-    fn attach_srt(&mut self, url: &str) -> Result<()> {
-        let pipeline = self
-            .pipeline
-            .as_ref()
-            .ok_or_else(|| anyhow!("no pipeline"))?
-            .clone();
-        let tee = self.encoded_tee()?;
-        let audio_tee = pipeline.by_name("a");
-        let gst_url = normalize_srt_uri_for_gst(url);
-        if gst_url != url {
-            tracing::info!(
-                channel = self.id,
-                from = %url,
-                to = %gst_url,
-                "normalized SRT URI latency for GStreamer (µs→ms)"
-            );
-        }
-
-        let queue_v = gstreamer::ElementFactory::make("queue")
-            .name(format!("q_srt_v_{}", self.id))
-            .build()
-            .context("queue video")?;
-        let parse = gstreamer::ElementFactory::make(&self.parse_element)
-            .name(format!("parse_srt_{}", self.id))
-            .build()
-            .with_context(|| format!("make {}", self.parse_element))?;
-        // Critical for players joining mid-stream (MediaMTX/VLC): repeat parameter sets
-        // on every IDR. Without this, many clients get AAC audio only and no video.
-        let _ = parse.set_property_from_str("config-interval", "-1");
-        // Annex-B into mpegtsmux — avc/hvc1 length-prefixed NALs produce undecodable TS.
-        let bs_caps = if self.parse_element.contains("265") {
-            "video/x-h265,stream-format=byte-stream,alignment=au"
-        } else {
-            "video/x-h264,stream-format=byte-stream,alignment=au"
-        };
-        let capsfilter = gstreamer::ElementFactory::make("capsfilter")
-            .name(format!("cf_srt_{}", self.id))
-            .property(
-                "caps",
-                gstreamer::Caps::from_str(bs_caps).context("srt byte-stream caps")?,
-            )
-            .build()
-            .context("srt capsfilter")?;
-        let mux = gstreamer::ElementFactory::make("mpegtsmux")
-            .name(format!("mux_srt_{}", self.id))
-            .property("alignment", 7i32)
-            .build()
-            .context("mpegtsmux")?;
-        // Drop TS until both A/V have entered the mux (complete first PMT).
-        let valve = gstreamer::ElementFactory::make("valve")
-            .name(format!("valve_srt_{}", self.id))
-            .property("drop", true)
-            .build()
-            .context("srt pmt valve")?;
-        // Bounded leaky queue so a disconnected peer cannot grow RAM forever.
-        let q_br = gstreamer::ElementFactory::make("queue")
-            .name(format!("q_srt_br_{}", self.id))
-            .property_from_str("leaky", "downstream")
-            .property("max-size-buffers", 30u32)
-            .property("max-size-bytes", 0u32)
-            .property("max-size-time", 0u64)
-            .build()
-            .context("srt bitrate queue")?;
-        // wait-for-connection=false: never stall the shared capture graph if the
-        // peer is down; auto-reconnect keeps trying (caller → MediaMTX).
-        let sink = gstreamer::ElementFactory::make("srtsink")
-            .name(format!("srt_sink_{}", self.id))
-            .property("uri", &gst_url)
-            .property("wait-for-connection", false)
-            .property("auto-reconnect", true)
-            .build()
-            .context("srtsink")?;
-
-        let mut elements = vec![
-            queue_v.clone(),
-            parse.clone(),
-            capsfilter.clone(),
-            mux.clone(),
-            valve.clone(),
-            q_br.clone(),
-            sink.clone(),
-        ];
-        pipeline.add_many([
-            &queue_v,
-            &parse,
-            &capsfilter,
-            &mux,
-            &valve,
-            &q_br,
-            &sink,
-        ])?;
-        queue_v.link(&parse).context("link srt queue→parse")?;
-        parse
-            .link(&capsfilter)
-            .context("link srt parse→capsfilter")?;
-        capsfilter.link(&mux).context("link srt capsfilter→mux")?;
-        mux.link(&valve).context("link srt mux→valve")?;
-        valve.link(&q_br).context("link srt valve→bitrate queue")?;
-        q_br.link(&sink).context("link srt bitrate queue→sink")?;
-
-        // Do not keyframe-gate / single-segment here — that delays AAC and yields
-        // a video-only first PMT (MediaMTX then ignores audio PID 66).
-        let mut audio_tee_pads = Vec::new();
-        let pairs = aac_stereo_pairs(self.preset.audio_channels);
-        if let Some(a_tee) = audio_tee {
-            match self.link_program_aac(&pipeline, &a_tee, &mux, "srt", false) {
-                Ok((a_pads, audio_els)) => {
-                    audio_tee_pads = a_pads;
-                    elements.extend(audio_els);
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        channel = self.id,
-                        error = %err,
-                        "SRT video-only — program AAC attach failed"
-                    );
-                }
-            }
-        } else {
-            tracing::warn!(
-                channel = self.id,
-                "SRT video-only — audio tee `a` missing (preview/listen not in graph)"
-            );
-        }
-
-        let _ = (valve, pairs); // legacy attach path unused; relaunch uses appsink gate.
-
-        for el in &elements {
-            el.sync_state_with_parent()
-                .context("sync_state_with_parent srt")?;
-        }
-
-        let srt_meter = BitrateMeter::new();
-        // Count encoded video entering the SRT branch (flows even if srtsink has no peer).
-        if let Some(pad) = queue_v.static_pad("src") {
-            let _ = srt_meter.attach_probe(&pad);
-        }
-        self.srt_bitrate = Some(srt_meter);
-
-        let tee_pad = tee
-            .request_pad_simple("src_%u")
-            .ok_or_else(|| anyhow!("video tee request_pad failed"))?;
-        let sink_pad = queue_v
-            .static_pad("sink")
-            .ok_or_else(|| anyhow!("srt video queue sink"))?;
-        tee_pad
-            .link(&sink_pad)
-            .context("link video tee → srt queue")?;
-
-        // Keep the operator-facing URL (may still be FFmpeg µs form) for API/UI.
-        self.srt_url = Some(url.to_string());
-
-        tracing::info!(
-            channel = self.id,
-            %url,
-            gst_uri = %gst_url,
-            audio_pairs = audio_tee_pads.len(),
-            "attached SRT branch (no relaunch)"
-        );
-        self.srt_branch = Some(Branch {
-            tee_pad,
-            audio_tee_pads,
-            elements,
-        });
-        Ok(())
-    }
-
-    fn detach_srt(&mut self, _finalize: bool) -> Result<()> {
-        let Some(branch) = self.srt_branch.take() else {
-            return Ok(());
-        };
-        let pipeline = self
-            .pipeline
-            .as_ref()
-            .ok_or_else(|| anyhow!("no pipeline"))?
-            .clone();
-        let tee = self.encoded_tee()?;
-
-        Self::unlink_branch(&pipeline, &tee, &branch);
-
-        for el in branch.elements.iter().rev() {
-            let _ = el.set_state(gstreamer::State::Null);
-        }
-        for el in &branch.elements {
-            let _ = pipeline.remove(el);
-        }
-        self.srt_bitrate = None;
-        tracing::info!(channel = self.id, "detached SRT branch");
-        Ok(())
     }
 
     pub fn poll_bus(&mut self) {
