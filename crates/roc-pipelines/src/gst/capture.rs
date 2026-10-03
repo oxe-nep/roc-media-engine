@@ -108,15 +108,6 @@ fn arm_srt_valve_on_full_pmt(
     sink.add_probe(
         PadProbeType::BUFFER | PadProbeType::BUFFER_LIST,
         move |_, info| {
-            if opened.load(Ordering::SeqCst) {
-                // After open, still block SI bursts that start with a poison PMT.
-                if chunk_has_incomplete_pmt(&chunk, min_audio_es)
-                    && !first_pmt_is_full_av(&chunk, min_audio_es)
-                {
-                    return PadProbeReturn::Drop;
-                }
-                return PadProbeReturn::Ok;
-            }
             let mut chunk = Vec::new();
             if let Some(list) = info.buffer_list() {
                 for buf in list.iter() {
@@ -130,6 +121,16 @@ fn arm_srt_valve_on_full_pmt(
                 }
             }
             if chunk.is_empty() {
+                return PadProbeReturn::Drop;
+            }
+
+            if opened.load(Ordering::SeqCst) {
+                // After open, still block SI bursts that start with a poison PMT.
+                if chunk_has_incomplete_pmt(&chunk, min_audio_es)
+                    && !first_pmt_is_full_av(&chunk, min_audio_es)
+                {
+                    return PadProbeReturn::Drop;
+                }
                 return PadProbeReturn::Ok;
             }
 
