@@ -255,7 +255,7 @@ fn arm_srt_valve_on_full_pmt(
                         if off > 0 && off < chunk.len() {
                             let trimmed = chunk[off..].to_vec();
                             let new_buf = gstreamer::Buffer::from_mut_slice(trimmed);
-                            info.set_buffer(new_buf);
+                            info.data = Some(gstreamer::PadProbeData::Buffer(new_buf));
                             tracing::warn!(
                                 channel,
                                 trim_off = off,
@@ -288,7 +288,7 @@ fn arm_srt_valve_on_full_pmt(
                     open_egress(types, audio_pid_list, "clean_pmt");
                     if emit.len() != chunk.len() {
                         let new_buf = gstreamer::Buffer::from_mut_slice(emit);
-                        info.set_buffer(new_buf);
+                        info.data = Some(gstreamer::PadProbeData::Buffer(new_buf));
                         tracing::info!(channel, "SRT trimmed to first A/V PAT/PMT");
                     }
                     return PadProbeReturn::Ok;
@@ -303,7 +303,7 @@ fn arm_srt_valve_on_full_pmt(
                     if first_pmt_is_full_av(&emit, min_audio_es) {
                         open_egress(types, audio_pid_list, "timeout_trimmed");
                         let new_buf = gstreamer::Buffer::from_mut_slice(emit);
-                        info.set_buffer(new_buf);
+                        info.data = Some(gstreamer::PadProbeData::Buffer(new_buf));
                         return PadProbeReturn::Ok;
                     }
                 }
