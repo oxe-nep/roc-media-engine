@@ -353,11 +353,12 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         // Bake A+V into the initial graph (same pattern as UDP). Dynamically
         // attaching AAC later makes mpegtsmux emit an incomplete first PMT —
         // MediaMTX then reports "undeclared track" and WebRTC gets no Opus.
+        // Match the working UDP mux exactly (no leaky queue before mpegtsmux —
+        // leaky was dropping the events that register H.264 in the PMT, leaving
+        // only AAC declared → MediaMTX "undeclared track" on the video PID).
         out_branches.push(format!(
-            "e. ! queue name=q_srt_v max-size-buffers=30 leaky=downstream ! \
-             {parse} config-interval=-1 ! {bs} ! \
+            "e. ! queue name=q_srt_v ! {parse} config-interval=-1 ! {bs} ! \
              mpegtsmux name=srtmux alignment=7 ! \
-             queue max-size-buffers=30 leaky=downstream ! \
              srtsink uri=\"{url}\" wait-for-connection=false auto-reconnect=true \
              async=false sync=false \
              a. ! queue max-size-buffers=64 leaky=downstream ! \
