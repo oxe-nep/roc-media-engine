@@ -245,24 +245,16 @@ fn arm_srt_valve_on_full_pmt(
                 }
             }
 
-            // After open: drop chunks whose first PMT is incomplete; pass clean PES.
+            // After open: drop/trim chunks whose first PMT is incomplete.
             if opened.load(Ordering::SeqCst) {
                 if chunk_has_incomplete_pmt(&chunk, min_audio_es)
                     && !first_pmt_is_full_av(&chunk, min_audio_es)
                 {
-                    // Try to trim poison prefix if this chunk also has a later A/V PMT.
-                    if let Some(off) = offset_of_pat_before_first_av_pmt(&chunk, min_audio_es) {
-                        if off > 0 && off < chunk.len() {
-                            let trimmed = chunk[off..].to_vec();
-                            let new_buf = gstreamer::Buffer::from_mut_slice(trimmed);
-                            info.data = Some(gstreamer::PadProbeData::Buffer(new_buf));
-                            tracing::warn!(
-                                channel,
-                                trim_off = off,
-                                "SRT trimmed poison PMT prefix after open"
-                            );
-                            return PadProbeReturn::Ok;
-                        }
+                    if let Some(trimmed) = trim_ts_to_first_av_pmt(&chunk, min_audio_es) {
+                        let new_buf = gstreamer::Buffer::from_mut_slice(trimmed);
+                        info.data = Some(gstreamer::PadProbeData::Buffer(new_buf));
+                        tracing::warn!(channel, "SRT trimmed poison PMT prefix after open");
+                        return PadProbeReturn::Ok;
                     }
                     tracing::warn!(channel, "SRT dropping poison PMT chunk after valve open");
                     return PadProbeReturn::Drop;
@@ -276,17 +268,14 @@ fn arm_srt_valve_on_full_pmt(
             };
 
             if ready {
-                // Prefer starting at the PAT before the first full A/V PMT.
                 let emit = if first_pmt_is_full_av(&chunk, min_audio_es) {
                     Some(chunk.clone())
                 } else {
-                    offset_of_pat_before_first_av_pmt(&chunk, min_audio_es)
-                        .map(|off| chunk[off..].to_vec())
-                        .filter(|t| first_pmt_is_full_av(t, min_audio_es))
+                    trim_ts_to_first_av_pmt(&chunk, min_audio_es)
                 };
                 if let Some(emit) = emit {
                     open_egress(types, audio_pid_list, "clean_pmt");
-                    if emit.len() != chunk.len() {
+                    if emit.len() != chunk.len() || !first_pmt_is_full_av(&chunk, min_audio_es) {
                         let new_buf = gstreamer::Buffer::from_mut_slice(emit);
                         info.data = Some(gstreamer::PadProbeData::Buffer(new_buf));
                         tracing::info!(channel, "SRT trimmed to first A/V PAT/PMT");
@@ -297,15 +286,11 @@ fn arm_srt_valve_on_full_pmt(
 
             let started = first_ts.load(Ordering::Relaxed);
             if started > 0 && now.saturating_sub(started) >= 8 {
-                // Last resort: still try to trim rather than blasting a poison prefix.
-                if let Some(off) = offset_of_pat_before_first_av_pmt(&chunk, min_audio_es) {
-                    let emit = chunk[off..].to_vec();
-                    if first_pmt_is_full_av(&emit, min_audio_es) {
-                        open_egress(types, audio_pid_list, "timeout_trimmed");
-                        let new_buf = gstreamer::Buffer::from_mut_slice(emit);
-                        info.data = Some(gstreamer::PadProbeData::Buffer(new_buf));
-                        return PadProbeReturn::Ok;
-                    }
+                if let Some(emit) = trim_ts_to_first_av_pmt(&chunk, min_audio_es) {
+                    open_egress(types, audio_pid_list, "timeout_trimmed");
+                    let new_buf = gstreamer::Buffer::from_mut_slice(emit);
+                    info.data = Some(gstreamer::PadProbeData::Buffer(new_buf));
+                    return PadProbeReturn::Ok;
                 }
                 tracing::warn!(
                     channel,
@@ -506,14 +491,14 @@ fn first_pmt_is_full_av(ts: &[u8], min_audio: usize) -> bool {
         .is_some_and(|sec| pmt_has_av(&sec, min_audio))
 }
 
-/// Byte offset of the PAT packet that immediately precedes the first full A/V
-/// PMT, so we can drop a poison AAC-only/video-only PMT prefix in the same chunk.
-fn offset_of_pat_before_first_av_pmt(ts: &[u8], min_audio: usize) -> Option<usize> {
+/// Build a TS slice that starts with PAT + first full A/V PMT, skipping any
+/// poison AAC-only/video-only PMT that mpegtsmux emitted earlier in the chunk.
+fn trim_ts_to_first_av_pmt(ts: &[u8], min_audio: usize) -> Option<Vec<u8>> {
     let pmt_pids = pat_pmt_pids(ts);
     if pmt_pids.is_empty() {
         return None;
     }
-    let mut last_pat_off: Option<usize> = None;
+    let mut last_pat: Option<usize> = None;
     let mut i = 0usize;
     while i + 188 <= ts.len() {
         if ts[i] != 0x47 {
@@ -524,14 +509,35 @@ fn offset_of_pat_before_first_av_pmt(ts: &[u8], min_audio: usize) -> Option<usiz
         let pid = (((pkt[1] & 0x1f) as u16) << 8) | pkt[2] as u16;
         let pusi = pkt[1] & 0x40 != 0;
         if pid == 0 && pusi {
-            last_pat_off = Some(i);
+            last_pat = Some(i);
         }
         if pusi && pmt_pids.contains(&pid) {
-            // Parse this PMT section (single-packet fast path; multi uses window).
+            let afc = (pkt[3] >> 4) & 0x3;
+            let mut off = 4usize;
+            if afc == 2 || afc == 3 {
+                off = 5 + pkt[4] as usize;
+            }
+            if off >= 187 {
+                i += 188;
+                continue;
+            }
+            let ptr = pkt[off] as usize;
+            let p = off + 1 + ptr;
+            if p >= 188 || pkt[p] != 0x02 {
+                i += 188;
+                continue;
+            }
             let secs = pmt_sections(&ts[i..]);
             if let Some(sec) = secs.first() {
                 if pmt_has_av(sec, min_audio) {
-                    return last_pat_off.or(Some(i));
+                    let pat_off = last_pat?;
+                    // PAT packet + everything from this A/V PMT onward (skip poison).
+                    let mut out = Vec::with_capacity(188 + ts.len() - i);
+                    out.extend_from_slice(&ts[pat_off..pat_off + 188]);
+                    out.extend_from_slice(&ts[i..]);
+                    if first_pmt_is_full_av(&out, min_audio) {
+                        return Some(out);
+                    }
                 }
             }
         }
