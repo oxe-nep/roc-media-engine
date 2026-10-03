@@ -214,16 +214,16 @@ fn arm_srt_valve_on_full_pmt(
     src.add_probe(
         PadProbeType::BUFFER | PadProbeType::BUFFER_LIST,
         move |_, info| {
-            // Take ownership so an original BUFFER_LIST cannot leak past us when
-            // we rewrite to a single Buffer (MediaMTX locks on the first PMT).
+            // Borrow only — take_buffer(_list) marks the probe as Dropped and
+            // panics if we assign info.data again (gstreamer-rs pad.rs).
             let mut chunk = Vec::new();
-            if let Some(list) = info.take_buffer_list() {
+            if let Some(list) = info.buffer_list() {
                 for buf in list.iter() {
                     if let Ok(map) = buf.map_readable() {
                         chunk.extend_from_slice(map.as_slice());
                     }
                 }
-            } else if let Some(buf) = info.take_buffer() {
+            } else if let Some(buf) = info.buffer() {
                 if let Ok(map) = buf.map_readable() {
                     chunk.extend_from_slice(map.as_slice());
                 }
@@ -332,7 +332,6 @@ fn arm_srt_valve_on_full_pmt(
                     "SRT still waiting for full A/V PMT — dropping TS"
                 );
             }
-            // Data already taken — Drop leaves nothing for the valve.
             PadProbeReturn::Drop
         },
     );
