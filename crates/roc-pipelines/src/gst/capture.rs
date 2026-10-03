@@ -90,9 +90,7 @@ fn arm_av_gate_on_keyframe(video_identity: &gstreamer::Element, gate: std::sync:
 fn replace_probe_ts(info: &mut gstreamer::PadProbeInfo, bytes: Vec<u8>) {
     let buf = gstreamer::Buffer::from_mut_slice(bytes);
     if info.buffer_list().is_some() {
-        let mut list = gstreamer::BufferList::new_sized(1);
-        list.add(buf);
-        info.data = Some(gstreamer::PadProbeData::BufferList(list));
+        info.data = Some(gstreamer::PadProbeData::BufferList(buf.into()));
     } else {
         info.data = Some(gstreamer::PadProbeData::Buffer(buf));
     }
