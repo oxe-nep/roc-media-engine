@@ -101,7 +101,12 @@ fn meter_branch() -> &'static str {
      fakesink sync=false async=false"
 }
 
-/// Four audio-only listen HLS playlists (`listen_0.m3u8` … `listen_3.m3u8`).
+/// Four listen HLS playlists (`listen_0.m3u8` … `listen_3.m3u8`) with the
+/// **same** preview H.264 muxed in. Separate audio-only playlists cannot stay
+/// lipsynced with `preview.m3u8` in hls.js (two independent live timelines).
+///
+/// Expects encoded preview tee `pv` and DeckLink audio tee `a`.
+/// Audio must use hlssink2's `audio` request pad (bare `hls.` grabs video).
 ///
 /// Uses `audioconvert mix-matrix` (not `audiomixmatrix`): manual mixmatrix emits
 /// `channel-mask=0`, which `voaacenc` rejects for stereo (needs `0x3`).
@@ -113,11 +118,13 @@ fn listen_hls_branches(hls_dir: &str, gen: u64) -> String {
         // Generation stamp matches FFmpeg preview.go — avoids stale segment reuse in hls.js.
         let seg = format!("{hls_dir}/l{gen}_{pair}_%05d.ts");
         parts.push(format!(
-            "a. ! queue max-size-buffers=64 leaky=downstream ! \
+            "pv. ! queue max-size-buffers=3 leaky=downstream ! \
+             h264parse config-interval=-1 ! \
+             hlssink2 name=hls_l{pair} location=\"{seg}\" playlist-location=\"{playlist}\" \
+             target-duration=1 max-files=6 playlist-length=6 \
+             a. ! queue max-size-buffers=64 leaky=downstream ! \
              audioconvert mix-matrix=\"{matrix}\" ! audio/x-raw,channels=2 ! \
-             voaacenc bitrate=128000 ! aacparse ! \
-             hlssink2 location=\"{seg}\" playlist-location=\"{playlist}\" \
-             target-duration=1 max-files=6 playlist-length=6"
+             voaacenc bitrate=128000 ! aacparse ! hls_l{pair}.audio"
         ));
     }
     parts.join(" ")
@@ -375,12 +382,15 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
             .unwrap_or_else(|| "/tmp/roc-preview/preview.m3u8".into());
         let dir = hls_dir_from_playlist(&playlist);
         let seg = format!("{dir}/pv{gen}_%05d.ts");
+        // Encode once → tee `pv`: muted video-only preview + A+V listen_* muxes.
         format!(
             "t. ! queue max-size-buffers=3 leaky=downstream ! \
              videoconvert ! videoscale ! videorate ! \
              video/x-raw,width=640,height=360,framerate=10/1 ! \
              x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=10 bframes=0 ! \
              video/x-h264,profile=baseline ! h264parse config-interval=-1 ! \
+             tee name=pv \
+             pv. ! queue max-size-buffers=3 leaky=downstream ! \
              hlssink2 location=\"{seg}\" playlist-location=\"{playlist}\" \
              target-duration=1 max-files=6 playlist-length=6"
         )
