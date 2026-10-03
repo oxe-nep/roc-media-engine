@@ -141,41 +141,35 @@ fn arm_srt_valve_on_full_pmt(
             .iter()
             .map(|_| Arc::new(AtomicBool::new(false)))
             .collect();
-        let audio_opened = Arc::new(AtomicBool::new(false));
-        let video_opened = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
         let a_valves: Vec<_> = audio_valves.to_vec();
-        // Open AAC into the mux *before* video so mpegtsmux's first PMT that
-        // includes video already lists audio (avoids video-only → A/V flicker).
         let try_release = {
             let video_ready = video_ready.clone();
             let audio_ready = audio_ready.clone();
-            let audio_opened = audio_opened.clone();
-            let video_opened = video_opened.clone();
+            let released = released.clone();
             let v_valve = v_valve.clone();
             let a_valves = a_valves.clone();
             Arc::new(move || {
-                if audio_ready.iter().all(|f| f.load(Ordering::SeqCst))
-                    && audio_opened
-                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                        .is_ok()
+                if !video_ready.load(Ordering::SeqCst) {
+                    return;
+                }
+                if !audio_ready.iter().all(|f| f.load(Ordering::SeqCst)) {
+                    return;
+                }
+                if released
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
                 {
+                    // Release together; egress probe trims any poison PMT prefix.
+                    let _ = v_valve.set_property("drop", false);
                     for a in &a_valves {
                         let _ = a.set_property("drop", false);
                     }
                     tracing::info!(
                         channel,
                         audio_pairs = a_valves.len(),
-                        "SRT audio input valve(s) open first"
+                        "SRT A/V input valves open together"
                     );
-                }
-                if video_ready.load(Ordering::SeqCst)
-                    && audio_opened.load(Ordering::SeqCst)
-                    && video_opened
-                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                        .is_ok()
-                {
-                    let _ = v_valve.set_property("drop", false);
-                    tracing::info!(channel, "SRT video input valve open after audio");
                 }
             })
         };
@@ -235,57 +229,89 @@ fn arm_srt_valve_on_full_pmt(
             if chunk.is_empty() {
                 return PadProbeReturn::Drop;
             }
-            // Never forward a chunk with any incomplete PMT — MediaMTX locks tracks
-            // from the first PMT it sees (AAC-only *or* video-only both poison).
-            if chunk_has_incomplete_pmt(&chunk, min_audio_es) {
-                if opened.load(Ordering::SeqCst) {
-                    tracing::warn!(
-                        channel,
-                        "SRT dropping poison PMT chunk after valve open"
-                    );
-                }
-                // Still accumulate for readiness / logging before open.
-                if !opened.load(Ordering::SeqCst) {
-                    let mut w = window.lock().unwrap_or_else(|e| e.into_inner());
-                    w.extend_from_slice(&chunk);
-                    const MAX: usize = 64 * 1024;
-                    if w.len() > MAX {
-                        let drain = w.len() - MAX;
-                        w.drain(0..drain);
-                    }
-                }
-                return PadProbeReturn::Drop;
-            }
-            if opened.load(Ordering::SeqCst) {
-                return PadProbeReturn::Ok;
-            }
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             let _ = first_ts.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
-            let (ready, types, audio_pid_list) = {
+
+            {
                 let mut w = window.lock().unwrap_or_else(|e| e.into_inner());
                 w.extend_from_slice(&chunk);
-                // Keep ~64 KB — enough for several PAT/PMT cycles.
                 const MAX: usize = 64 * 1024;
                 if w.len() > MAX {
                     let drain = w.len() - MAX;
                     w.drain(0..drain);
                 }
-                ts_ready_for_mediamtx(std::slice::from_ref(&w.clone()), min_audio_es)
-            };
-            // Release only when this chunk's first PMT is already full A/V.
-            if ready && first_pmt_is_full_av(&chunk, min_audio_es) {
-                open_egress(types, audio_pid_list, "clean_pmt");
+            }
+
+            // After open: drop chunks whose first PMT is incomplete; pass clean PES.
+            if opened.load(Ordering::SeqCst) {
+                if chunk_has_incomplete_pmt(&chunk, min_audio_es)
+                    && !first_pmt_is_full_av(&chunk, min_audio_es)
+                {
+                    // Try to trim poison prefix if this chunk also has a later A/V PMT.
+                    if let Some(off) = offset_of_pat_before_first_av_pmt(&chunk, min_audio_es) {
+                        if off > 0 && off < chunk.len() {
+                            let trimmed = chunk[off..].to_vec();
+                            let new_buf = gstreamer::Buffer::from_mut_slice(trimmed);
+                            info.set_buffer(new_buf);
+                            tracing::warn!(
+                                channel,
+                                trim_off = off,
+                                "SRT trimmed poison PMT prefix after open"
+                            );
+                            return PadProbeReturn::Ok;
+                        }
+                    }
+                    tracing::warn!(channel, "SRT dropping poison PMT chunk after valve open");
+                    return PadProbeReturn::Drop;
+                }
                 return PadProbeReturn::Ok;
             }
-            // Hard fallback only: open after 5s so a wedged parser cannot stall
-            // the graph forever (q_srt_v is leaky; AAC valves drop without block).
+
+            let (ready, types, audio_pid_list) = {
+                let w = window.lock().unwrap_or_else(|e| e.into_inner());
+                ts_ready_for_mediamtx(std::slice::from_ref(&w.clone()), min_audio_es)
+            };
+
+            if ready {
+                // Prefer starting at the PAT before the first full A/V PMT.
+                let emit = if first_pmt_is_full_av(&chunk, min_audio_es) {
+                    Some(chunk.clone())
+                } else {
+                    offset_of_pat_before_first_av_pmt(&chunk, min_audio_es)
+                        .map(|off| chunk[off..].to_vec())
+                        .filter(|t| first_pmt_is_full_av(t, min_audio_es))
+                };
+                if let Some(emit) = emit {
+                    open_egress(types, audio_pid_list, "clean_pmt");
+                    if emit.len() != chunk.len() {
+                        let new_buf = gstreamer::Buffer::from_mut_slice(emit);
+                        info.set_buffer(new_buf);
+                        tracing::info!(channel, "SRT trimmed to first A/V PAT/PMT");
+                    }
+                    return PadProbeReturn::Ok;
+                }
+            }
+
             let started = first_ts.load(Ordering::Relaxed);
-            if started > 0 && now.saturating_sub(started) >= 5 {
-                open_egress(types, audio_pid_list, "timeout_fallback");
-                return PadProbeReturn::Ok;
+            if started > 0 && now.saturating_sub(started) >= 8 {
+                // Last resort: still try to trim rather than blasting a poison prefix.
+                if let Some(off) = offset_of_pat_before_first_av_pmt(&chunk, min_audio_es) {
+                    let emit = chunk[off..].to_vec();
+                    if first_pmt_is_full_av(&emit, min_audio_es) {
+                        open_egress(types, audio_pid_list, "timeout_trimmed");
+                        let new_buf = gstreamer::Buffer::from_mut_slice(emit);
+                        info.set_buffer(new_buf);
+                        return PadProbeReturn::Ok;
+                    }
+                }
+                tracing::warn!(
+                    channel,
+                    ?types,
+                    "SRT PMT gate timeout — still dropping (no clean A/V PMT)"
+                );
             }
             let prev = last_log.load(Ordering::Relaxed);
             if now != prev
@@ -478,6 +504,40 @@ fn first_pmt_is_full_av(ts: &[u8], min_audio: usize) -> bool {
         .into_iter()
         .next()
         .is_some_and(|sec| pmt_has_av(&sec, min_audio))
+}
+
+/// Byte offset of the PAT packet that immediately precedes the first full A/V
+/// PMT, so we can drop a poison AAC-only/video-only PMT prefix in the same chunk.
+fn offset_of_pat_before_first_av_pmt(ts: &[u8], min_audio: usize) -> Option<usize> {
+    let pmt_pids = pat_pmt_pids(ts);
+    if pmt_pids.is_empty() {
+        return None;
+    }
+    let mut last_pat_off: Option<usize> = None;
+    let mut i = 0usize;
+    while i + 188 <= ts.len() {
+        if ts[i] != 0x47 {
+            i += 1;
+            continue;
+        }
+        let pkt = &ts[i..i + 188];
+        let pid = (((pkt[1] & 0x1f) as u16) << 8) | pkt[2] as u16;
+        let pusi = pkt[1] & 0x40 != 0;
+        if pid == 0 && pusi {
+            last_pat_off = Some(i);
+        }
+        if pusi && pmt_pids.contains(&pid) {
+            // Parse this PMT section (single-packet fast path; multi uses window).
+            let secs = pmt_sections(&ts[i..]);
+            if let Some(sec) = secs.first() {
+                if pmt_has_av(sec, min_audio) {
+                    return last_pat_off.or(Some(i));
+                }
+            }
+        }
+        i += 188;
+    }
+    None
 }
 
 /// Ready when the *latest* PMT in the payload is full A/V.
