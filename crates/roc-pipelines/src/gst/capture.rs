@@ -595,7 +595,7 @@ impl ChannelPipeline {
             "audioconvert mix-matrix=\"<<1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0>, \
              <0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0>>\" ! \
              audio/x-raw,channels=2 ! voaacenc bitrate={aac_bps} ! aacparse ! \
-             audio/mpeg,mpegversion=4,stream-format=adts"
+             capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts"
         );
         let abin = gstreamer::parse::bin_from_description(&desc, true)
             .with_context(|| format!("parse {tag} audio bin"))?;

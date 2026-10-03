@@ -364,7 +364,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
              a. ! queue max-size-buffers=64 leaky=downstream ! \
              audioconvert mix-matrix=\"{matrix}\" ! audio/x-raw,channels=2 ! \
              voaacenc bitrate={aac_bps} ! aacparse ! \
-             audio/mpeg,mpegversion=4,stream-format=adts ! udpmux.",
+             capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts ! udpmux.",
             bs = family.byte_stream_caps(),
         ));
     }
