@@ -508,7 +508,7 @@ impl ChannelPipeline {
         let av_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut audio_tee_pad = None;
         if let Some(a_tee) = audio_tee {
-            match self.link_program_aac(&pipeline, &a_tee, &mux, "rec") {
+            match self.link_program_aac(&pipeline, &a_tee, &mux, "rec", true) {
                 Ok((a_pad, audio_els)) => {
                     // audio_els: [queue_a, abin, id_a] — gate on queue sink.
                     if let Some(q_a) = audio_els.first() {
@@ -568,18 +568,22 @@ impl ChannelPipeline {
     }
 
     /// Stereo pair 1–2 → AAC into an existing mux (mp4mux / mpegtsmux).
+    ///
+    /// `ts_align`: insert `identity single-segment` (needed for REC mp4mux late-join).
+    /// Leave false for live MPEG-TS/SRT — gating/restamp there makes PMT video-only.
     fn link_program_aac(
         &self,
         pipeline: &gstreamer::Pipeline,
         a_tee: &gstreamer::Element,
         mux: &gstreamer::Element,
         tag: &str,
+        ts_align: bool,
     ) -> Result<(gstreamer::Pad, Vec<gstreamer::Element>)> {
-        // Small hold for NVENC latency; GOP-scale skew is handled by keyframe gate.
+        let hold_ms = if ts_align { 40u64 } else { 0 };
         let queue_a = gstreamer::ElementFactory::make("queue")
             .name(format!("q_{tag}_a_{}", self.id))
-            .property("min-threshold-time", gstreamer::ClockTime::from_mseconds(40))
-            .property("max-size-buffers", 0u32)
+            .property("min-threshold-time", gstreamer::ClockTime::from_mseconds(hold_ms))
+            .property("max-size-buffers", 64u32)
             .property("max-size-bytes", 0u32)
             .property("max-size-time", gstreamer::ClockTime::from_mseconds(250))
             .build()
@@ -594,20 +598,30 @@ impl ChannelPipeline {
             .with_context(|| format!("parse {tag} audio bin"))?;
         abin.set_property("name", format!("{tag}_a_bin_{}", self.id));
         let abin_el: gstreamer::Element = abin.upcast();
-        let id_a = make_mux_ts_align(&format!("id_{tag}_a_{}", self.id))?;
 
+        let mut els = vec![queue_a.clone(), abin_el.clone()];
         pipeline
-            .add_many([&queue_a, &abin_el, &id_a])
+            .add_many([&queue_a, &abin_el])
             .context("add program audio elements")?;
         queue_a
             .link(&abin_el)
             .context("link audio queue → bin")?;
-        abin_el
-            .link(&id_a)
-            .context("link audio bin → identity")?;
-        id_a
-            .link(mux)
-            .context("link audio identity → mux")?;
+
+        if ts_align {
+            let id_a = make_mux_ts_align(&format!("id_{tag}_a_{}", self.id))?;
+            pipeline.add(&id_a).context("add audio identity")?;
+            abin_el
+                .link(&id_a)
+                .context("link audio bin → identity")?;
+            id_a
+                .link(mux)
+                .context("link audio identity → mux")?;
+            els.push(id_a);
+        } else {
+            abin_el
+                .link(mux)
+                .context("link audio bin → mux")?;
+        }
 
         let a_pad = a_tee
             .request_pad_simple("src_%u")
@@ -618,7 +632,7 @@ impl ChannelPipeline {
         a_pad
             .link(&a_sink)
             .context("link audio tee → queue")?;
-        Ok((a_pad, vec![queue_a, abin_el, id_a]))
+        Ok((a_pad, els))
     }
 
     fn detach_recording(&mut self, finalize: bool) -> Result<()> {
@@ -781,41 +795,32 @@ impl ChannelPipeline {
             .build()
             .context("srtsink")?;
 
-        let id_v = make_mux_ts_align(&format!("id_srt_v_{}", self.id))?;
         let mut elements = vec![
             queue_v.clone(),
             parse.clone(),
             capsfilter.clone(),
-            id_v.clone(),
             mux.clone(),
             q_br.clone(),
             sink.clone(),
         ];
-        pipeline.add_many([&queue_v, &parse, &capsfilter, &id_v, &mux, &q_br, &sink])?;
+        pipeline.add_many([&queue_v, &parse, &capsfilter, &mux, &q_br, &sink])?;
         queue_v.link(&parse).context("link srt queue→parse")?;
         parse
             .link(&capsfilter)
             .context("link srt parse→capsfilter")?;
-        capsfilter
-            .link(&id_v)
-            .context("link srt capsfilter→identity")?;
-        id_v.link(&mux).context("link srt identity→mux")?;
+        capsfilter.link(&mux).context("link srt capsfilter→mux")?;
         mux.link(&q_br).context("link srt mux→bitrate queue")?;
         q_br.link(&sink).context("link srt bitrate queue→sink")?;
 
-        // Program AAC with PMT from the start, but gate until first video keyframe
-        // (same lipsync fix as REC — avoid AAC leading by up to one GOP).
-        let av_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // AAC before video tee so mpegtsmux PMT includes audio from the first
+        // packets. Do not keyframe-gate or single-segment here — that lets video
+        // reach the mux alone and many players lock onto a video-only PMT.
         let mut audio_tee_pad = None;
         if let Some(a_tee) = audio_tee {
-            match self.link_program_aac(&pipeline, &a_tee, &mux, "srt") {
+            match self.link_program_aac(&pipeline, &a_tee, &mux, "srt", false) {
                 Ok((a_pad, audio_els)) => {
-                    if let Some(q_a) = audio_els.first() {
-                        install_av_start_gate(q_a, av_gate.clone());
-                    }
                     audio_tee_pad = Some(a_pad);
                     elements.extend(audio_els);
-                    install_mux_av_sync_log("srt");
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -836,10 +841,6 @@ impl ChannelPipeline {
         for el in &elements {
             el.sync_state_with_parent()
                 .context("sync_state_with_parent srt")?;
-        }
-
-        if audio_tee_pad.is_some() {
-            arm_av_gate_on_keyframe(&id_v, av_gate);
         }
 
         let srt_meter = BitrateMeter::new();
