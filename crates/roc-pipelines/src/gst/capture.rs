@@ -589,10 +589,13 @@ impl ChannelPipeline {
             .build()
             .context("queue audio")?;
         let aac_bps = crate::parse_bitrate(&self.preset.audio_bitrate).unwrap_or(192_000);
+        // MediaMTX (and MPEG-TS stream type 0x0F) expects ADTS-framed AAC, not raw.
+        // aacparse defaults can stay raw → undeclared PID / no Opus remux downstream.
         let desc = format!(
             "audioconvert mix-matrix=\"<<1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0>, \
              <0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0>>\" ! \
-             audio/x-raw,channels=2 ! voaacenc bitrate={aac_bps} ! aacparse"
+             audio/x-raw,channels=2 ! voaacenc bitrate={aac_bps} ! aacparse ! \
+             audio/mpeg,mpegversion=4,stream-format=adts"
         );
         let abin = gstreamer::parse::bin_from_description(&desc, true)
             .with_context(|| format!("parse {tag} audio bin"))?;
@@ -795,26 +798,16 @@ impl ChannelPipeline {
             .build()
             .context("srtsink")?;
 
-        let mut elements = vec![
-            queue_v.clone(),
-            parse.clone(),
-            capsfilter.clone(),
-            mux.clone(),
-            q_br.clone(),
-            sink.clone(),
-        ];
-        pipeline.add_many([&queue_v, &parse, &capsfilter, &mux, &q_br, &sink])?;
-        queue_v.link(&parse).context("link srt queue→parse")?;
-        parse
-            .link(&capsfilter)
-            .context("link srt parse→capsfilter")?;
-        capsfilter.link(&mux).context("link srt capsfilter→mux")?;
+        // Mux + sink first; register AAC on mpegtsmux *before* the video pad so the
+        // initial PMT includes PID audio (MediaMTX locks tracks from the first PMT —
+        // late audio → "undeclared track with PID 66").
+        let mut elements = vec![mux.clone(), q_br.clone(), sink.clone()];
+        pipeline.add_many([&mux, &q_br, &sink])?;
         mux.link(&q_br).context("link srt mux→bitrate queue")?;
         q_br.link(&sink).context("link srt bitrate queue→sink")?;
 
-        // AAC before video tee so mpegtsmux PMT includes audio from the first
-        // packets. Do not keyframe-gate or single-segment here — that lets video
-        // reach the mux alone and many players lock onto a video-only PMT.
+        // Do not keyframe-gate / single-segment here — that lets video reach the mux
+        // alone and many players lock onto a video-only PMT.
         let mut audio_tee_pad = None;
         if let Some(a_tee) = audio_tee {
             match self.link_program_aac(&pipeline, &a_tee, &mux, "srt", false) {
@@ -837,10 +830,24 @@ impl ChannelPipeline {
             );
         }
 
-        // Bring branch to PLAYING before connecting encoded tee (avoids first-buffer races).
+        // Start AAC→mux so PMT can advertise audio before any video PES.
         for el in &elements {
             el.sync_state_with_parent()
-                .context("sync_state_with_parent srt")?;
+                .context("sync_state_with_parent srt audio/mux")?;
+        }
+
+        pipeline.add_many([&queue_v, &parse, &capsfilter])?;
+        elements.insert(0, capsfilter.clone());
+        elements.insert(0, parse.clone());
+        elements.insert(0, queue_v.clone());
+        queue_v.link(&parse).context("link srt queue→parse")?;
+        parse
+            .link(&capsfilter)
+            .context("link srt parse→capsfilter")?;
+        capsfilter.link(&mux).context("link srt capsfilter→mux")?;
+        for el in [&queue_v, &parse, &capsfilter] {
+            el.sync_state_with_parent()
+                .context("sync_state_with_parent srt video")?;
         }
 
         let srt_meter = BitrateMeter::new();
