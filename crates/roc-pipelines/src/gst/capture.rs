@@ -148,12 +148,15 @@ fn arm_srt_valve_on_full_pmt(
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
+                    let dump = format!("/tmp/srt-gate-open-ch{channel}.ts");
+                    let _ = std::fs::write(&dump, &chunk);
                     tracing::info!(
                         channel,
                         ?types,
                         ?audio_pid_list,
                         min_audio_es,
                         bytes = chunk.len(),
+                        %dump,
                         head = format!("{:02x?}", &chunk[..chunk.len().min(8)]),
                         why = "pat_plus_full_av",
                         "SRT gate open (Hydra tee / probe drop)"
