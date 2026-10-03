@@ -452,11 +452,13 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         ));
     }
     if let Some(url) = &opts.srt_url {
-        // Non-leaky into srtmux (leaky video/AAC → VLC crackle). Encode tee is
-        // protected by the idle fakesink branch; PMT gate opens within ~100ms.
+        // Non-leaky into srtmux. Hold video (and AAC via srt_a_valve*) until both
+        // have buffers so the *first* PMT is born H.264+AAC — MediaMTX locks tracks
+        // from that first PMT and never recovers from an AAC-only one.
         out_branches.push(format!(
             "e. ! queue name=q_srt_v max-size-buffers=0 max-size-bytes=0 max-size-time=200000000 ! \
              {parse} config-interval=-1 ! {bs} ! \
+             valve name=srt_v_valve drop=true ! \
              mpegtsmux name=srtmux alignment=7 ! \
              valve name=srt_valve drop=true ! \
              srtsink uri=\"{url}\" wait-for-connection=false auto-reconnect=true \
@@ -486,14 +488,14 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         ));
     }
     if opts.srt_url.is_some() {
-        // Own stereo encoder → non-leaky into srtmux (clean VLC audio).
+        // Own stereo encoder → non-leaky into srtmux; valve held with srt_v_valve.
         aac_parts.push(mpegts_program_aac(
             "srt",
             aac_bps,
             1,
             &[AacMuxOut {
                 mux_name: "srtmux",
-                valve_prefix: None,
+                valve_prefix: Some("srt_a_valve"),
             }],
             false,
         ));
@@ -668,6 +670,8 @@ mod tests {
         assert!(launch.contains("udpmux"));
         assert!(launch.contains("srtmux"));
         assert!(launch.contains("srt_valve"));
+        assert!(launch.contains("srt_v_valve"));
+        assert!(launch.contains("srt_a_valve0"));
         assert_eq!(launch.matches("udpmux.").count(), 4);
         assert!(launch.contains("srtmux."));
         assert!(launch.contains("voaacenc"));

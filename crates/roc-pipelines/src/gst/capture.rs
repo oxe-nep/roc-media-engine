@@ -143,13 +143,12 @@ fn arm_srt_valve_on_full_pmt(
             .collect();
         let released = Arc::new(AtomicBool::new(false));
         let a_valves: Vec<_> = audio_valves.to_vec();
-        let try_release = {
+            let try_release = {
             let video_ready = video_ready.clone();
             let audio_ready = audio_ready.clone();
             let released = released.clone();
             let v_valve = v_valve.clone();
             let a_valves = a_valves.clone();
-            let open_egress = open_egress.clone();
             Arc::new(move || {
                 if !video_ready.load(Ordering::SeqCst) {
                     return;
@@ -165,7 +164,8 @@ fn arm_srt_valve_on_full_pmt(
                     for a in &a_valves {
                         let _ = a.set_property("drop", false);
                     }
-                    open_egress(vec![], vec![], "joint_av_inputs");
+                    // Do *not* open egress here — wait for clean_pmt on mux-src so
+                    // MediaMTX never sees an AAC-only first PMT if mux still races.
                     tracing::info!(
                         channel,
                         audio_pairs = a_valves.len(),
@@ -215,9 +215,6 @@ fn arm_srt_valve_on_full_pmt(
     src.add_probe(
         PadProbeType::BUFFER | PadProbeType::BUFFER_LIST,
         move |_, info| {
-            if opened.load(Ordering::SeqCst) {
-                return PadProbeReturn::Ok;
-            }
             let mut chunk = Vec::new();
             if let Some(list) = info.buffer_list() {
                 for buf in list.iter() {
@@ -232,6 +229,20 @@ fn arm_srt_valve_on_full_pmt(
             }
             if chunk.is_empty() {
                 return PadProbeReturn::Drop;
+            }
+            // Never forward a chunk that still carries an AAC-only / incomplete PMT —
+            // MediaMTX locks tracks from the first PMT it sees (and from bad updates).
+            if chunk_has_incomplete_pmt(&chunk, min_audio_es) {
+                if opened.load(Ordering::SeqCst) {
+                    tracing::warn!(
+                        channel,
+                        "SRT dropping poison PMT chunk after valve open"
+                    );
+                }
+                return PadProbeReturn::Drop;
+            }
+            if opened.load(Ordering::SeqCst) {
+                return PadProbeReturn::Ok;
             }
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -249,7 +260,10 @@ fn arm_srt_valve_on_full_pmt(
                 }
                 ts_ready_for_mediamtx(std::slice::from_ref(&w.clone()), min_audio_es)
             };
-            if ready {
+            // Only release when the *current* chunk itself has a full A/V PMT (not
+            // merely an older clean PMT still sitting in the rolling window).
+            let chunk_ready = ts_ready_for_mediamtx(std::slice::from_ref(&chunk), min_audio_es).0;
+            if ready && chunk_ready {
                 open_egress(types, audio_pid_list, "clean_pmt");
                 return PadProbeReturn::Ok;
             }
@@ -436,6 +450,13 @@ fn pmt_has_av(es: &[(u8, u16)], min_audio: usize) -> bool {
         }
     }
     video && audio_pids.len() >= min_audio.max(1)
+}
+
+/// True when the payload contains at least one PMT that is not full A/V.
+fn chunk_has_incomplete_pmt(ts: &[u8], min_audio: usize) -> bool {
+    pmt_sections(ts)
+        .into_iter()
+        .any(|sec| !pmt_has_av(&sec, min_audio))
 }
 
 /// Safe to release to MediaMTX only when every PMT in the payload is full A/V
@@ -789,16 +810,7 @@ impl ChannelPipeline {
             .downcast::<gstreamer::Pipeline>()
             .map_err(|_| anyhow!("capture launch did not yield Pipeline"))?;
 
-        pipeline
-            .set_state(gstreamer::State::Playing)
-            .context("capture set PLAYING")?;
-        // Live encode bitrate: count buffers into encoded tee `e`.
-        self.encode_bitrate.reset();
-        if let Some(tee) = pipeline.by_name("e") {
-            if let Some(sink) = tee.static_pad("sink") {
-                let _ = self.encode_bitrate.attach_probe(&sink);
-            }
-        }
+        // Arm SRT PMT gate *before* PLAYING so the first mux packets are probed.
         self.srt_bitrate = None;
         if srt_for_launch.is_some() {
             let meter = BitrateMeter::new();
@@ -811,15 +823,25 @@ impl ChannelPipeline {
             if let (Some(valve), Some(mux)) =
                 (pipeline.by_name("srt_valve"), pipeline.by_name("srtmux"))
             {
-                // Dedicated SRT stereo AAC — gating mux-src cannot starve UDP/listen.
+                let v_valve = pipeline.by_name("srt_v_valve");
+                let a_valve = pipeline.by_name("srt_a_valve0");
+                let audio_valves: Vec<_> = a_valve.into_iter().collect();
+                let v_src = v_valve
+                    .as_ref()
+                    .and_then(|v| v.static_pad("sink"))
+                    .and_then(|p| p.peer());
+                let a_srcs: Vec<_> = audio_valves
+                    .iter()
+                    .filter_map(|v| v.static_pad("sink").and_then(|p| p.peer()))
+                    .collect();
                 arm_srt_valve_on_full_pmt(
                     self.id,
                     &valve,
                     &mux,
-                    None,
-                    &[],
-                    None,
-                    &[],
+                    v_valve.as_ref(),
+                    &audio_valves,
+                    v_src.as_ref(),
+                    &a_srcs,
                     1,
                 );
             }
@@ -829,6 +851,17 @@ impl ChannelPipeline {
                 audio_pairs = 1u32,
                 "SRT baked into capture launch (stereo AAC + PMT gate; 8ch deferred)"
             );
+        }
+
+        pipeline
+            .set_state(gstreamer::State::Playing)
+            .context("capture set PLAYING")?;
+        // Live encode bitrate: count buffers into encoded tee `e`.
+        self.encode_bitrate.reset();
+        if let Some(tee) = pipeline.by_name("e") {
+            if let Some(sink) = tee.static_pad("sink") {
+                let _ = self.encode_bitrate.attach_probe(&sink);
+            }
         }
         self.pipeline = Some(pipeline);
         self.status = ChannelStatus::Waiting;
