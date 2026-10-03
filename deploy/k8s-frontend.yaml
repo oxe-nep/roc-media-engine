@@ -1,0 +1,107 @@
+# roc-media-engine – k3s frontend
+# Keeps existing Service/Ingress names (recording.nepsweden.tech).
+# Image built by CI: ghcr.io/oxe-nep/roc-media-engine-frontend:latest
+# nginx proxies to BACKEND_HOST:BACKEND_PORT (engine on :8080).
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: roc-recording-secrets
+type: Opaque
+stringData:
+  API_KEY: "change-me"
+  BACKEND_HOST: "10.199.28.249"
+  BACKEND_PORT: "8080"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: roc-recording-frontend
+  labels:
+    app: roc-recording-frontend
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: roc-recording-frontend
+  template:
+    metadata:
+      labels:
+        app: roc-recording-frontend
+    spec:
+      imagePullSecrets:
+        - name: ghcr-creds
+      containers:
+        - name: frontend
+          image: ghcr.io/oxe-nep/roc-media-engine-frontend:latest
+          imagePullPolicy: Always
+          envFrom:
+            - secretRef:
+                name: roc-recording-secrets
+          ports:
+            - name: http
+              containerPort: 80
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: roc-recording-frontend
+spec:
+  selector:
+    app: roc-recording-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: roc-recording-http
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`recording.nepsweden.tech`)
+      kind: Rule
+      services:
+        - name: roc-recording-frontend
+          port: 80
+      middlewares:
+        - name: https-redirect
+          namespace: default
+
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: roc-recording-https
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`recording.nepsweden.tech`)
+      kind: Rule
+      services:
+        - name: roc-recording-frontend
+          port: 80
+  tls:
+    certResolver: letsencrypt

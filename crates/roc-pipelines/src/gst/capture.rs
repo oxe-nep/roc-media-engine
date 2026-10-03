@@ -6,7 +6,9 @@ use roc_config::{ChannelConfig, EncodePreset};
 use std::str::FromStr;
 
 use super::bitrate::BitrateMeter;
-use crate::describe::{build_capture_encode_once_launch, CaptureLaunchOpts};
+use crate::describe::{
+    aac_stereo_pairs, build_capture_encode_once_launch, stereo_pair_matrix, CaptureLaunchOpts,
+};
 use crate::signal_format::{format_from_caps, is_auto_mode, probe_input_format, InputFormat};
 use crate::{ChannelSnapshot, ChannelStatus};
 
@@ -78,55 +80,99 @@ fn arm_av_gate_on_keyframe(video_identity: &gstreamer::Element, gate: std::sync:
 /// MediaMTX locks tracks from the first PAT/PMT. `mpegtsmux` often emits a
 /// single-stream PMT when one branch wins the race — VLC re-parses later, MTX
 /// does not. Strategy:
-/// 1. Hold both `srt_v_valve` and `srt_a_valve` until each branch has a buffer,
-///    then open them together so the first PMT is born with H.264+AAC.
-/// 2. Drop every TS buffer on mux src until every PMT in the payload is A+V.
-/// 3. Forward that clean list as the first bytes MediaMTX sees. No timer open.
+/// 1. Hold `srt_v_valve` + every `srt_a_valveN` until each branch has a buffer,
+///    then open them together so the first PMT is born with H.264+AAC (1 or 4).
+/// 2. Drop mux-src until A/V is ready, then open egress (never hold forever —
+///    a stuck drop backpressures the encode tee and crackles UDP/preview).
+/// 3. Prefer joint A/V input valves; fall back to PMT parse on mux-src.
 fn arm_srt_valve_on_full_pmt(
     channel: u32,
     out_valve: &gstreamer::Element,
     mux: &gstreamer::Element,
-    audio_valve: Option<&gstreamer::Element>,
     video_valve: Option<&gstreamer::Element>,
+    audio_valves: &[gstreamer::Element],
     video_branch_src: Option<&gstreamer::Pad>,
-    audio_branch_src: Option<&gstreamer::Pad>,
+    audio_branch_srcs: &[gstreamer::Pad],
+    min_audio_es: usize,
 ) {
     use gstreamer::{PadProbeReturn, PadProbeType};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
 
+    let out_valve = out_valve.clone();
     let _ = out_valve.set_property("drop", true);
+    let min_audio_es = min_audio_es.max(1);
+    let opened = Arc::new(AtomicBool::new(false));
+    let open_egress = {
+        let opened = opened.clone();
+        let out_valve = out_valve.clone();
+        Arc::new(move |types: Vec<u8>, audio_pid_list: Vec<u16>, why: &'static str| {
+            if opened
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                let _ = out_valve.set_property("drop", false);
+                tracing::info!(
+                    channel,
+                    ?types,
+                    ?audio_pid_list,
+                    min_audio_es,
+                    why,
+                    "SRT valve open"
+                );
+            }
+        })
+    };
 
-    // Release A+V into the mux together once both branches have produced.
-    if let (Some(v_valve), Some(a_valve), Some(vpad), Some(apad)) = (
-        video_valve,
-        audio_valve,
-        video_branch_src,
-        audio_branch_src,
-    ) {
+    // Release A+V into the mux together once every gated branch has produced.
+    let can_joint_open = video_valve.is_some()
+        && video_branch_src.is_some()
+        && !audio_valves.is_empty()
+        && audio_valves.len() == audio_branch_srcs.len();
+    if can_joint_open {
+        let v_valve = video_valve.unwrap().clone();
+        let vpad = video_branch_src.unwrap().clone();
         let _ = v_valve.set_property("drop", true);
-        let _ = a_valve.set_property("drop", true);
+        for a in audio_valves {
+            let _ = a.set_property("drop", true);
+        }
         let video_ready = Arc::new(AtomicBool::new(false));
-        let audio_ready = Arc::new(AtomicBool::new(false));
+        let audio_ready: Vec<Arc<AtomicBool>> = audio_valves
+            .iter()
+            .map(|_| Arc::new(AtomicBool::new(false)))
+            .collect();
         let released = Arc::new(AtomicBool::new(false));
+        let a_valves: Vec<_> = audio_valves.to_vec();
         let try_release = {
             let video_ready = video_ready.clone();
             let audio_ready = audio_ready.clone();
             let released = released.clone();
             let v_valve = v_valve.clone();
-            let a_valve = a_valve.clone();
-            move || {
-                if video_ready.load(Ordering::SeqCst)
-                    && audio_ready.load(Ordering::SeqCst)
-                    && released
-                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                        .is_ok()
+            let a_valves = a_valves.clone();
+            let open_egress = open_egress.clone();
+            Arc::new(move || {
+                if !video_ready.load(Ordering::SeqCst) {
+                    return;
+                }
+                if !audio_ready.iter().all(|f| f.load(Ordering::SeqCst)) {
+                    return;
+                }
+                if released
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
                 {
                     let _ = v_valve.set_property("drop", false);
-                    let _ = a_valve.set_property("drop", false);
-                    tracing::info!(channel, "SRT A/V input valves open together");
+                    for a in &a_valves {
+                        let _ = a.set_property("drop", false);
+                    }
+                    open_egress(vec![], vec![], "joint_av_inputs");
+                    tracing::info!(
+                        channel,
+                        audio_pairs = a_valves.len(),
+                        "SRT A/V input valves open together"
+                    );
                 }
-            }
+            })
         };
         {
             let video_ready = video_ready.clone();
@@ -137,11 +183,11 @@ fn arm_srt_valve_on_full_pmt(
                 PadProbeReturn::Remove
             });
         }
-        {
-            let audio_ready = audio_ready.clone();
+        for (i, apad) in audio_branch_srcs.iter().enumerate() {
+            let flag = audio_ready[i].clone();
             let try_release = try_release.clone();
             apad.add_probe(PadProbeType::BUFFER, move |_, _| {
-                audio_ready.store(true, Ordering::SeqCst);
+                flag.store(true, Ordering::SeqCst);
                 try_release();
                 PadProbeReturn::Remove
             });
@@ -150,74 +196,83 @@ fn arm_srt_valve_on_full_pmt(
         if let Some(v) = video_valve {
             let _ = v.set_property("drop", false);
         }
-        if let Some(a) = audio_valve {
+        for a in audio_valves {
             let _ = a.set_property("drop", false);
         }
     }
 
     let Some(src) = mux.static_pad("src") else {
         tracing::warn!(channel, "srtmux has no src pad — opening SRT valve");
-        let _ = out_valve.set_property("drop", false);
+        open_egress(vec![], vec![], "no_mux_src");
         return;
     };
 
-    let opened = Arc::new(AtomicBool::new(false));
-    let out_valve = out_valve.clone();
     let last_log = Arc::new(AtomicU64::new(0));
-    // mpegtsmux alignment=7 pushes BUFFER_LIST — BUFFER-only probes never fire.
+    let first_ts = Arc::new(AtomicU64::new(0));
+    // PMT sections (esp. 4×AAC) often span multiple BUFFER_LIST pushes — keep a
+    // rolling window so reassembly can finish across probe callbacks.
+    let window = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     src.add_probe(
         PadProbeType::BUFFER | PadProbeType::BUFFER_LIST,
         move |_, info| {
             if opened.load(Ordering::SeqCst) {
-                return PadProbeReturn::Remove;
+                return PadProbeReturn::Ok;
             }
-            let mut chunks: Vec<Vec<u8>> = Vec::new();
+            let mut chunk = Vec::new();
             if let Some(list) = info.buffer_list() {
                 for buf in list.iter() {
                     if let Ok(map) = buf.map_readable() {
-                        chunks.push(map.as_slice().to_vec());
+                        chunk.extend_from_slice(map.as_slice());
                     }
                 }
             } else if let Some(buf) = info.buffer() {
                 if let Ok(map) = buf.map_readable() {
-                    chunks.push(map.as_slice().to_vec());
+                    chunk.extend_from_slice(map.as_slice());
                 }
             }
-            if chunks.is_empty() {
+            if chunk.is_empty() {
                 return PadProbeReturn::Drop;
-            }
-            let (ready, types) = ts_ready_for_mediamtx(&chunks);
-            if ready {
-                if opened
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-                {
-                    let _ = out_valve.set_property("drop", false);
-                    tracing::info!(
-                        channel,
-                        ?types,
-                        "SRT valve open — first TS has clean A/V PMT"
-                    );
-                }
-                // Forward THIS list — every PMT in it is full A/V, so MTX locks correctly.
-                return PadProbeReturn::Ok;
             }
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
+            let _ = first_ts.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
+            let (ready, types, audio_pid_list) = {
+                let mut w = window.lock().unwrap_or_else(|e| e.into_inner());
+                w.extend_from_slice(&chunk);
+                // Keep ~64 KB — enough for several PAT/PMT cycles.
+                const MAX: usize = 64 * 1024;
+                if w.len() > MAX {
+                    let drain = w.len() - MAX;
+                    w.drain(0..drain);
+                }
+                ts_ready_for_mediamtx(std::slice::from_ref(&w.clone()), min_audio_es)
+            };
+            if ready {
+                open_egress(types, audio_pid_list, "clean_pmt");
+                return PadProbeReturn::Ok;
+            }
+            // Hard fallback only: open after 5s so a wedged parser cannot stall
+            // the graph forever (q_srt_v is leaky; AAC valves drop without block).
+            let started = first_ts.load(Ordering::Relaxed);
+            if started > 0 && now.saturating_sub(started) >= 5 {
+                open_egress(types, audio_pid_list, "timeout_fallback");
+                return PadProbeReturn::Ok;
+            }
             let prev = last_log.load(Ordering::Relaxed);
             if now != prev
                 && last_log
                     .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
                     .is_ok()
             {
-                let bytes: usize = chunks.iter().map(|c| c.len()).sum();
                 tracing::warn!(
                     channel,
-                    bytes,
+                    bytes = chunk.len(),
                     ?types,
-                    sync = chunks.first().and_then(|c| c.first()).copied(),
+                    min_audio_es,
+                    audio = audio_pid_list.len(),
+                    sync = chunk.first().copied(),
                     "SRT still waiting for full A/V PMT — dropping TS"
                 );
             }
@@ -226,8 +281,60 @@ fn arm_srt_valve_on_full_pmt(
     );
 }
 
-/// Per-PMT stream-type lists found in a TS buffer (one entry per PMT section start).
-fn pmt_sections(ts: &[u8]) -> Vec<Vec<u8>> {
+/// Collect PMT PIDs declared in PAT (PID 0). Avoids false "PMT" matches inside
+/// video PES when the rolling window loses 188-byte alignment.
+fn pat_pmt_pids(ts: &[u8]) -> Vec<u16> {
+    let mut pids = Vec::new();
+    let mut i = 0;
+    while i + 188 <= ts.len() {
+        if ts[i] != 0x47 {
+            i += 1;
+            continue;
+        }
+        let pkt = &ts[i..i + 188];
+        let pid = (((pkt[1] & 0x1f) as u16) << 8) | pkt[2] as u16;
+        if pid != 0 || pkt[1] & 0x40 == 0 {
+            i += 188;
+            continue;
+        }
+        let afc = (pkt[3] >> 4) & 0x3;
+        let mut off = 4usize;
+        if afc == 2 || afc == 3 {
+            off = 5 + pkt[4] as usize;
+        }
+        if off >= 187 {
+            i += 188;
+            continue;
+        }
+        let ptr = pkt[off] as usize;
+        let p = off + 1 + ptr;
+        if p + 8 >= 188 || pkt[p] != 0x00 {
+            i += 188;
+            continue;
+        }
+        let sl = (((pkt[p + 1] & 0x0f) as usize) << 8) | pkt[p + 2] as usize;
+        let mut q = p + 8;
+        let end = (p + 3 + sl).saturating_sub(4).min(188);
+        while q + 4 <= end {
+            let prog = ((pkt[q] as u16) << 8) | pkt[q + 1] as u16;
+            let ppid = (((pkt[q + 2] & 0x1f) as u16) << 8) | pkt[q + 3] as u16;
+            if prog != 0 && !pids.contains(&ppid) {
+                pids.push(ppid);
+            }
+            q += 4;
+        }
+        i += 188;
+    }
+    pids
+}
+
+/// One PMT elementary stream: (stream_type, elementary_PID).
+/// Only parses PIDs listed in the PAT — reassembles multi-packet sections.
+fn pmt_sections(ts: &[u8]) -> Vec<Vec<(u8, u16)>> {
+    let pmt_pids = pat_pmt_pids(ts);
+    if pmt_pids.is_empty() {
+        return Vec::new();
+    }
     let mut sections = Vec::new();
     let mut i = 0;
     while i + 188 <= ts.len() {
@@ -236,7 +343,8 @@ fn pmt_sections(ts: &[u8]) -> Vec<Vec<u8>> {
             continue;
         }
         let pkt = &ts[i..i + 188];
-        if pkt[1] & 0x40 == 0 {
+        let pid = (((pkt[1] & 0x1f) as u16) << 8) | pkt[2] as u16;
+        if !pmt_pids.contains(&pid) || pkt[1] & 0x40 == 0 {
             i += 188;
             continue;
         }
@@ -257,15 +365,57 @@ fn pmt_sections(ts: &[u8]) -> Vec<Vec<u8>> {
             continue;
         }
         let sl = (((pkt[p + 1] & 0x0f) as usize) << 8) | pkt[p + 2] as usize;
-        let pil = (((pkt[p + 10] & 0x0f) as usize) << 8) | pkt[p + 11] as usize;
-        let mut q = p + 12 + pil;
-        let end = (p + 3 + sl).saturating_sub(4).min(188);
+        let need = 3 + sl;
+        if need < 16 || need > 1024 {
+            i += 188;
+            continue;
+        }
+        let mut buf = pkt[p..].to_vec();
+        let mut j = i + 188;
+        while buf.len() < need && j + 188 <= ts.len() {
+            if ts[j] != 0x47 {
+                j += 1;
+                continue;
+            }
+            let cont_pid = (((ts[j + 1] & 0x1f) as u16) << 8) | ts[j + 2] as u16;
+            if cont_pid != pid {
+                j += 188;
+                continue;
+            }
+            if ts[j + 1] & 0x40 != 0 {
+                break;
+            }
+            let afc2 = (ts[j + 3] >> 4) & 0x3;
+            let mut o = 4usize;
+            if afc2 == 2 || afc2 == 3 {
+                o = 5 + ts[j + 4] as usize;
+            }
+            if o < 188 {
+                buf.extend_from_slice(&ts[j + o..j + 188]);
+            }
+            j += 188;
+        }
+        if buf.len() < need {
+            i += 188;
+            continue;
+        }
+        buf.truncate(need);
+        let pil = (((buf[10] & 0x0f) as usize) << 8) | buf[11] as usize;
+        let mut q = 12 + pil;
+        let end = need.saturating_sub(4);
         let mut found = Vec::new();
         while q + 5 <= end {
-            let st = pkt[q];
-            let esil = (((pkt[q + 3] & 0x0f) as usize) << 8) | pkt[q + 4] as usize;
-            if !found.contains(&st) {
-                found.push(st);
+            let st = buf[q];
+            let epid = (((buf[q + 1] & 0x1f) as u16) << 8) | buf[q + 2] as u16;
+            let esil = (((buf[q + 3] & 0x0f) as usize) << 8) | buf[q + 4] as usize;
+            if esil > 64 || q + 5 + esil > end {
+                break;
+            }
+            if epid >= 0x20
+                && epid < 0x1fff
+                && matches!(st, 0x1b | 0x24 | 0x0f | 0x11)
+            {
+                found.push((st, epid));
             }
             q += 5 + esil;
         }
@@ -277,32 +427,54 @@ fn pmt_sections(ts: &[u8]) -> Vec<Vec<u8>> {
     sections
 }
 
-fn pmt_has_av(types: &[u8]) -> bool {
-    let video = types.iter().any(|&t| t == 0x1b || t == 0x24);
-    let audio = types.iter().any(|&t| t == 0x0f || t == 0x11);
-    video && audio
+fn pmt_has_av(es: &[(u8, u16)], min_audio: usize) -> bool {
+    let video = es.iter().any(|&(t, _)| t == 0x1b || t == 0x24);
+    let mut audio_pids = Vec::new();
+    for &(t, pid) in es {
+        if (t == 0x0f || t == 0x11) && !audio_pids.contains(&pid) {
+            audio_pids.push(pid);
+        }
+    }
+    video && audio_pids.len() >= min_audio.max(1)
 }
 
 /// Safe to release to MediaMTX only when every PMT in the payload is full A/V
 /// (a mixed list with an older video-only PMT would still poison MTX).
-fn ts_ready_for_mediamtx(chunks: &[Vec<u8>]) -> (bool, Vec<u8>) {
+fn ts_ready_for_mediamtx(
+    chunks: &[Vec<u8>],
+    min_audio: usize,
+) -> (bool, Vec<u8>, Vec<u16>) {
+    // mpegtsmux alignment=7 emits BUFFER_LIST; PMT sections often span list
+    // elements — parse the concatenated payload, not each buffer alone.
+    let mut data = Vec::new();
+    for c in chunks {
+        data.extend_from_slice(c);
+    }
     let mut any_pmt = false;
     let mut all_av = true;
     let mut union = Vec::new();
-    for data in chunks {
-        for sec in pmt_sections(data) {
-            any_pmt = true;
-            if !pmt_has_av(&sec) {
-                all_av = false;
+    let mut best_audio: Vec<u16> = Vec::new();
+    for sec in pmt_sections(&data) {
+        any_pmt = true;
+        let mut uniq = Vec::new();
+        for &(t, pid) in &sec {
+            if (t == 0x0f || t == 0x11) && !uniq.contains(&pid) {
+                uniq.push(pid);
             }
-            for t in sec {
-                if !union.contains(&t) {
-                    union.push(t);
-                }
+        }
+        if uniq.len() > best_audio.len() {
+            best_audio = uniq;
+        }
+        if !pmt_has_av(&sec, min_audio) {
+            all_av = false;
+        }
+        for (t, _) in &sec {
+            if !union.contains(t) {
+                union.push(*t);
             }
         }
     }
-    (any_pmt && all_av, union)
+    (any_pmt && all_av, union, best_audio)
 }
 
 /// Go/FFmpeg `OutputURL` puts `latency` in **microseconds**; GStreamer/libsrt URI
@@ -336,10 +508,21 @@ mod srt_uri_tests {
 
     #[test]
     fn pmt_requires_both_video_and_aac() {
-        assert!(!pmt_has_av(&[0x0f]));
-        assert!(!pmt_has_av(&[0x1b]));
-        assert!(pmt_has_av(&[0x1b, 0x0f]));
-        assert!(pmt_has_av(&[0x24, 0x0f]));
+        assert!(!pmt_has_av(&[(0x0f, 0x101)], 1));
+        assert!(!pmt_has_av(&[(0x1b, 0x100)], 1));
+        assert!(pmt_has_av(&[(0x1b, 0x100), (0x0f, 0x101)], 1));
+        assert!(pmt_has_av(&[(0x24, 0x100), (0x0f, 0x101)], 1));
+        assert!(!pmt_has_av(&[(0x1b, 0x100), (0x0f, 0x101)], 4));
+        assert!(pmt_has_av(
+            &[
+                (0x1b, 0x100),
+                (0x0f, 0x101),
+                (0x0f, 0x102),
+                (0x0f, 0x103),
+                (0x0f, 0x104),
+            ],
+            4
+        ));
     }
 
     #[test]
@@ -394,8 +577,8 @@ pub struct ChannelPipeline {
 
 struct Branch {
     tee_pad: gstreamer::Pad,
-    /// Optional pad from audio tee `a` (SRT/REC with AAC).
-    audio_tee_pad: Option<gstreamer::Pad>,
+    /// Pads from audio tee `a` (one per AAC stereo pair).
+    audio_tee_pads: Vec<gstreamer::Pad>,
     elements: Vec<gstreamer::Element>,
 }
 
@@ -562,7 +745,10 @@ impl ChannelPipeline {
     }
 
     fn launch_locked(&mut self, locked: &str) -> Result<()> {
-        let hls_dir = format!("/opt/application/roc-recording/backend/hls/{}", self.id);
+        let hls_base = std::env::var("ROC_MEDIA_HLS_DIR").unwrap_or_else(|_| {
+            "/opt/applications/roc-recording/backend/hls".into()
+        });
+        let hls_dir = format!("{hls_base}/{}", self.id);
         let _ = std::fs::create_dir_all(&hls_dir);
         // Drop stale preview playlists/segments so players don't stick on old gens.
         if let Ok(rd) = std::fs::read_dir(&hls_dir) {
@@ -625,28 +811,23 @@ impl ChannelPipeline {
             if let (Some(valve), Some(mux)) =
                 (pipeline.by_name("srt_valve"), pipeline.by_name("srtmux"))
             {
-                let a_valve = pipeline.by_name("srt_a_valve");
-                let v_valve = pipeline.by_name("srt_v_valve");
-                let video_branch = pipeline
-                    .by_name("q_srt_v")
-                    .and_then(|q| q.static_pad("src"));
-                let audio_branch = a_valve
-                    .as_ref()
-                    .and_then(|v| v.static_pad("sink"));
+                // Dedicated SRT stereo AAC — gating mux-src cannot starve UDP/listen.
                 arm_srt_valve_on_full_pmt(
                     self.id,
                     &valve,
                     &mux,
-                    a_valve.as_ref(),
-                    v_valve.as_ref(),
-                    video_branch.as_ref(),
-                    audio_branch.as_ref(),
+                    None,
+                    &[],
+                    None,
+                    &[],
+                    1,
                 );
             }
             tracing::info!(
                 channel = self.id,
                 gst_uri = srt_for_launch.as_deref().unwrap_or(""),
-                "SRT baked into capture launch (A+V ADTS)"
+                audio_pairs = 1u32,
+                "SRT baked into capture launch (stereo AAC + PMT gate; 8ch deferred)"
             );
         }
         self.pipeline = Some(pipeline);
@@ -790,15 +971,17 @@ impl ChannelPipeline {
         // video waits up to one GOP (~1s) for IDR — both get pts=0 via
         // single-segment → permanent ~1s lipsync error.
         let av_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut audio_tee_pad = None;
+        let mut audio_tee_pads = Vec::new();
         if let Some(a_tee) = audio_tee {
             match self.link_program_aac(&pipeline, &a_tee, &mux, "rec", true) {
-                Ok((a_pad, audio_els)) => {
-                    // audio_els: [queue_a, abin, id_a] — gate on queue sink.
-                    if let Some(q_a) = audio_els.first() {
-                        install_av_start_gate(q_a, av_gate.clone());
+                Ok((a_pads, audio_els)) => {
+                    // Gate every AAC queue until the first video keyframe.
+                    for el in &audio_els {
+                        if el.name().starts_with("q_rec_a") {
+                            install_av_start_gate(el, av_gate.clone());
+                        }
                     }
-                    audio_tee_pad = Some(a_pad);
+                    audio_tee_pads = a_pads;
                     elements.extend(audio_els);
                     install_mux_av_sync_log("rec");
                 }
@@ -823,7 +1006,7 @@ impl ChannelPipeline {
         }
 
         // Open the audio gate on the first video keyframe (non-DELTA_UNIT).
-        if audio_tee_pad.is_some() {
+        if !audio_tee_pads.is_empty() {
             arm_av_gate_on_keyframe(&id_v, av_gate);
         }
 
@@ -840,19 +1023,20 @@ impl ChannelPipeline {
         tracing::info!(
             channel = self.id,
             %path,
-            with_audio = audio_tee_pad.is_some(),
+            audio_pairs = audio_tee_pads.len(),
             "attached record branch (no relaunch)"
         );
         self.rec_branch = Some(Branch {
             tee_pad,
-            audio_tee_pad,
+            audio_tee_pads,
             elements,
         });
         Ok(())
     }
 
-    /// Stereo pair 1–2 → AAC into an existing mux (mp4mux / mpegtsmux).
+    /// Stereo AAC pair(s) into an existing mux (mp4mux / mpegtsmux).
     ///
+    /// `audio_channels >= 8` → four AAC stereo pairs (same as Go/FFmpeg).
     /// `ts_align`: insert `identity single-segment` (needed for REC mp4mux late-join).
     /// Leave false for live MPEG-TS/SRT — gating/restamp there makes PMT video-only.
     fn link_program_aac(
@@ -862,64 +1046,74 @@ impl ChannelPipeline {
         mux: &gstreamer::Element,
         tag: &str,
         ts_align: bool,
-    ) -> Result<(gstreamer::Pad, Vec<gstreamer::Element>)> {
+    ) -> Result<(Vec<gstreamer::Pad>, Vec<gstreamer::Element>)> {
+        let pairs = aac_stereo_pairs(self.preset.audio_channels);
         let hold_ms = if ts_align { 40u64 } else { 0 };
-        let queue_a = gstreamer::ElementFactory::make("queue")
-            .name(format!("q_{tag}_a_{}", self.id))
-            .property("min-threshold-time", gstreamer::ClockTime::from_mseconds(hold_ms))
-            .property("max-size-buffers", 64u32)
-            .property("max-size-bytes", 0u32)
-            .property("max-size-time", gstreamer::ClockTime::from_mseconds(250))
-            .build()
-            .context("queue audio")?;
         let aac_bps = crate::parse_bitrate(&self.preset.audio_bitrate).unwrap_or(192_000);
-        // MediaMTX (and MPEG-TS stream type 0x0F) expects ADTS-framed AAC, not raw.
-        // aacparse defaults can stay raw → undeclared PID / no Opus remux downstream.
-        let desc = format!(
-            "audioconvert mix-matrix=\"<<1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0>, \
-             <0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0>>\" ! \
-             audio/x-raw,channels=2 ! voaacenc bitrate={aac_bps} ! aacparse ! \
-             capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts"
-        );
-        let abin = gstreamer::parse::bin_from_description(&desc, true)
-            .with_context(|| format!("parse {tag} audio bin"))?;
-        abin.set_property("name", format!("{tag}_a_bin_{}", self.id));
-        let abin_el: gstreamer::Element = abin.upcast();
+        let mut pads = Vec::with_capacity(pairs);
+        let mut els = Vec::new();
 
-        let mut els = vec![queue_a.clone(), abin_el.clone()];
-        pipeline
-            .add_many([&queue_a, &abin_el])
-            .context("add program audio elements")?;
-        queue_a
-            .link(&abin_el)
-            .context("link audio queue → bin")?;
+        for pair in 0..pairs {
+            let queue_a = gstreamer::ElementFactory::make("queue")
+                .name(format!("q_{tag}_a{pair}_{}", self.id))
+                .property(
+                    "min-threshold-time",
+                    gstreamer::ClockTime::from_mseconds(hold_ms),
+                )
+                .property("max-size-buffers", 64u32)
+                .property("max-size-bytes", 0u32)
+                .property("max-size-time", gstreamer::ClockTime::from_mseconds(250))
+                .build()
+                .context("queue audio")?;
+            // MediaMTX (and MPEG-TS stream type 0x0F) expects ADTS-framed AAC, not raw.
+            let matrix = stereo_pair_matrix(pair);
+            let desc = format!(
+                "audioconvert mix-matrix=\"{matrix}\" ! \
+                 audio/x-raw,channels=2 ! voaacenc bitrate={aac_bps} ! aacparse ! \
+                 capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts"
+            );
+            let abin = gstreamer::parse::bin_from_description(&desc, true)
+                .with_context(|| format!("parse {tag} audio bin pair {pair}"))?;
+            abin.set_property("name", format!("{tag}_a{pair}_bin_{}", self.id));
+            let abin_el: gstreamer::Element = abin.upcast();
 
-        if ts_align {
-            let id_a = make_mux_ts_align(&format!("id_{tag}_a_{}", self.id))?;
-            pipeline.add(&id_a).context("add audio identity")?;
-            abin_el
-                .link(&id_a)
-                .context("link audio bin → identity")?;
-            id_a
-                .link(mux)
-                .context("link audio identity → mux")?;
-            els.push(id_a);
-        } else {
-            abin_el
-                .link(mux)
-                .context("link audio bin → mux")?;
+            pipeline
+                .add_many([&queue_a, &abin_el])
+                .context("add program audio elements")?;
+            queue_a
+                .link(&abin_el)
+                .context("link audio queue → bin")?;
+            els.push(queue_a.clone());
+            els.push(abin_el.clone());
+
+            if ts_align {
+                let id_a = make_mux_ts_align(&format!("id_{tag}_a{pair}_{}", self.id))?;
+                pipeline.add(&id_a).context("add audio identity")?;
+                abin_el
+                    .link(&id_a)
+                    .context("link audio bin → identity")?;
+                id_a
+                    .link(mux)
+                    .context("link audio identity → mux")?;
+                els.push(id_a);
+            } else {
+                abin_el
+                    .link(mux)
+                    .context("link audio bin → mux")?;
+            }
+
+            let a_pad = a_tee
+                .request_pad_simple("src_%u")
+                .ok_or_else(|| anyhow!("audio tee request_pad failed"))?;
+            let a_sink = queue_a
+                .static_pad("sink")
+                .ok_or_else(|| anyhow!("audio queue sink"))?;
+            a_pad
+                .link(&a_sink)
+                .context("link audio tee → queue")?;
+            pads.push(a_pad);
         }
-
-        let a_pad = a_tee
-            .request_pad_simple("src_%u")
-            .ok_or_else(|| anyhow!("audio tee request_pad failed"))?;
-        let a_sink = queue_a
-            .static_pad("sink")
-            .ok_or_else(|| anyhow!("audio queue sink"))?;
-        a_pad
-            .link(&a_sink)
-            .context("link audio tee → queue")?;
-        Ok((a_pad, els))
+        Ok((pads, els))
     }
 
     fn detach_recording(&mut self, finalize: bool) -> Result<()> {
@@ -1005,11 +1199,11 @@ impl ChannelPipeline {
             let _ = branch.tee_pad.unlink(&qpad);
         }
         video_tee.release_request_pad(&branch.tee_pad);
-        if let Some(ref audio_pad) = branch.audio_tee_pad {
-            if let Some(peer) = audio_pad.peer() {
-                let _ = audio_pad.unlink(&peer);
-            }
-            if let Some(a_tee) = pipeline.by_name("a") {
+        if let Some(a_tee) = pipeline.by_name("a") {
+            for audio_pad in &branch.audio_tee_pads {
+                if let Some(peer) = audio_pad.peer() {
+                    let _ = audio_pad.unlink(&peer);
+                }
                 a_tee.release_request_pad(audio_pad);
             }
         }
@@ -1118,16 +1312,12 @@ impl ChannelPipeline {
 
         // Do not keyframe-gate / single-segment here — that delays AAC and yields
         // a video-only first PMT (MediaMTX then ignores audio PID 66).
-        let mut audio_tee_pad = None;
-        let mut audio_src_pad = None;
+        let mut audio_tee_pads = Vec::new();
+        let pairs = aac_stereo_pairs(self.preset.audio_channels);
         if let Some(a_tee) = audio_tee {
             match self.link_program_aac(&pipeline, &a_tee, &mux, "srt", false) {
-                Ok((a_pad, audio_els)) => {
-                    // Last element before mux is the AAC bin (or identity if aligned).
-                    if let Some(last) = audio_els.last() {
-                        audio_src_pad = last.static_pad("src");
-                    }
-                    audio_tee_pad = Some(a_pad);
+                Ok((a_pads, audio_els)) => {
+                    audio_tee_pads = a_pads;
                     elements.extend(audio_els);
                 }
                 Err(err) => {
@@ -1146,8 +1336,16 @@ impl ChannelPipeline {
         }
 
         // Dynamic attach path: no pre-mux input valves — mux-src Drop is the gate.
-        arm_srt_valve_on_full_pmt(self.id, &valve, &mux, None, None, None, None);
-        let _ = audio_src_pad;
+        arm_srt_valve_on_full_pmt(
+            self.id,
+            &valve,
+            &mux,
+            None,
+            &[],
+            None,
+            &[],
+            pairs,
+        );
 
         for el in &elements {
             el.sync_state_with_parent()
@@ -1178,12 +1376,12 @@ impl ChannelPipeline {
             channel = self.id,
             %url,
             gst_uri = %gst_url,
-            with_audio = audio_tee_pad.is_some(),
+            audio_pairs = audio_tee_pads.len(),
             "attached SRT branch (no relaunch)"
         );
         self.srt_branch = Some(Branch {
             tee_pad,
-            audio_tee_pad,
+            audio_tee_pads,
             elements,
         });
         Ok(())

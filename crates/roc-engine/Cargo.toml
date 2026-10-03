@@ -16,6 +16,7 @@ gst = ["roc-pipelines/gst"]
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+chrono.workspace = true
 clap.workspace = true
 futures-util.workspace = true
 parking_lot.workspace = true
@@ -30,3 +31,4 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+tokio-util = { version = "0.7", features = ["io"] }

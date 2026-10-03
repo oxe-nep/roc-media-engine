@@ -1,8 +1,8 @@
-bind: "0.0.0.0:8090"
-# Fallback only when callers omit `?path=` (soak / direct API).
-# Production: Go passes absolute paths under the UI recordings directory.
+bind: "0.0.0.0:8080"
 recordings_dir: "./recordings"
 preview_dir: "./preview"
+hls_dir: "./hls"
+public_host: "127.0.0.1"
 max_nvenc_sessions: 8
 default_encode_preset: hq
 
@@ -26,6 +26,7 @@ encode_presets:
     video_preset: low-latency-hq
     video_gop: 50
     audio_bitrate: "192k"
+    # 2 = stereo (default). 8 = four AAC pairs — deferred until REC/SRT stable.
     audio_channels: 2
   mezz:
     label: "Mezz 20 Mbit"

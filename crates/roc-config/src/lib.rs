@@ -14,6 +14,12 @@ pub struct Config {
     pub recordings_dir: PathBuf,
     #[serde(default = "default_preview_dir")]
     pub preview_dir: PathBuf,
+    /// Directory served as `/hls/{channel_id}/…` (GST writes preview here).
+    #[serde(default = "default_hls_dir")]
+    pub hls_dir: PathBuf,
+    /// Public host for SRT listener publish URLs shown in the UI.
+    #[serde(default = "default_public_host")]
+    pub public_host: String,
     /// Max concurrent NVENC encode sessions (resource limit).
     #[serde(default = "default_max_nvenc")]
     pub max_nvenc_sessions: usize,
@@ -28,13 +34,19 @@ pub struct Config {
 }
 
 fn default_bind() -> String {
-    "0.0.0.0:8090".into()
+    "0.0.0.0:8080".into()
 }
 fn default_recordings_dir() -> PathBuf {
     PathBuf::from("./recordings")
 }
 fn default_preview_dir() -> PathBuf {
     PathBuf::from("./preview")
+}
+fn default_hls_dir() -> PathBuf {
+    PathBuf::from("/opt/applications/roc-recording/backend/hls")
+}
+fn default_public_host() -> String {
+    "127.0.0.1".into()
 }
 fn default_max_nvenc() -> usize {
     8
@@ -185,6 +197,8 @@ impl Config {
             bind: default_bind(),
             recordings_dir: default_recordings_dir(),
             preview_dir: default_preview_dir(),
+            hls_dir: default_hls_dir(),
+            public_host: default_public_host(),
             max_nvenc_sessions: default_max_nvenc(),
             default_encode_preset: default_preset(),
             encode_presets: default_presets(),
@@ -258,6 +272,7 @@ fn default_presets() -> std::collections::HashMap<String, EncodePreset> {
             video_preset: "low-latency-hq".into(),
             video_gop: 50,
             audio_bitrate: "192k".into(),
+            // Stereo default; 8ch (4×AAC) deferred until REC/SRT path is stable.
             audio_channels: 2,
         },
     );

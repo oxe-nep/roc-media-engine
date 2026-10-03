@@ -1,7 +1,8 @@
-//! roc-media-engine control plane: HTTP API + channel orchestrator.
+//! roc-media-engine control plane: HTTP/WS UI API + GStreamer orchestrator.
 
 mod api;
 mod orchestrator;
+mod ui;
 mod workflows;
 
 use std::net::SocketAddr;
@@ -16,6 +17,7 @@ use roc_config::Config;
 use roc_pipelines::create_backend;
 
 use crate::orchestrator::Orchestrator;
+use crate::ui::state::UiState;
 
 #[derive(Debug, Parser)]
 #[command(name = "roc-media-engine", about = "ROC in-process media engine (GStreamer)")]
@@ -43,7 +45,7 @@ async fn main() -> Result<()> {
 
     if args.write_example_config {
         let example = Config::example();
-        let yaml = serde_yaml_string(&example)?;
+        let yaml = serde_yaml::to_string(&example)?;
         std::fs::write(&args.config, yaml)
             .with_context(|| format!("write {}", args.config.display()))?;
         println!("wrote example config to {}", args.config.display());
@@ -64,22 +66,51 @@ async fn main() -> Result<()> {
         cfg.bind = bind;
     }
 
+    if let Ok(hls) = std::env::var("ROC_MEDIA_HLS_DIR") {
+        if !hls.trim().is_empty() {
+            cfg.hls_dir = PathBuf::from(hls);
+        }
+    }
+    if let Ok(host) = std::env::var("ROC_MEDIA_PUBLIC_HOST") {
+        if !host.trim().is_empty() {
+            cfg.public_host = host;
+        }
+    }
+
+    // GST preview writes under ROC_MEDIA_HLS_DIR (see capture.rs).
+    std::env::set_var(
+        "ROC_MEDIA_HLS_DIR",
+        cfg.hls_dir.to_string_lossy().as_ref(),
+    );
+
     std::fs::create_dir_all(&cfg.recordings_dir)?;
     std::fs::create_dir_all(&cfg.preview_dir)?;
+    std::fs::create_dir_all(&cfg.hls_dir)?;
+
+    let data_dir = args
+        .config
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
 
     let backend = create_backend(&cfg);
     let orch = Arc::new(Orchestrator::new(cfg.clone(), backend)?);
+    let ui = Arc::new(UiState::load(
+        &data_dir,
+        cfg.public_host.clone(),
+        cfg.recordings_dir.clone(),
+    ));
+    for ch in &cfg.channels {
+        ui.ensure_channel(ch.id, &ch.name);
+    }
+    ui.persist();
 
-    let app = api::router(orch.clone());
+    ui::spawn_schedule_ticker(orch.clone(), ui.clone());
+
+    let app = ui::router(orch, ui, cfg.hls_dir.clone());
     let addr: SocketAddr = cfg.bind.parse().context("parse bind address")?;
-    tracing::info!(%addr, "roc-media-engine listening");
+    tracing::info!(%addr, hls = %cfg.hls_dir.display(), "roc-media-engine listening (UI cutover)");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-fn serde_yaml_string(cfg: &Config) -> Result<String> {
-    // serde_yaml is on roc-config; re-serialize via JSON→YAML-ish by using debug isn't ideal.
-    // Engine depends on roc-config only — add serde_yaml here.
-    Ok(serde_yaml::to_string(cfg)?)
 }

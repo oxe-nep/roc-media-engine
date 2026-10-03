@@ -4,7 +4,8 @@ Greenfield media stack for ROC live capture/record/SRT/playout.
 
 **Replaces FFmpeg child-process orchestration** (as in `roc-recording`) with an **in-process Rust + GStreamer** engine: one host process, bus-based errors, `tee` fan-out, NVENC encode-once.
 
-Runs **alongside** [`roc-recording`](../roc-recording) — do not delete the legacy stack until Fas 2+ is proven on at least one production channel.
+Legacy [`roc-recording`](../roc-recording) stays as the frozen Go+FFmpeg stack.
+This repo is the complete greenfield product: **Rust engine + Next.js UI**.
 
 ## Goals
 
@@ -21,25 +22,28 @@ roc-media-engine/
     roc-devices/      # DeckLink descriptors / format codes
     roc-pipelines/    # GStreamer + mock backends
     roc-engine/       # axum API + orchestrator (bin: roc-media-engine)
+  frontend/           # Next.js dashboard (k3s)
   spikes/
     list_devices/     # Fas 0: probe GST elements / devices
     decklink_nvenc/   # Fas 0: DeckLink → NVENC → file (+ tee)
-  deploy/             # systemd + env example
-  docs/               # spike go/no-go, plugins, UI adapter
+  deploy/             # systemd + k8s + env example
+  docs/               # spike go/no-go, plugins, UI cutover
   scripts/            # host helper scripts
 ```
 
 ## Quick start (dev without DeckLink / GStreamer)
 
-Default build uses the **mock** backend (no GStreamer link).
+Default build uses the **mock** backend (no GStreamer link). The engine serves the
+UI API on **`:8080`** (same port the old Go backend used). See
+[docs/UI_ADAPTER.md](docs/UI_ADAPTER.md) and [frontend/README.md](frontend/README.md).
 
 ```bash
 cargo run -p roc-engine -- --write-example-config --config config.yaml
 cargo run -p roc-engine -- --config config.yaml
-curl http://127.0.0.1:8090/api/health
-curl -X POST http://127.0.0.1:8090/api/channels/1/start
-curl -X POST http://127.0.0.1:8090/api/channels/1/record/start
-curl -X POST "http://127.0.0.1:8090/api/channels/1/srt/start"
+curl http://127.0.0.1:8080/api/health
+curl -X POST http://127.0.0.1:8080/api/streams/1/start
+# UI
+cd frontend && cp .env.example .env.local && npm ci && npm run dev
 ```
 
 ## Capture host (Linux + DeckLink IP + NVIDIA)
@@ -67,11 +71,11 @@ cargo run -p spike-decklink-nvenc --release --features gst -- \
 | GET/POST | `/api/workflows…` | TC/commentator stubs |
 | GET | `/api/adapter/manifest` | Go/UI migration contract |
 
-## SRT (8 channels)
+## SRT
 
-Each channel can publish MPEG-TS over SRT (H.264 + AAC ADTS). The mux waits
-until both A/V are present so picky receivers (MediaMTX) and players (VLC) see
-a complete first PMT.
+Each channel can publish MPEG-TS over SRT (H.264 + AAC ADTS). Encode presets
+default to **stereo** (`audio_channels: 2`). Full 8ch (4×AAC pairs) is deferred
+until REC/SRT quality is solid — set `audio_channels: 8` only for experiments.
 
 Default listener bind (config): `srt://0.0.0.0:910N?mode=listener` for channel N.
 

@@ -4,7 +4,16 @@
 config.yaml
 recordings/
 preview/
+hls/
 .idea/
 .vscode/
 *.mp4
-*.ts
+# MPEG-TS segments (not TypeScript under frontend/)
+/*.ts
+/recordings/**/*.ts
+/preview/**/*.ts
+/hls/**/*.ts
+frontend/node_modules/
+frontend/.next/
+frontend/.env*.local
+frontend/tsconfig.tsbuildinfo

@@ -76,8 +76,18 @@ fn udp_host_port(url: &str) -> (String, u32) {
     ("239.255.28.1".into(), 21001)
 }
 
+/// How many AAC stereo pairs to mux for a preset (`2` → 1 pair, `8` → 4 pairs).
+/// MPEG-TS cannot carry 8ch PCM; FFmpeg/Go use the same 4×AAC layout.
+pub fn aac_stereo_pairs(audio_channels: u32) -> usize {
+    if audio_channels >= 8 {
+        4
+    } else {
+        1
+    }
+}
+
 /// 8→2 matrix selecting stereo pair `pair` (0=ch1-2 … 3=ch7-8).
-fn stereo_pair_matrix(pair: usize) -> String {
+pub fn stereo_pair_matrix(pair: usize) -> String {
     let mut rows = Vec::with_capacity(2);
     for out_ch in 0..2 {
         let mut coeffs = Vec::with_capacity(8);
@@ -94,6 +104,80 @@ fn stereo_pair_matrix(pair: usize) -> String {
     format!("<{}>", rows.join(", "))
 }
 
+/// One AAC encode fan-out target: named mpegtsmux request pad + optional valve.
+struct AacMuxOut<'a> {
+    mux_name: &'a str,
+    /// When set, inserts `valve name={prefix}{pair} drop=true` (SRT PMT gate).
+    valve_prefix: Option<&'a str>,
+}
+
+/// Program AAC into muxes (and optionally listen HLS) — encode once per pair.
+///
+/// Sharing SRT+UDP+listen avoids ~12 `voaacenc`/channel (CPU overload → crackle).
+fn mpegts_program_aac(
+    name_prefix: &str,
+    aac_bps: u64,
+    pairs: usize,
+    outputs: &[AacMuxOut<'_>],
+    feed_listen: bool,
+) -> String {
+    let pairs = pairs.max(1);
+    if outputs.is_empty() && !feed_listen {
+        return String::new();
+    }
+    // Deep non-leaky queues on the live encode path. Leaky only on sinks that
+    // may stall (HLS disk, SRT PMT hold) so they cannot backpressure voaacenc.
+    let q = "queue max-size-buffers=0 max-size-bytes=0 max-size-time=200000000";
+    let aac_caps = "audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved";
+    if pairs == 1 && outputs.len() == 1 && !feed_listen {
+        let matrix = stereo_pair_matrix(0);
+        let out = &outputs[0];
+        let valve = out
+            .valve_prefix
+            .map(|p| format!("valve name={p}0 drop=true ! "))
+            .unwrap_or_default();
+        return format!(
+            "a. ! {q} ! \
+             audioconvert mix-matrix=\"{matrix}\" ! {aac_caps} ! \
+             voaacenc bitrate={aac_bps} ! aacparse ! \
+             capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts ! \
+             {valve}{mux}.",
+            mux = out.mux_name,
+        );
+    }
+    let raw_tee = format!("{name_prefix}_a_tee");
+    let mut parts = vec![format!("a. ! {q} ! tee name={raw_tee}")];
+    for pair in 0..pairs {
+        let matrix = stereo_pair_matrix(pair);
+        let aac_tee = format!("{name_prefix}_aac{pair}");
+        parts.push(format!(
+            "{raw_tee}. ! {q} ! \
+             audioconvert mix-matrix=\"{matrix}\" ! {aac_caps} ! \
+             voaacenc bitrate={aac_bps} ! aacparse ! \
+             capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts ! \
+             tee name={aac_tee}"
+        ));
+        for out in outputs {
+            // Non-leaky into both muxes so all AAC pads stay in the PMT.
+            // SRT egress valve starts open (see capture arm) so this cannot
+            // backpressure the shared tee into UDP/listen.
+            parts.push(format!(
+                "{aac_tee}. ! {q} ! {mux}.",
+                mux = out.mux_name,
+            ));
+        }
+        if feed_listen {
+            // Deep leaky queue: short queues dropped AAC under CPU load → crackle
+            // in listen/preview. Prefer ~500ms before leaking.
+            parts.push(format!(
+                "{aac_tee}. ! queue max-size-buffers=0 max-size-bytes=0 \
+                 max-size-time=500000000 leaky=downstream ! hls_l{pair}.audio"
+            ));
+        }
+    }
+    parts.join(" ")
+}
+
 /// Bus-message peak meters for the 8ch audio tee (`level` → Element "level").
 fn meter_branch() -> &'static str {
     "a. ! queue max-size-buffers=8 leaky=downstream ! \
@@ -105,26 +189,31 @@ fn meter_branch() -> &'static str {
 /// **same** preview H.264 muxed in. Separate audio-only playlists cannot stay
 /// lipsynced with `preview.m3u8` in hls.js (two independent live timelines).
 ///
-/// Expects encoded preview tee `pv` and DeckLink audio tee `a`.
-/// Audio must use hlssink2's `audio` request pad (bare `hls.` grabs video).
-///
-/// Uses `audioconvert mix-matrix` (not `audiomixmatrix`): manual mixmatrix emits
-/// `channel-mask=0`, which `voaacenc` rejects for stereo (needs `0x3`).
-fn listen_hls_branches(hls_dir: &str, gen: u64) -> String {
+/// Expects encoded preview tee `pv`. When `audio_from_program` is true, AAC is
+/// linked later from `prog_aacN` (shared with SRT/UDP). Otherwise encode from `a`.
+fn listen_hls_branches(hls_dir: &str, gen: u64, audio_from_program: bool) -> String {
     let mut parts = Vec::with_capacity(4);
+    let q = "queue max-size-buffers=0 max-size-bytes=0 max-size-time=200000000";
     for pair in 0..4 {
-        let matrix = stereo_pair_matrix(pair);
         let playlist = format!("{hls_dir}/listen_{pair}.m3u8");
         // Generation stamp matches FFmpeg preview.go — avoids stale segment reuse in hls.js.
         let seg = format!("{hls_dir}/l{gen}_{pair}_%05d.ts");
+        let audio = if audio_from_program {
+            String::new()
+        } else {
+            let matrix = stereo_pair_matrix(pair);
+            format!(
+                " a. ! {q} ! \
+                 audioconvert mix-matrix=\"{matrix}\" ! \
+                 audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved ! \
+                 voaacenc bitrate=128000 ! aacparse ! hls_l{pair}.audio"
+            )
+        };
         parts.push(format!(
             "pv. ! queue max-size-buffers=3 leaky=downstream ! \
              h264parse config-interval=-1 ! \
              hlssink2 name=hls_l{pair} location=\"{seg}\" playlist-location=\"{playlist}\" \
-             target-duration=1 max-files=6 playlist-length=6 \
-             a. ! queue max-size-buffers=64 leaky=downstream ! \
-             audioconvert mix-matrix=\"{matrix}\" ! audio/x-raw,channels=2 ! \
-             voaacenc bitrate=128000 ! aacparse ! hls_l{pair}.audio"
+             target-duration=1 max-files=6 playlist-length=6{audio}"
         ));
     }
     parts.join(" ")
@@ -347,43 +436,31 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
             "e. ! queue ! {parse} ! mp4mux fragment-duration=1000 ! filesink location=\"{path}\" sync=false"
         ));
     }
-    if let Some(url) = &opts.srt_url {
-        let matrix = stereo_pair_matrix(0);
-        let aac_bps = parse_bitrate(&opts.preset.audio_bitrate).unwrap_or(192_000);
-        // Bake A+V into the initial graph (same pattern as UDP). Dynamically
-        // attaching AAC later makes mpegtsmux emit an incomplete first PMT —
-        // MediaMTX then reports "undeclared track" and WebRTC gets no Opus.
-        // srt_v_valve + srt_a_valve stay closed until both A/V have a buffer,
-        // then open together so the first PMT is born with H.264+AAC.
-        // srt_valve stays closed until mux src shows a clean A/V PMT.
+    let aac_bps = parse_bitrate(&opts.preset.audio_bitrate).unwrap_or(192_000);
+    let pairs = aac_stereo_pairs(opts.preset.audio_channels);
+
+    // UDP/listen: 4×AAC when 8ch. SRT: dedicated stereo encode + PMT egress
+    // gate (MediaMTX). Do not share UDP AAC into srtmux — leaky shared legs
+    // crackled VLC; gating a shared tee starved preview.
+    if let Some(url) = &opts.udp_egress {
+        let (host, port) = udp_host_port(url);
         out_branches.push(format!(
-            "e. ! queue name=q_srt_v ! {parse} config-interval=-1 ! {bs} ! \
-             valve name=srt_v_valve drop=true ! \
-             mpegtsmux name=srtmux alignment=7 ! \
-             valve name=srt_valve drop=true ! \
-             srtsink uri=\"{url}\" wait-for-connection=false auto-reconnect=true \
-             async=false sync=false \
-             a. ! queue max-size-buffers=64 leaky=downstream ! \
-             audioconvert mix-matrix=\"{matrix}\" ! audio/x-raw,channels=2 ! \
-             voaacenc bitrate={aac_bps} ! aacparse ! \
-             capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts ! \
-             valve name=srt_a_valve drop=true ! srtmux.",
+            "e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
+             mpegtsmux name=udpmux alignment=7 ! \
+             udpsink host={host} port={port} sync=false async=false",
             bs = family.byte_stream_caps(),
         ));
     }
-    if let Some(url) = &opts.udp_egress {
-        let (host, port) = udp_host_port(url);
-        let matrix = stereo_pair_matrix(0);
-        let aac_bps = parse_bitrate(&opts.preset.audio_bitrate).unwrap_or(192_000);
-        // Named mux so program AAC (pair 1–2) can join the same MPEG-TS as video.
-        // Force Annex-B: mpegtsmux + players need byte-stream (not avc/hvc1).
+    if let Some(url) = &opts.srt_url {
+        // Non-leaky into srtmux (leaky video/AAC → VLC crackle). Encode tee is
+        // protected by the idle fakesink branch; PMT gate opens within ~100ms.
         out_branches.push(format!(
-            "e. ! queue ! {parse} config-interval=-1 ! {bs} ! mpegtsmux name=udpmux alignment=7 ! \
-             udpsink host={host} port={port} sync=false async=false \
-             a. ! queue max-size-buffers=64 leaky=downstream ! \
-             audioconvert mix-matrix=\"{matrix}\" ! audio/x-raw,channels=2 ! \
-             voaacenc bitrate={aac_bps} ! aacparse ! \
-             capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts ! udpmux.",
+            "e. ! queue name=q_srt_v max-size-buffers=0 max-size-bytes=0 max-size-time=200000000 ! \
+             {parse} config-interval=-1 ! {bs} ! \
+             mpegtsmux name=srtmux alignment=7 ! \
+             valve name=srt_valve drop=true ! \
+             srtsink uri=\"{url}\" wait-for-connection=false auto-reconnect=true \
+             async=false sync=false",
             bs = family.byte_stream_caps(),
         ));
     }
@@ -394,6 +471,34 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
     } else {
         None
     };
+    let feed_listen = pairs >= 4 && preview_gen.is_some() && opts.udp_egress.is_some();
+    let mut aac_parts = Vec::new();
+    if opts.udp_egress.is_some() {
+        aac_parts.push(mpegts_program_aac(
+            "prog",
+            aac_bps,
+            pairs,
+            &[AacMuxOut {
+                mux_name: "udpmux",
+                valve_prefix: None,
+            }],
+            feed_listen,
+        ));
+    }
+    if opts.srt_url.is_some() {
+        // Own stereo encoder → non-leaky into srtmux (clean VLC audio).
+        aac_parts.push(mpegts_program_aac(
+            "srt",
+            aac_bps,
+            1,
+            &[AacMuxOut {
+                mux_name: "srtmux",
+                valve_prefix: None,
+            }],
+            false,
+        ));
+    }
+    let shared_aac = aac_parts.join(" ");
 
     let preview = if let Some(gen) = preview_gen {
         let playlist = opts
@@ -406,8 +511,8 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         format!(
             "t. ! queue max-size-buffers=3 leaky=downstream ! \
              videoconvert ! videoscale ! videorate ! \
-             video/x-raw,width=640,height=360,framerate=10/1 ! \
-             x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=10 bframes=0 ! \
+             video/x-raw,width=640,height=360,framerate=5/1 ! \
+             x264enc tune=zerolatency speed-preset=ultrafast bitrate=400 key-int-max=5 bframes=0 threads=1 ! \
              video/x-h264,profile=baseline ! h264parse config-interval=-1 ! \
              tee name=pv \
              pv. ! queue max-size-buffers=3 leaky=downstream ! \
@@ -420,7 +525,8 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
 
     let need_audio = opts.with_tee_preview
         || opts.preview_path.is_some()
-        || opts.udp_egress.is_some();
+        || opts.udp_egress.is_some()
+        || opts.srt_url.is_some();
     let (audio_src, listen, meter) = if need_audio {
         let playlist = opts
             .preview_path
@@ -429,7 +535,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         let dir = hls_dir_from_playlist(&playlist);
         let num = decklink_device_number(&opts.device);
         let listen = if let Some(gen) = preview_gen {
-            listen_hls_branches(&dir, gen)
+            listen_hls_branches(&dir, gen, feed_listen)
         } else {
             String::new()
         };
@@ -445,6 +551,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         (String::new(), String::new(), String::new())
     };
 
+    // listen (hls_lN) must appear before shared_aac links `.audio` pads.
     format!(
         "{src} ! \
          deinterlace mode=auto ! tee name=t \
@@ -454,6 +561,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
          {out_branches} \
          {preview} \
          {listen} \
+         {shared_aac} \
          {meter}",
         enc = nvenc_chain(&opts.preset.video_codec, preset, bitrate_kbit, gop),
         out_branches = out_branches.join(" "),
@@ -512,6 +620,7 @@ pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roc_config::EncodePreset;
 
     #[test]
     fn parses_display_name() {
@@ -527,6 +636,69 @@ mod tests {
         assert!(m0.contains("1.0, 0.0, 0.0"));
         let m1 = stereo_pair_matrix(1);
         assert!(m1.contains("0.0, 0.0, 1.0, 0.0"));
+    }
+
+    #[test]
+    fn encode_once_srt_udp_use_four_aac_when_8ch() {
+        let mut preset = EncodePreset {
+            label: "HQ".into(),
+            video_codec: "nvh264enc".into(),
+            video_bitrate: "12M".into(),
+            video_maxrate: None,
+            video_bufsize: None,
+            video_preset: "low-latency-hq".into(),
+            video_gop: 50,
+            audio_bitrate: "192k".into(),
+            audio_channels: 8,
+        };
+        preset.normalize_for_gst();
+        let launch = build_capture_encode_once_launch(&CaptureLaunchOpts {
+            device: "DeckLink IP 100G (1)".into(),
+            mode: "auto".into(),
+            preset,
+            preview_path: None,
+            record_path: None,
+            srt_url: Some("srt://0.0.0.0:9101?mode=listener".into()),
+            udp_egress: Some("udp://239.255.28.1:21001".into()),
+            with_tee_preview: false,
+        });
+        assert_eq!(aac_stereo_pairs(8), 4);
+        // 4×AAC UDP + 1×AAC dedicated SRT stereo.
+        assert_eq!(launch.matches("voaacenc").count(), 5);
+        assert!(launch.contains("udpmux"));
+        assert!(launch.contains("srtmux"));
+        assert!(launch.contains("srt_valve"));
+        assert_eq!(launch.matches("udpmux.").count(), 4);
+        assert!(launch.contains("srtmux."));
+        assert!(launch.contains("voaacenc"));
+
+        let with_listen = build_capture_encode_once_launch(&CaptureLaunchOpts {
+            device: "DeckLink IP 100G (1)".into(),
+            mode: "auto".into(),
+            preset: {
+                let mut p = EncodePreset {
+                    label: "HQ".into(),
+                    video_codec: "nvh264enc".into(),
+                    video_bitrate: "12M".into(),
+                    video_maxrate: None,
+                    video_bufsize: None,
+                    video_preset: "low-latency-hq".into(),
+                    video_gop: 50,
+                    audio_bitrate: "192k".into(),
+                    audio_channels: 8,
+                };
+                p.normalize_for_gst();
+                p
+            },
+            preview_path: Some("/tmp/roc-preview/preview.m3u8".into()),
+            record_path: None,
+            srt_url: Some("srt://0.0.0.0:9101?mode=listener".into()),
+            udp_egress: Some("udp://239.255.28.1:21001".into()),
+            with_tee_preview: true,
+        });
+        assert_eq!(with_listen.matches("voaacenc").count(), 5);
+        assert!(with_listen.contains("hls_l0.audio"));
+        assert!(with_listen.contains("prog_aac0"));
     }
 
     #[test]
