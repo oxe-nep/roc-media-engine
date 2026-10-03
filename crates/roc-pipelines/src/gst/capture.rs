@@ -94,12 +94,13 @@ fn arm_srt_valve_on_full_pmt(
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
 
-    let out_valve = out_valve.clone();
-    let _ = out_valve.set_property("drop", true);
+    // Keep valve open — gating is done only via PadProbeReturn::Drop so the
+    // buffer that unlocks us is not discarded by a drop=true→false race.
+    let _ = out_valve.set_property("drop", false);
     let min_audio_es = min_audio_es.max(1);
     let opened = Arc::new(AtomicBool::new(false));
     let Some(sink) = out_valve.static_pad("sink") else {
-        tracing::warn!(channel, "srt_valve has no sink pad — leaving drop=true");
+        tracing::warn!(channel, "srt_valve has no sink pad");
         return;
     };
 
@@ -124,11 +125,14 @@ fn arm_srt_valve_on_full_pmt(
                 return PadProbeReturn::Drop;
             }
 
+            // Any incomplete PMT in the buffer is poison for MediaMTX (including
+            // PMT-only buffers without a PAT — pat_pmt_pids would miss those if
+            // we only looked at first_pmt_is_full_av).
+            let has_poison = chunk_has_incomplete_pmt(&chunk, min_audio_es);
+            let first_ok = first_pmt_is_full_av(&chunk, min_audio_es);
+
             if opened.load(Ordering::SeqCst) {
-                // After open, still block SI bursts that start with a poison PMT.
-                if chunk_has_incomplete_pmt(&chunk, min_audio_es)
-                    && !first_pmt_is_full_av(&chunk, min_audio_es)
-                {
+                if has_poison && !first_ok {
                     return PadProbeReturn::Drop;
                 }
                 return PadProbeReturn::Ok;
@@ -140,23 +144,21 @@ fn arm_srt_valve_on_full_pmt(
                 .unwrap_or(0);
             let _ = first_ts.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
 
-            // Discourse/GStreamer guidance: drop until both A/V are present.
-            // Only pass a buffer whose *first* PMT is already full A/V.
-            if first_pmt_is_full_av(&chunk, min_audio_es) {
+            // Discourse/GStreamer: drop until a buffer starts with full A/V PMT.
+            if first_ok && !has_poison {
                 let (_, types, audio_pid_list) =
                     ts_ready_for_mediamtx(std::slice::from_ref(&chunk), min_audio_es);
                 if opened
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
-                    let _ = out_valve.set_property("drop", false);
                     tracing::info!(
                         channel,
                         ?types,
                         ?audio_pid_list,
                         min_audio_es,
                         why = "first_pmt_full_av",
-                        "SRT valve open (Hydra tee gate)"
+                        "SRT gate open (Hydra tee / probe drop)"
                     );
                 }
                 return PadProbeReturn::Ok;
@@ -181,7 +183,6 @@ fn arm_srt_valve_on_full_pmt(
                     "SRT waiting for buffer starting with full A/V PMT"
                 );
             }
-            // Drop before the valve so poison never sits in q_srt.
             PadProbeReturn::Drop
         },
     );
@@ -346,9 +347,131 @@ fn pmt_has_av(es: &[(u8, u16)], min_audio: usize) -> bool {
 
 /// True when the payload contains at least one PMT that is not full A/V.
 fn chunk_has_incomplete_pmt(ts: &[u8], min_audio: usize) -> bool {
-    pmt_sections(ts)
+    if pmt_sections(ts)
         .into_iter()
         .any(|sec| !pmt_has_av(&sec, min_audio))
+    {
+        return true;
+    }
+    // PMT-only buffers (no PAT in the same alignment=7 burst) are invisible to
+    // pat_pmt_pids — scan PUSI packets for table_id 0x02 directly.
+    orphan_pmt_is_incomplete(ts, min_audio)
+}
+
+/// Parse PUSI packets with table_id=0x02 even when PAT is absent from `ts`.
+fn orphan_pmt_is_incomplete(ts: &[u8], min_audio: usize) -> bool {
+    let mut i = 0usize;
+    while i + 188 <= ts.len() {
+        if ts[i] != 0x47 {
+            i += 1;
+            continue;
+        }
+        let pkt = &ts[i..i + 188];
+        if pkt[1] & 0x40 == 0 {
+            i += 188;
+            continue;
+        }
+        let afc = (pkt[3] >> 4) & 0x3;
+        let mut off = 4usize;
+        if afc == 2 || afc == 3 {
+            off = 5 + pkt[4] as usize;
+        }
+        if off >= 187 {
+            i += 188;
+            continue;
+        }
+        let ptr = pkt[off] as usize;
+        let p = off + 1 + ptr;
+        if p + 12 >= 188 || pkt[p] != 0x02 {
+            i += 188;
+            continue;
+        }
+        let secs = pmt_sections_at(ts, i);
+        if let Some(sec) = secs.first() {
+            if !pmt_has_av(sec, min_audio) {
+                return true;
+            }
+        }
+        i += 188;
+    }
+    false
+}
+
+/// Like `pmt_sections` but starts at a known PMT packet offset (no PAT lookup).
+fn pmt_sections_at(ts: &[u8], start: usize) -> Vec<Vec<(u8, u16)>> {
+    if start + 188 > ts.len() {
+        return Vec::new();
+    }
+    let pkt = &ts[start..start + 188];
+    let pid = (((pkt[1] & 0x1f) as u16) << 8) | pkt[2] as u16;
+    let afc = (pkt[3] >> 4) & 0x3;
+    let mut off = 4usize;
+    if afc == 2 || afc == 3 {
+        off = 5 + pkt[4] as usize;
+    }
+    if off >= 187 {
+        return Vec::new();
+    }
+    let ptr = pkt[off] as usize;
+    let p = off + 1 + ptr;
+    if p + 12 >= 188 || pkt[p] != 0x02 {
+        return Vec::new();
+    }
+    let sl = (((pkt[p + 1] & 0x0f) as usize) << 8) | pkt[p + 2] as usize;
+    let need = 3 + sl;
+    if need < 16 || need > 1024 {
+        return Vec::new();
+    }
+    let mut buf = pkt[p..].to_vec();
+    let mut j = start + 188;
+    while buf.len() < need && j + 188 <= ts.len() {
+        if ts[j] != 0x47 {
+            j += 1;
+            continue;
+        }
+        let cont_pid = (((ts[j + 1] & 0x1f) as u16) << 8) | ts[j + 2] as u16;
+        if cont_pid != pid {
+            j += 188;
+            continue;
+        }
+        if ts[j + 1] & 0x40 != 0 {
+            break;
+        }
+        let afc2 = (ts[j + 3] >> 4) & 0x3;
+        let mut o = 4usize;
+        if afc2 == 2 || afc2 == 3 {
+            o = 5 + ts[j + 4] as usize;
+        }
+        if o < 188 {
+            buf.extend_from_slice(&ts[j + o..j + 188]);
+        }
+        j += 188;
+    }
+    if buf.len() < need {
+        return Vec::new();
+    }
+    buf.truncate(need);
+    let pil = (((buf[10] & 0x0f) as usize) << 8) | buf[11] as usize;
+    let mut q = 12 + pil;
+    let end = need.saturating_sub(4);
+    let mut found = Vec::new();
+    while q + 5 <= end {
+        let st = buf[q];
+        let epid = (((buf[q + 1] & 0x1f) as u16) << 8) | buf[q + 2] as u16;
+        let esil = (((buf[q + 3] & 0x0f) as usize) << 8) | buf[q + 4] as usize;
+        if esil > 64 || q + 5 + esil > end {
+            break;
+        }
+        if epid >= 0x20 && epid < 0x1fff && matches!(st, 0x1b | 0x24 | 0x0f | 0x11) {
+            found.push((st, epid));
+        }
+        q += 5 + esil;
+    }
+    if found.is_empty() {
+        Vec::new()
+    } else {
+        vec![found]
+    }
 }
 
 /// True when the first PMT in wire order is full A/V (what MediaMTX locks on).
