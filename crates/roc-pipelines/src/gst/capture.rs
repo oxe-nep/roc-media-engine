@@ -230,14 +230,24 @@ fn arm_srt_valve_on_full_pmt(
             if chunk.is_empty() {
                 return PadProbeReturn::Drop;
             }
-            // Never forward a chunk that still carries an AAC-only / incomplete PMT —
-            // MediaMTX locks tracks from the first PMT it sees (and from bad updates).
+            // Never forward a chunk with any incomplete PMT — MediaMTX locks tracks
+            // from the first PMT it sees (AAC-only *or* video-only both poison).
             if chunk_has_incomplete_pmt(&chunk, min_audio_es) {
                 if opened.load(Ordering::SeqCst) {
                     tracing::warn!(
                         channel,
                         "SRT dropping poison PMT chunk after valve open"
                     );
+                }
+                // Still accumulate for readiness / logging before open.
+                if !opened.load(Ordering::SeqCst) {
+                    let mut w = window.lock().unwrap_or_else(|e| e.into_inner());
+                    w.extend_from_slice(&chunk);
+                    const MAX: usize = 64 * 1024;
+                    if w.len() > MAX {
+                        let drain = w.len() - MAX;
+                        w.drain(0..drain);
+                    }
                 }
                 return PadProbeReturn::Drop;
             }
@@ -260,10 +270,8 @@ fn arm_srt_valve_on_full_pmt(
                 }
                 ts_ready_for_mediamtx(std::slice::from_ref(&w.clone()), min_audio_es)
             };
-            // Only release when the *current* chunk itself has a full A/V PMT (not
-            // merely an older clean PMT still sitting in the rolling window).
-            let chunk_ready = ts_ready_for_mediamtx(std::slice::from_ref(&chunk), min_audio_es).0;
-            if ready && chunk_ready {
+            // Release only when this chunk's first PMT is already full A/V.
+            if ready && first_pmt_is_full_av(&chunk, min_audio_es) {
                 open_egress(types, audio_pid_list, "clean_pmt");
                 return PadProbeReturn::Ok;
             }
@@ -457,6 +465,14 @@ fn chunk_has_incomplete_pmt(ts: &[u8], min_audio: usize) -> bool {
     pmt_sections(ts)
         .into_iter()
         .any(|sec| !pmt_has_av(&sec, min_audio))
+}
+
+/// True when the first PMT in wire order is full A/V (what MediaMTX locks on).
+fn first_pmt_is_full_av(ts: &[u8], min_audio: usize) -> bool {
+    pmt_sections(ts)
+        .into_iter()
+        .next()
+        .is_some_and(|sec| pmt_has_av(&sec, min_audio))
 }
 
 /// Safe to release to MediaMTX only when every PMT in the payload is full A/V
