@@ -494,7 +494,7 @@ export default function ChannelSettingsModal({
           </label>
 
           <label className="presets-field">
-            <span>HQ / REC preset</span>
+            <span>HQ preset</span>
             <select
               value={recPreset}
               onChange={(e) => setRecPreset(e.target.value)}

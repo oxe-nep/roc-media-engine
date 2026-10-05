@@ -29,7 +29,12 @@ export default function Thumbnail({ id, active, lostSignal = false, path }: Thum
     return () => clearInterval(interval);
   }, [id, active, basePath, lostSignal]);
 
-  if (!active || lostSignal) {
+  // Encode stopped → blank stage (not "No signal"). That label is only for
+  // capture-on with no DeckLink input.
+  if (!active) {
+    return <span className="no-signal thumb-off" aria-hidden />;
+  }
+  if (lostSignal) {
     return <span className="no-signal">No signal</span>;
   }
 

@@ -41,6 +41,7 @@ export default function WebRtcPreviewPlayer({
   onCloseRef.current = onClose;
   const { streams } = useDashboard();
   const channelStatus = streams.find((s) => s.id === channelId)?.status;
+  const encodeOff = channelStatus === "stopped" || channelStatus === "error";
   const noSignal = channelStatus === "waiting";
   const [pair, setPair] = useState(initialPair);
   const [session, setSession] = useState(0);
@@ -287,19 +288,22 @@ export default function WebRtcPreviewPlayer({
   }, [channelId, pair, session, tryAutostart, variant]);
 
   useEffect(() => {
-    if (noSignal) return;
+    if (noSignal || encodeOff) return;
     if (status === "Live") void tryAutostart(variant === "window");
-  }, [noSignal, status, tryAutostart, variant]);
+  }, [encodeOff, noSignal, status, tryAutostart, variant]);
 
-  const live = status === "Live" && !noSignal;
-  const statusLabel = noSignal && (status === "Live" || status === "DTLS…" || status === "ICE…")
-    ? "No signal"
-    : status;
+  const live = status === "Live" && !noSignal && !encodeOff;
+  const statusLabel = encodeOff
+    ? "Off"
+    : noSignal && (status === "Live" || status === "DTLS…" || status === "ICE…")
+      ? "No signal"
+      : status;
   const showOverlay =
     Boolean(error) ||
     status === "Error" ||
     status === "Disconnected" ||
-    noSignal;
+    noSignal ||
+    encodeOff;
 
   return (
     <div className={`preview-player preview-player-${variant}`}>
@@ -308,7 +312,9 @@ export default function WebRtcPreviewPlayer({
           <h2>
             {variant === "window" ? channelName : `Preview · ${channelName}`}
           </h2>
-          <span className={`preview-modal-status${live ? " live" : ""}${noSignal ? " waiting" : ""}`}>
+          <span
+            className={`preview-modal-status${live ? " live" : ""}${noSignal || encodeOff ? " waiting" : ""}`}
+          >
             {statusLabel}
           </span>
         </div>
@@ -326,7 +332,7 @@ export default function WebRtcPreviewPlayer({
               </button>
             ))}
           </div>
-          {needsUnmute && !noSignal && (
+          {needsUnmute && !noSignal && !encodeOff && (
             <button
               type="button"
               className="preview-tool-btn preview-unmute-btn"
@@ -370,15 +376,15 @@ export default function WebRtcPreviewPlayer({
         </div>
       </div>
       <div className="preview-modal-stage">
-        <AudioMeters channelId={channelId} bus="encode" silent={noSignal}>
+        <AudioMeters channelId={channelId} bus="encode" silent={noSignal || encodeOff}>
           <div className="preview-modal-video-wrap">
             <div className="preview-modal-video-frame" ref={frameRef}>
               <video
                 ref={videoRef}
-                className={`preview-modal-video${noSignal ? " lost" : ""}`}
+                className={`preview-modal-video${noSignal || encodeOff ? " lost" : ""}`}
                 playsInline
                 autoPlay
-                muted={noSignal}
+                muted={noSignal || encodeOff}
               />
               {needsUnmute && !showOverlay && (
                 <button
@@ -392,11 +398,13 @@ export default function WebRtcPreviewPlayer({
               {showOverlay && (
                 <div className="preview-modal-overlay" role="alert">
                   <p className="preview-modal-overlay-msg">
-                    {noSignal && !error
-                      ? "No signal"
-                      : error || (status === "Disconnected" ? "Disconnected" : "Preview failed")}
+                    {encodeOff && !error
+                      ? "Encode off"
+                      : noSignal && !error
+                        ? "No signal"
+                        : error || (status === "Disconnected" ? "Disconnected" : "Preview failed")}
                   </p>
-                  {!noSignal && (
+                  {!noSignal && !encodeOff && (
                     <button type="button" className="preview-modal-reconnect" onClick={reconnect}>
                       Reconnect
                     </button>

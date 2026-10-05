@@ -23,7 +23,7 @@ export function isProxyPreset(p: { video_codec: string }): boolean {
   return isNvencCodec(p.video_codec);
 }
 
-/** HQ / REC file presets: mezz (DNxHD/XAVC) — not the live proxy set. */
+/** HQ file presets: mezz (DNxHD/XAVC) — not the live proxy set. */
 export function isRecPreset(p: { video_codec: string }): boolean {
   return !isProxyPreset(p);
 }

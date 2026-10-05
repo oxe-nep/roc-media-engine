@@ -356,7 +356,7 @@ export default function EncodePresetsEditor({
         audio_channels: form.audio_channels === 8 ? 8 : 2,
       };
       if (kind === "proxy" && isMezzCodec(payload.video_codec)) {
-        throw new Error("Mezz codecs belong in REC presets");
+        throw new Error("Mezz codecs belong in HQ presets");
       }
       if (editingId) {
         const { id: _id, ...rest } = payload;
@@ -391,7 +391,7 @@ export default function EncodePresetsEditor({
   };
 
   const derived = deriveFromMbps(Math.round(videoMbps));
-  const title = kind === "proxy" ? "Proxy presets" : "REC presets";
+  const title = kind === "proxy" ? "Proxy presets" : "HQ presets";
   const audioMeta = formMezz
     ? form.audio_channels === 8
       ? "8ch PCM"
@@ -407,7 +407,7 @@ export default function EncodePresetsEditor({
       <p className="settings-tab-intro">
         {kind === "proxy"
           ? "Live / SRT / preview encode (NVENC). Selected per channel as Proxy preset."
-          : "Recording encode (NVENC mezz, DNxHD, or XAVC). Selected per channel as REC preset. Mezz writes MXF with PCM."}
+          : "Recording encode (NVENC mezz, DNxHD, or XAVC). Selected per channel as HQ preset. Mezz writes MXF with PCM."}
       </p>
 
       <div className="presets-layout">
@@ -577,7 +577,7 @@ export default function EncodePresetsEditor({
           <p className="presets-hint">
             {kind === "proxy"
               ? "Saving restarts capture on channels that use this as Proxy preset (blocked while recording)."
-              : "Mezz changes apply on the next REC start. NVENC REC presets relaunch channels that use them for live encode."}
+              : "Mezz changes apply on the next HQ start. NVENC HQ presets relaunch channels that use them for live encode."}
           </p>
           <div className="presets-form-actions">
             <button type="button" className="global-rec-btn" onClick={save} disabled={busy}>

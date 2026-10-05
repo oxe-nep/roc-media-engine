@@ -104,7 +104,7 @@ export default function SettingsModal({
         { id: "workflows" as const, label: "Workflows" },
         { id: "storage" as const, label: "Storage" },
         { id: "proxy-presets" as const, label: "Proxy presets" },
-        { id: "rec-presets" as const, label: "REC presets" },
+        { id: "rec-presets" as const, label: "HQ presets" },
       ] satisfies { id: Tab; label: string }[],
     [],
   );
