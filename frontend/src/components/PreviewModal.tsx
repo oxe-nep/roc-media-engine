@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import AudioMeters from "@/components/AudioMeters";
-import ListenButton from "@/components/ListenButton";
+import { LISTEN_PAIRS } from "@/components/ListenButton";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { mediaBase } from "@/lib/mediaBase";
 
@@ -232,6 +232,8 @@ export default function PreviewModal({
 
   if (!open) return null;
 
+  const live = status === "Live";
+
   return (
     <div
       className="modal-backdrop library-backdrop"
@@ -244,13 +246,25 @@ export default function PreviewModal({
         role="dialog"
         aria-label={`Preview ${channelName}`}
       >
-        <div className="modal-header">
-          <h2>
-            Preview · {channelName}
-            <span className="preview-modal-status">{status}</span>
-          </h2>
-          <div className="library-modal-header-actions">
-            <ListenButton pair={pair} onChange={(p) => setPair(p ?? 0)} />
+        <div className="preview-modal-header">
+          <div className="preview-modal-title">
+            <h2>Preview · {channelName}</h2>
+            <span className={`preview-modal-status${live ? " live" : ""}`}>{status}</span>
+          </div>
+          <div className="preview-modal-actions">
+            <div className="preview-pair-pills" role="group" aria-label="Audio pair">
+              {LISTEN_PAIRS.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  className={`preview-pair-pill${pair === p.id ? " on" : ""}`}
+                  onClick={() => setPair(p.id)}
+                  title={`Listen ${p.label}`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
             <button
               type="button"
               className="modal-close"
@@ -264,7 +278,9 @@ export default function PreviewModal({
         {error && <div className="error-message">{error}</div>}
         <div className="preview-modal-stage">
           <AudioMeters channelId={channelId} bus="encode">
-            <video ref={videoRef} className="preview-modal-video" playsInline autoPlay controls />
+            <div className="preview-modal-video-wrap">
+              <video ref={videoRef} className="preview-modal-video" playsInline autoPlay />
+            </div>
           </AudioMeters>
         </div>
       </div>
