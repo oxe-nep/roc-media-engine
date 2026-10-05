@@ -25,6 +25,10 @@ pub struct PlayoutLaunchOpts {
     pub format_code: String,
     /// When set, write `listen_0.m3u8` + JPEG thumb under this directory.
     pub hls_dir: Option<String>,
+    /// Stereo audio track count to map onto DeckLink (1..=4). Matches encode REC pairs.
+    pub audio_pairs: usize,
+    /// True when tracks are AAC/MPEG; false for raw PCM (MXF mezz).
+    pub audio_compressed: bool,
 }
 
 /// Map `"DeckLink IP 100G (1)"` / `"1"` / `"0"` → DeckLink `device-number` (0-based).
@@ -559,6 +563,50 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
     )
 }
 
+/// Decode one stereo pair from demux → 48 kHz S16LE stereo.
+fn playout_stereo_decode(compressed: bool) -> &'static str {
+    if compressed {
+        "audio/mpeg ! aacparse ! avdec_aac ! audioconvert ! audioresample"
+    } else {
+        "audio/x-raw ! audioconvert ! audioresample"
+    }
+}
+
+/// File/SRT audio → DeckLink: up to 4 stereo pairs interleaved as 8ch (encode layout).
+fn build_playout_audio(pairs: usize, compressed: bool, asink: &str) -> String {
+    let pairs = pairs.clamp(1, 4);
+    let dec = playout_stereo_decode(compressed);
+    let q = "queue max-size-buffers=0 max-size-bytes=0 max-size-time=0";
+    let stereo = "audio/x-raw,format=S16LE,channels=2,rate=48000,layout=interleaved";
+    let out8 = "audio/x-raw,format=S16LE,channels=8,rate=48000,layout=interleaved";
+    let meter = format!(
+        "a. ! queue max-size-buffers=8 leaky=downstream ! \
+           level name=ameter interval=33000000 post-messages=true ! \
+           fakesink sync=false async=false"
+    );
+    if pairs == 1 {
+        // Single stereo (or multi-ch) track — audioconvert expands to 8ch for DeckLink.
+        return format!(
+            "d. ! {q} ! {dec} ! tee name=a \
+             a. ! {q} ! audioconvert ! audioresample ! {out8} ! {asink} \
+             {meter}"
+        );
+    }
+    let mut parts = Vec::with_capacity(pairs + 2);
+    parts.push("interleave name=i".to_string());
+    for n in 0..pairs {
+        parts.push(format!(
+            "d. ! {q} ! {dec} ! {stereo} ! i.sink_{n}"
+        ));
+    }
+    parts.push(format!(
+        "i. ! audioconvert ! audioresample ! tee name=a \
+         a. ! {q} ! {out8} ! {asink} \
+         {meter}"
+    ));
+    parts.join(" ")
+}
+
 pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
     let src = if opts.source.starts_with("srt://") {
         format!("srtsrc uri=\"{}\" ! tsdemux name=d", opts.source)
@@ -619,6 +667,8 @@ pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
 
     // Caps on demux pads are required: our MPEG-TS often exposes AAC before H.264,
     // so untyped `d.` can latch the audio pad onto the video branch → audio-only OUT.
+    let asink = decklink_audio_sink(&opts.device);
+    let audio = build_playout_audio(opts.audio_pairs, opts.audio_compressed, &asink);
     format!(
         "{src} \
          d. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
@@ -628,17 +678,9 @@ pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
            videoscale ! videorate skip-to-first=true ! \
            video/x-raw,format=UYVY,width=1920,height={height},framerate={fr} ! \
            {vsink} \
-         d. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
-           audio/mpeg ! aacparse ! avdec_aac ! audioconvert ! audioresample ! tee name=a \
-         a. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
-           audio/x-raw,format=S16LE,channels=2,rate=48000 ! \
-           {asink} \
-         a. ! queue max-size-buffers=8 leaky=downstream ! \
-           level name=ameter interval=33000000 post-messages=true ! \
-           fakesink sync=false async=false \
+         {audio} \
          {preview}",
         vsink = decklink_video_sink(&opts.device, mode),
-        asink = decklink_audio_sink(&opts.device),
     )
 }
 

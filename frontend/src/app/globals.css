@@ -3082,53 +3082,52 @@ body:has(.preview-window-root) .container {
 }
 
 .decode-grid {
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-  grid-auto-rows: 1fr;
+  /* Same column rhythm as encode `.cards-grid` (4 × 1fr). */
+  grid-template-columns: repeat(4, 1fr);
   align-items: stretch;
-  gap: 12px;
+  gap: 8px;
 }
 
 .decode-card {
   height: 100%;
-  min-height: 168px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
 .decode-card .decode-row {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr);
+  grid-template-columns: 40px minmax(0, 1fr);
   align-items: stretch;
   min-width: 0;
   flex: 1;
-  height: 100%;
 }
 
 .decode-card .card-channel-num {
-  flex-basis: 44px;
-  width: 44px;
-  min-width: 44px;
-  font-size: 1.2rem;
+  flex-basis: 40px;
+  width: 40px;
+  min-width: 40px;
+  font-size: 1.15rem;
 }
 
 .decode-body {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
   flex: 1;
-  padding: 12px 14px 12px;
+  padding: 10px 12px 10px;
 }
 
 .decode-head {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
 }
 
 .decode-card .card-name {
-  font-size: 0.92rem;
+  font-size: 0.88rem;
   line-height: 1.25;
   white-space: nowrap;
   overflow: hidden;
@@ -3136,7 +3135,7 @@ body:has(.preview-window-root) .container {
 }
 
 .decode-card .card-meta {
-  font-size: 0.74rem;
+  font-size: 0.72rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3159,8 +3158,8 @@ body:has(.preview-window-root) .container {
 
 .decode-card .ctrl-btn,
 .decode-card .stream-btn {
-  padding: 6px 11px;
-  font-size: 0.72rem;
+  padding: 5px 10px;
+  font-size: 0.7rem;
 }
 
 .decode-card .ctrl-btn.on {
@@ -3169,16 +3168,13 @@ body:has(.preview-window-root) .container {
 }
 
 .decode-stage {
-  flex: 1;
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
-  min-height: 64px;
+  min-height: 0;
 }
 
 .decode-stage-spacer {
-  flex: 1;
-  min-height: 64px;
+  display: none;
 }
 
 .card-error-slot {
@@ -3186,26 +3182,26 @@ body:has(.preview-window-root) .container {
 }
 
 .card-error-slot.has-error {
-  min-height: 1.6rem;
+  min-height: 1.4rem;
 }
 
 .file-timeline {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
 }
 
 .file-timeline-track {
   position: relative;
-  height: 20px;
+  height: 18px;
   display: flex;
   align-items: center;
 }
 
 .file-timeline-range {
   position: absolute;
-  top: 7px;
+  top: 6px;
   height: 6px;
   border-radius: 3px;
   background: rgba(92, 184, 92, 0.35);
@@ -3219,7 +3215,7 @@ body:has(.preview-window-root) .container {
   margin: 0;
   appearance: none;
   background: transparent;
-  height: 20px;
+  height: 18px;
   cursor: pointer;
 }
 
@@ -3242,17 +3238,17 @@ body:has(.preview-window-root) .container {
 
 .file-timeline-scrub::-webkit-slider-thumb {
   appearance: none;
-  width: 13px;
-  height: 13px;
-  margin-top: -3.5px;
+  width: 12px;
+  height: 12px;
+  margin-top: -3px;
   border-radius: 50%;
   background: var(--text-primary, #eee);
   border: 0;
 }
 
 .file-timeline-scrub::-moz-range-thumb {
-  width: 13px;
-  height: 13px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   background: var(--text-primary, #eee);
   border: 0;
@@ -3271,7 +3267,7 @@ body:has(.preview-window-root) .container {
 }
 
 .file-timeline-clock {
-  font-size: 0.76rem;
+  font-size: 0.74rem;
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
   white-space: nowrap;
@@ -3285,7 +3281,7 @@ body:has(.preview-window-root) .container {
 .file-timeline-paused {
   margin-left: 8px;
   color: #e6d29a;
-  font-size: 0.68rem;
+  font-size: 0.66rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -3297,21 +3293,32 @@ body:has(.preview-window-root) .container {
 }
 
 .ctrl-btn.tiny {
-  padding: 4px 9px;
-  font-size: 0.68rem;
+  padding: 3px 8px;
+  font-size: 0.66rem;
   letter-spacing: 0.04em;
   min-width: 0;
 }
 
 .file-timeline-mark-meta {
-  min-height: 1rem;
-  font-size: 0.7rem;
+  font-size: 0.68rem;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
 
 .decode-meta {
   display: none;
+}
+
+@media (max-width: 1200px) {
+  .decode-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 700px) {
+  .decode-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* --- Remote Commentator --- */

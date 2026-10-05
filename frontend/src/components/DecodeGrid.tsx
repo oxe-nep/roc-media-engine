@@ -106,27 +106,31 @@ function FileTimeline({
     c.mark_out_sec != null && Number.isFinite(c.mark_out_sec) ? Math.max(0, c.mark_out_sec) : null;
   const on = isPlayoutOn(c.status);
   const paused = isPlayoutPaused(c.status);
+  const playing = on && !paused;
   const [dragging, setDragging] = useState(false);
   const [scrub, setScrub] = useState<number | null>(null);
   const [localPos, setLocalPos] = useState(livePos);
   const seekTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cueBusy = useRef(false);
-  const holdUntil = useRef(0);
-  const holdTarget = useRef<number | null>(null);
+  const userPinned = useRef(false);
 
   useEffect(() => {
     if (dragging) return;
-    const hold = holdTarget.current;
-    if (hold != null && Date.now() < holdUntil.current) {
-      if (Math.abs(livePos - hold) < 0.35) {
-        holdTarget.current = null;
+    if (playing) {
+      userPinned.current = false;
+      setLocalPos(livePos);
+      return;
+    }
+    // Paused/stopped: keep scrubbed position until live catches up or play starts.
+    if (userPinned.current) {
+      if (Math.abs(livePos - localPos) < 0.25) {
+        userPinned.current = false;
         setLocalPos(livePos);
       }
       return;
     }
-    holdTarget.current = null;
     setLocalPos(livePos);
-  }, [livePos, dragging]);
+  }, [livePos, dragging, playing, localPos]);
 
   useEffect(() => {
     return () => {
@@ -137,7 +141,9 @@ function FileTimeline({
   const canScrub = !!c.file_id && duration > 0;
   const displayPos = dragging && scrub != null ? scrub : localPos;
   const inPct = duration > 0 ? Math.min(100, (markIn / duration) * 100) : 0;
-  const outPct = markOut != null && duration > 0 ? Math.min(100, (markOut / duration) * 100) : 100;
+  const outPct = markOut != null && duration > 0 ? Math.min(100, (markOut / duration) * 100) : null;
+  const rangeWidth =
+    outPct != null ? Math.max(0, outPct - inPct) : markIn > 0 ? Math.max(0, 100 - inPct) : 100;
 
   const ensureCued = async () => {
     if (on) return;
@@ -151,11 +157,9 @@ function FileTimeline({
     }
   };
 
-  const queueSeek = (sec: number) => {
-    setScrub(sec);
+  const commitSeek = (sec: number) => {
+    userPinned.current = true;
     setLocalPos(sec);
-    holdTarget.current = sec;
-    holdUntil.current = Date.now() + 2500;
     if (!canScrub) return;
     if (seekTimer.current) clearTimeout(seekTimer.current);
     seekTimer.current = setTimeout(() => {
@@ -163,23 +167,24 @@ function FileTimeline({
         try {
           await ensureCued();
           await seekPlayout(c.id, sec);
-          holdTarget.current = sec;
-          holdUntil.current = Date.now() + 2500;
+          userPinned.current = true;
           setLocalPos(sec);
         } catch (e) {
           onError(String(e));
         }
       })();
-    }, 90);
+    }, 120);
   };
 
   return (
     <div className="file-timeline">
       <div className="file-timeline-track">
-        <div
-          className="file-timeline-range"
-          style={{ left: `${inPct}%`, width: `${Math.max(0, outPct - inPct)}%` }}
-        />
+        {(markIn > 0 || markOut != null) && (
+          <div
+            className="file-timeline-range"
+            style={{ left: `${inPct}%`, width: `${rangeWidth}%` }}
+          />
+        )}
         <input
           type="range"
           className="file-timeline-scrub"
@@ -192,13 +197,21 @@ function FileTimeline({
           onPointerDown={() => setDragging(true)}
           onPointerUp={() => {
             setDragging(false);
+            if (scrub != null) commitSeek(scrub);
             setScrub(null);
           }}
           onPointerCancel={() => {
             setDragging(false);
             setScrub(null);
           }}
-          onChange={(e) => queueSeek(Number(e.target.value))}
+          onChange={(e) => {
+            const sec = Number(e.target.value);
+            setScrub(sec);
+            setLocalPos(sec);
+            userPinned.current = true;
+            // Live preview seeks while dragging (debounced); final on pointer up.
+            if (dragging) commitSeek(sec);
+          }}
         />
       </div>
       <div className="file-timeline-row">
@@ -250,11 +263,12 @@ function FileTimeline({
           </button>
         </div>
       </div>
-      <div className="file-timeline-mark-meta">
-        {markIn > 0 || markOut != null
-          ? `In ${formatClock(markIn)}${markOut != null ? ` · Out ${formatClock(markOut)}` : ""}`
-          : "\u00a0"}
-      </div>
+      {(markIn > 0 || markOut != null) && (
+        <div className="file-timeline-mark-meta">
+          In {formatClock(markIn)}
+          {markOut != null ? ` · Out ${formatClock(markOut)}` : ""}
+        </div>
+      )}
     </div>
   );
 }

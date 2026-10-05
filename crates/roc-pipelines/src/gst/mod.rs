@@ -76,8 +76,11 @@ fn playout_seek_pipeline(
     pipeline
         .seek_simple(flags, gstreamer::ClockTime::from_nseconds(ns))
         .map_err(|e| anyhow!("seek to {position_sec:.3}s failed: {e}"))?;
-    // Preroll so DeckLink shows the scrubbed frame while PAUSED.
-    let _ = pipeline.state(gstreamer::ClockTime::from_mseconds(400));
+    // Brief settle only — long waits block the playout lock and freeze scrub.
+    let wait_ms = if accurate { 80 } else { 0 };
+    if wait_ms > 0 {
+        let _ = pipeline.state(gstreamer::ClockTime::from_mseconds(wait_ms));
+    }
     Ok(())
 }
 
@@ -572,11 +575,20 @@ impl PipelineBackend for GstBackend {
         } else {
             None
         };
+        let audio = crate::probe_playout_audio(source);
+        tracing::info!(
+            client_id = %client.id,
+            audio_pairs = audio.pairs,
+            audio_compressed = audio.compressed,
+            "playout audio probe"
+        );
         let launch = build_playout_launch(&PlayoutLaunchOpts {
             source: source.to_string(),
             device: client.device.clone(),
             format_code: format_code.clone(),
             hls_dir,
+            audio_pairs: audio.pairs,
+            audio_compressed: audio.compressed,
         });
         tracing::info!(%launch, client_id = %client.id, %format_code, "starting playout pipeline");
         let pipeline = gstreamer::parse::launch(&launch)
@@ -757,17 +769,11 @@ impl PipelineBackend for GstBackend {
         // Drop stale EOS from the previous play-through so poll does not park at EOF.
         if let Some(bus) = pipe.bus() {
             while let Some(msg) = bus.timed_pop(gstreamer::ClockTime::ZERO) {
-                if matches!(msg.view(), gstreamer::MessageView::Error(_)) {
-                    // leave for poll
-                }
+                let _ = msg;
             }
         }
         p.position_sec = Some(target);
-        if paused {
-            let _ = pipe.state(gstreamer::ClockTime::from_mseconds(200));
-            pipe.set_state(gstreamer::State::Paused)
-                .context("keep playout PAUSED after scrub")?;
-        }
+        // Already paused — do not re-enter PAUSED (DeckLink state races / scrub freeze).
         Ok(())
     }
 

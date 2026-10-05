@@ -479,13 +479,15 @@ impl PipelineBackend for MockBackend {
         if !p.is_file {
             bail!("seek is only supported for file playout");
         }
-        let lo = p.mark_in_sec.max(0.0);
-        let hi = p
-            .mark_out_sec
-            .or(p.duration_sec)
-            .unwrap_or(f64::MAX)
-            .max(lo);
-        let target = position_sec.clamp(lo, hi);
+        let target = if position_sec.is_finite() {
+            position_sec.max(0.0)
+        } else {
+            0.0
+        };
+        let target = p
+            .duration_sec
+            .map(|d| target.min(d.max(0.0)))
+            .unwrap_or(target);
         p.play_origin_sec = target;
         p.position_sec = Some(target);
         p.started_at = Some(Instant::now());

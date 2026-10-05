@@ -366,14 +366,103 @@ mod gst_probe {
         let _ = pipeline.set_state(gstreamer::State::Null);
         duration
     }
+
+    /// How many stereo pairs / codec kind to feed DeckLink (encode uses 1 or 4 AAC).
+    #[derive(Debug, Clone, Copy)]
+    pub struct PlayoutAudioProbe {
+        pub pairs: usize,
+        pub compressed: bool,
+    }
+
+    /// Probe audio layout via ffprobe (stereo-track count) with safe defaults.
+    pub fn probe_playout_audio(source: &str) -> PlayoutAudioProbe {
+        let default = PlayoutAudioProbe {
+            pairs: 1,
+            compressed: true,
+        };
+        if source.starts_with("srt://") {
+            // SRT listen/caller varies; stay stereo-safe (file path probes track count).
+            return default;
+        }
+        let Ok(out) = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=codec_name,channels",
+                "-of",
+                "csv=p=0",
+                source,
+            ])
+            .output()
+        else {
+            return default;
+        };
+        if !out.status.success() {
+            return default;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut tracks = Vec::new();
+        for line in text.lines() {
+            let mut parts = line.split(',');
+            let codec = parts.next().unwrap_or("aac").trim();
+            let ch = parts
+                .next()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(2);
+            if codec.is_empty() {
+                continue;
+            }
+            tracks.push((codec.to_string(), ch));
+        }
+        if tracks.is_empty() {
+            return default;
+        }
+        let compressed = tracks.iter().any(|(codec, _)| {
+            !matches!(
+                codec.as_str(),
+                "pcm_s16le" | "pcm_s24le" | "pcm_s32le" | "pcm_f32le"
+            )
+        });
+        if tracks.len() == 1 {
+            return PlayoutAudioProbe {
+                pairs: 1,
+                compressed,
+            };
+        }
+        PlayoutAudioProbe {
+            pairs: tracks.len().clamp(1, 4),
+            compressed,
+        }
+    }
 }
 
 #[cfg(feature = "gst")]
-pub use gst_probe::{format_from_caps, probe_file_duration, probe_input_format, probe_playout_source};
+pub use gst_probe::{
+    format_from_caps, probe_file_duration, probe_input_format, probe_playout_audio,
+    probe_playout_source, PlayoutAudioProbe,
+};
 
 #[cfg(not(feature = "gst"))]
 pub fn probe_file_duration(_path: &str, _timeout_ms: u64) -> Option<f64> {
     None
+}
+
+#[cfg(not(feature = "gst"))]
+#[derive(Debug, Clone, Copy)]
+pub struct PlayoutAudioProbe {
+    pub pairs: usize,
+    pub compressed: bool,
+}
+
+#[cfg(not(feature = "gst"))]
+pub fn probe_playout_audio(_source: &str) -> PlayoutAudioProbe {
+    PlayoutAudioProbe {
+        pairs: 1,
+        compressed: true,
+    }
 }
 
 #[cfg(test)]
