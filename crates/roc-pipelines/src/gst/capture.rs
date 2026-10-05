@@ -1821,8 +1821,9 @@ impl ChannelPipeline {
     /// Stereo AAC pair(s) into an existing mux (mp4mux / mpegtsmux).
     ///
     /// `audio_channels >= 8` → four AAC stereo pairs (same as Go/FFmpeg).
-    /// `ts_align`: insert `identity single-segment` (needed for REC mp4mux late-join).
-    /// Leave false for live MPEG-TS/SRT — gating/restamp there makes PMT video-only.
+    /// `ts_align`: insert `identity single-segment` (needed for REC mp4mux late-join)
+    /// and force AAC `stream-format=raw` (mp4mux rejects ADTS). Leave false for
+    /// live MPEG-TS/SRT — those need ADTS and must not restamp.
     /// `audio` supplies channel count / AAC bitrate (proxy: encode preset, HQ: record preset).
     /// `tag` (`proxy` / `hq`) prefixes element names so two RECs never collide.
     fn link_program_aac(
@@ -1837,6 +1838,8 @@ impl ChannelPipeline {
         let pairs = aac_stereo_pairs(audio.audio_channels);
         let hold_ms = if ts_align { 40u64 } else { 0 };
         let aac_bps = crate::parse_bitrate(&audio.audio_bitrate).unwrap_or(192_000);
+        // mp4mux wants raw AAC access units; MPEG-TS (MediaMTX) wants ADTS.
+        let aac_stream = if ts_align { "raw" } else { "adts" };
         let mut pads = Vec::with_capacity(pairs);
         let mut els = Vec::new();
 
@@ -1852,12 +1855,11 @@ impl ChannelPipeline {
                 .property("max-size-time", gstreamer::ClockTime::from_mseconds(250))
                 .build()
                 .context("queue audio")?;
-            // MediaMTX (and MPEG-TS stream type 0x0F) expects ADTS-framed AAC, not raw.
             let matrix = stereo_pair_matrix(pair);
             let desc = format!(
                 "audioconvert mix-matrix=\"{matrix}\" ! \
                  audio/x-raw,channels=2 ! voaacenc bitrate={aac_bps} ! aacparse ! \
-                 capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts"
+                 capsfilter caps=audio/mpeg,mpegversion=4,stream-format={aac_stream}"
             );
             let abin = gstreamer::parse::bin_from_description(&desc, true)
                 .with_context(|| format!("parse {tag} audio bin pair {pair}"))?;
@@ -1881,7 +1883,11 @@ impl ChannelPipeline {
                     .context("link audio bin → identity")?;
                 id_a
                     .link(mux)
-                    .context("link audio identity → mux")?;
+                    .with_context(|| {
+                        format!(
+                            "link audio identity → mux (pair {pair}, stream-format={aac_stream})"
+                        )
+                    })?;
                 els.push(id_a);
             } else {
                 abin_el

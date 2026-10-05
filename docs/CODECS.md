@@ -40,5 +40,6 @@ UI (`encode_preset` vs `record_preset`).
 
 ## Deferred audio
 
-Full 8ch AAC (4× pairs) on SRT/REC remains deferred; stereo default stays.
+Proxy/SRT 8ch is four AAC stereo pairs in one MPEG-TS program (not one 8ch AAC
+stream). Players that only open the first audio PID will still look like 2ch.
 Mezz MXF uses PCM (stereo or 8ch as four stereo pairs) for both DNxHD and XAVC.
