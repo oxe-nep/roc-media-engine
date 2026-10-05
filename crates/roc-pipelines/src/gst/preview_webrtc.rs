@@ -12,7 +12,7 @@ use gstreamer::prelude::*;
 use gstreamer::{Bin, Element, GhostPad, Pad, Pipeline, Promise, State};
 use gstreamer_sdp::SDPMessage;
 use gstreamer_webrtc::{WebRTCSDPType, WebRTCSessionDescription};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::describe::stereo_pair_matrix;
 use crate::preview_sig::{PreviewSignal, PreviewSignalTx};
@@ -47,16 +47,19 @@ impl WebRtcPreview {
         let tag = format!("wpv{channel}p{pair}");
         let matrix = stereo_pair_matrix(pair as usize);
 
-        // One parse keeps mix-matrix / encoder props in gst-launch form (proven path).
+        // Browser-friendly H264: constrained-baseline, SPS/PPS on every IDR,
+        // packetization-mode=1 via rtph264pay aggregate-mode=zero-latency.
         let desc = format!(
             "queue name=q_v_{tag} max-size-buffers=2 leaky=downstream ! \
              videoconvert ! videoscale ! videorate skip-to-first=true ! \
              video/x-raw,width=640,height=360,framerate=15/1 ! \
-             x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=15 \
-             bframes=0 threads=1 ! video/x-h264,profile=baseline ! \
+             x264enc name=venc_{tag} tune=zerolatency speed-preset=ultrafast bitrate=800 \
+             key-int-max=15 bframes=0 threads=1 byte-stream=true \
+             option-string=\"repeat-headers=1\" ! \
+             video/x-h264,profile=constrained-baseline,stream-format=byte-stream,alignment=au ! \
              h264parse config-interval=-1 ! \
-             rtph264pay name=vpay_{tag} pt=96 config-interval=-1 ! \
-             application/x-rtp,media=video,encoding-name=H264,payload=96 ! \
+             rtph264pay name=vpay_{tag} pt=96 config-interval=-1 aggregate-mode=zero-latency ! \
+             application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! \
              webrtcbin name=webrtc_{tag} stun-server=stun://stun.l.google.com:19302 \
              bundle-policy=max-bundle \
              queue name=q_a_{tag} max-size-buffers=4 leaky=downstream ! \
@@ -64,7 +67,8 @@ impl WebRtcPreview {
              audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved ! \
              opusenc bitrate=64000 ! \
              rtpopuspay name=apay_{tag} pt=97 ! \
-             application/x-rtp,media=audio,encoding-name=OPUS,payload=97 ! webrtc_{tag}."
+             application/x-rtp,media=audio,encoding-name=OPUS,payload=97,clock-rate=48000 ! \
+             webrtc_{tag}."
         );
 
         let branch = gstreamer::parse::launch(&desc)
@@ -84,7 +88,6 @@ impl WebRtcPreview {
 
         let qv_sink = q_v.static_pad("sink").ok_or_else(|| anyhow!("q_v sink"))?;
         let qa_sink = q_a.static_pad("sink").ok_or_else(|| anyhow!("q_a sink"))?;
-        // Explicit names: both queue sinks are called `sink`.
         let ghost_v = GhostPad::builder_with_target(&qv_sink)
             .context("ghost video sink")?
             .name(format!("vsink_{tag}"))
@@ -142,7 +145,6 @@ impl WebRtcPreview {
             .sync_state_with_parent()
             .context("sync webrtc branch")?;
 
-        // create-offer after payloader→webrtcbin links exist (kept intact inside the branch bin).
         let (offer_tx, offer_rx) = std::sync::mpsc::channel::<Result<String>>();
         let promise = Promise::with_change_func({
             let webrtc = webrtc.clone();
@@ -156,11 +158,20 @@ impl WebRtcPreview {
                         .context("offer field")?
                         .get::<WebRTCSessionDescription>()
                         .context("offer type")?;
-                    webrtc.emit_by_name::<()>(
-                        "set-local-description",
-                        &[&offer, &None::<Promise>],
-                    );
-                    offer.sdp().as_text().context("sdp text")
+                    let (local_tx, local_rx) = std::sync::mpsc::channel::<Result<()>>();
+                    let local_promise = Promise::with_change_func(move |r| {
+                        let _ = local_tx.send(
+                            r.map_err(|e| anyhow!("set-local-description: {e:?}"))
+                                .map(|_| ()),
+                        );
+                    });
+                    webrtc.emit_by_name::<()>("set-local-description", &[&offer, &local_promise]);
+                    local_rx
+                        .recv_timeout(std::time::Duration::from_secs(3))
+                        .context("set-local-description timeout")??;
+                    let mut sdp = offer.sdp().as_text().context("sdp text")?;
+                    sdp = sdp.replace("a=sendrecv", "a=sendonly");
+                    Ok(sdp)
                 })();
                 let _ = offer_tx.send(res);
             }
@@ -175,6 +186,9 @@ impl WebRtcPreview {
             .context("create-offer")?;
         if !sdp.contains("m=video") || !sdp.contains("m=audio") {
             bail!("webrtc offer missing media lines (sdp_len={})", sdp.len());
+        }
+        if !sdp.to_ascii_lowercase().contains("packetization-mode") {
+            warn!(channel, "offer H264 fmtp may lack packetization-mode");
         }
         if let Some(tx) = signal_tx.lock().as_ref() {
             let _ = tx.send(PreviewSignal::Offer {
@@ -197,8 +211,19 @@ impl WebRtcPreview {
     pub fn set_remote_answer(&self, sdp_text: &str) -> Result<()> {
         let sdp = SDPMessage::parse_buffer(sdp_text.as_bytes()).context("parse answer SDP")?;
         let answer = WebRTCSessionDescription::new(WebRTCSDPType::Answer, sdp);
+        let (tx, rx) = std::sync::mpsc::channel::<Result<()>>();
+        let promise = Promise::with_change_func(move |reply| {
+            let res = reply
+                .map_err(|e| anyhow!("set-remote-description: {e:?}"))
+                .map(|_| ());
+            let _ = tx.send(res);
+        });
         self.webrtc
-            .emit_by_name::<()>("set-remote-description", &[&answer, &None::<Promise>]);
+            .emit_by_name::<()>("set-remote-description", &[&answer, &promise]);
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .context("set-remote-description timeout")?
+            .context("set-remote-description")?;
+        info!(session = %self.session_id, "webrtc remote answer applied");
         Ok(())
     }
 

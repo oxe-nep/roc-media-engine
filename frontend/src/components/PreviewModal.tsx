@@ -53,6 +53,8 @@ export default function PreviewModal({
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
+    let remoteReady = false;
+    const pendingIce: RTCIceCandidateInit[] = [];
     setError(null);
     setStatus("Connecting…");
 
@@ -62,27 +64,51 @@ export default function PreviewModal({
     pcRef.current = pc;
     pc.addTransceiver("video", { direction: "recvonly" });
     pc.addTransceiver("audio", { direction: "recvonly" });
-    pc.ontrack = (ev) => {
+
+    const attachStream = (stream: MediaStream) => {
       const video = videoRef.current;
       if (!video) return;
-      if (ev.streams[0]) {
-        video.srcObject = ev.streams[0];
-      } else {
-        const stream = video.srcObject instanceof MediaStream ? video.srcObject : new MediaStream();
-        stream.addTrack(ev.track);
-        video.srcObject = stream;
-      }
+      video.srcObject = stream;
       void video.play().catch(() => {});
-      setStatus("Live");
     };
+
+    pc.ontrack = (ev) => {
+      if (cancelled) return;
+      if (ev.streams[0]) {
+        attachStream(ev.streams[0]);
+      } else {
+        const stream =
+          videoRef.current?.srcObject instanceof MediaStream
+            ? videoRef.current.srcObject
+            : new MediaStream();
+        stream.addTrack(ev.track);
+        attachStream(stream);
+      }
+      if (ev.track.kind === "video") setStatus("Live");
+      else if (pc.connectionState === "connected") setStatus("Live");
+    };
+
     pc.onconnectionstatechange = () => {
       if (cancelled) return;
       const st = pc.connectionState;
       if (st === "connected") setStatus("Live");
       else if (st === "failed") {
-        setError("WebRTC connection failed");
+        setError("WebRTC connection failed — close and reopen preview");
         setStatus("Error");
-      } else if (st === "connecting") setStatus("ICE…");
+      } else if (st === "connecting") setStatus("Connecting media…");
+      else if (st === "disconnected") setStatus("Disconnected");
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      if (cancelled) return;
+      const st = pc.iceConnectionState;
+      if (st === "checking") setStatus("ICE…");
+      else if (st === "connected" || st === "completed") {
+        if (pc.connectionState !== "connected") setStatus("DTLS…");
+      } else if (st === "failed") {
+        setError("ICE failed");
+        setStatus("Error");
+      }
     };
 
     const ws = new WebSocket(previewWsURL());
@@ -90,6 +116,18 @@ export default function PreviewModal({
 
     const send = (msg: Record<string, unknown>) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+    };
+
+    const flushIce = async () => {
+      while (pendingIce.length) {
+        const c = pendingIce.shift();
+        if (!c) break;
+        try {
+          await pc.addIceCandidate(c);
+        } catch {
+          /* ignore late ICE */
+        }
+      }
     };
 
     pc.onicecandidate = (ev) => {
@@ -108,7 +146,7 @@ export default function PreviewModal({
       setStatus("Negotiating…");
     };
 
-    ws.onmessage = async (ev) => {
+    ws.onmessage = (ev) => {
       if (cancelled) return;
       let msg: {
         type?: string;
@@ -124,24 +162,29 @@ export default function PreviewModal({
         return;
       }
       if (msg.type === "preview_offer" && msg.sdp) {
-        try {
-          await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          send({ type: "preview_answer", channel: channelId, sdp: answer.sdp });
-          setStatus("ICE…");
-        } catch (e) {
-          setError(String(e));
-          setStatus("Error");
-        }
+        void (async () => {
+          try {
+            await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+            remoteReady = true;
+            await flushIce();
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            send({ type: "preview_answer", channel: channelId, sdp: answer.sdp });
+            setStatus("ICE…");
+          } catch (e) {
+            setError(String(e));
+            setStatus("Error");
+          }
+        })();
       } else if (msg.type === "preview_ice" && msg.candidate) {
-        try {
-          await pc.addIceCandidate({
-            candidate: msg.candidate,
-            sdpMLineIndex: msg.sdpMLineIndex ?? 0,
-          });
-        } catch {
-          /* ignore late ICE */
+        const init: RTCIceCandidateInit = {
+          candidate: msg.candidate,
+          sdpMLineIndex: msg.sdpMLineIndex ?? 0,
+        };
+        if (!remoteReady) {
+          pendingIce.push(init);
+        } else {
+          void pc.addIceCandidate(init).catch(() => {});
         }
       } else if (msg.type === "preview_error") {
         setError(msg.message || "Preview failed");
