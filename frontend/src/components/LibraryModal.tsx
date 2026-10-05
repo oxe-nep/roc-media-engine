@@ -46,8 +46,6 @@ export default function LibraryModal({ open, onClose, pickMode, onPick }: Props)
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [newCat, setNewCat] = useState("");
-  const [playerURL, setPlayerURL] = useState<string | null>(null);
-  const [playingKey, setPlayingKey] = useState<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
   useBodyScrollLock(open);
@@ -88,8 +86,6 @@ export default function LibraryModal({ open, onClose, pickMode, onPick }: Props)
 
   useEffect(() => {
     if (open) return;
-    setPlayerURL(null);
-    setPlayingKey(null);
     setSelectedCat("");
     notifyLibraryChanged();
   }, [open]);
@@ -107,9 +103,14 @@ export default function LibraryModal({ open, onClose, pickMode, onPick }: Props)
 
   const fileKey = (f: LibraryFile) => `${f.category}/${f.name}`;
 
+  const canBrowserPlay = (name: string) => {
+    const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
+    return ext === "mp4" || ext === "mov" || ext === "mkv" || ext === "webm";
+  };
+
   const playFile = (f: LibraryFile) => {
-    setPlayerURL(libraryFileURL(f.category, f.name));
-    setPlayingKey(fileKey(f));
+    const url = libraryFileURL(f.category, f.name);
+    window.open(url, "_blank", "noopener,noreferrer");
   };
 
   const downloadFile = (f: LibraryFile) => {
@@ -128,10 +129,6 @@ export default function LibraryModal({ open, onClose, pickMode, onPick }: Props)
     setBusyKey(key);
     try {
       await deleteLibraryFile(f.category, f.name);
-      if (playingKey === key) {
-        setPlayerURL(null);
-        setPlayingKey(null);
-      }
       await load();
     } catch (e) {
       setError(String(e));
@@ -267,7 +264,7 @@ export default function LibraryModal({ open, onClose, pickMode, onPick }: Props)
 
         {error && <div className="error-message">{error}</div>}
 
-        <div className={`library-layout${showingUploads ? " library-layout-uploads" : ""}`}>
+        <div className="library-layout library-layout-list">
           <aside className="library-sidebar">
             <div className="library-sidebar-title">Categories</div>
             <button
@@ -356,7 +353,7 @@ export default function LibraryModal({ open, onClose, pickMode, onPick }: Props)
               files.map((f) => {
                 const key = fileKey(f);
                 return (
-                  <div key={key} className={`recording-row ${playingKey === key ? "active" : ""}`}>
+                  <div key={key} className="recording-row">
                     <div className="recording-meta">
                       <div className="recording-name">{f.name}</div>
                       <div className="recording-sub">
@@ -399,13 +396,16 @@ export default function LibraryModal({ open, onClose, pickMode, onPick }: Props)
                                 </option>
                               ))}
                           </select>
-                          <button
-                            className="badge files-btn"
-                            onClick={() => playFile(f)}
-                            disabled={busyKey === key}
-                          >
-                            {busyKey === key ? "…" : "Play"}
-                          </button>
+                          {canBrowserPlay(f.name) && (
+                            <button
+                              className="badge files-btn"
+                              onClick={() => playFile(f)}
+                              disabled={busyKey === key}
+                              title="Open in new tab"
+                            >
+                              {busyKey === key ? "…" : "Play"}
+                            </button>
+                          )}
                           <button className="badge" onClick={() => downloadFile(f)} disabled={busyKey === key}>
                             Download
                           </button>
@@ -420,16 +420,6 @@ export default function LibraryModal({ open, onClose, pickMode, onPick }: Props)
               })
             )}
           </div>
-
-          {!pickMode && !showingUploads && (
-            <div className="recordings-player-wrap">
-              {playerURL ? (
-                <video className="recordings-player" controls autoPlay src={playerURL} />
-              ) : (
-                <div className="files-empty files-empty-muted" aria-hidden />
-              )}
-            </div>
-          )}
         </div>
       </div>
     </div>

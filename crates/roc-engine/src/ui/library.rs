@@ -13,6 +13,33 @@ fn sanitize_segment(raw: &str) -> Result<String> {
     Ok(raw.to_string())
 }
 
+/// Recording / library video extensions (proxy mp4 + mezz mxf/mov, etc.).
+fn is_library_video(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("mp4" | "mxf" | "mov" | "mkv" | "ts")
+    )
+}
+
+pub fn content_type_for(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("mp4") => "video/mp4",
+        Some("mov") => "video/quicktime",
+        Some("mkv") => "video/x-matroska",
+        Some("mxf") => "application/mxf",
+        Some("ts") => "video/mp2t",
+        _ => "application/octet-stream",
+    }
+}
+
 pub fn list_categories(root: &Path) -> Result<Vec<Value>> {
     fs::create_dir_all(root)?;
     let mut out = Vec::new();
@@ -28,7 +55,7 @@ pub fn list_categories(root: &Path) -> Result<Vec<Value>> {
         let mut count = 0u64;
         if let Ok(rd) = fs::read_dir(ent.path()) {
             for f in rd.flatten() {
-                if f.path().extension().and_then(|e| e.to_str()) == Some("mp4") {
+                if is_library_video(&f.path()) {
                     count += 1;
                 }
             }
@@ -81,7 +108,6 @@ pub fn delete_category(root: &Path, name: &str) -> Result<()> {
     if !path.is_dir() {
         bail!("category not found");
     }
-    // Only empty or mp4-only dirs — refuse if non-empty with nested dirs.
     fs::remove_dir_all(&path)?;
     Ok(())
 }
@@ -104,7 +130,7 @@ pub fn list_files(root: &Path, category: &str) -> Result<Vec<Value>> {
         }
         for ent in fs::read_dir(&dir)?.flatten() {
             let path = ent.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("mp4") {
+            if !is_library_video(&path) {
                 continue;
             }
             let name = ent.file_name().to_string_lossy().into_owned();
@@ -130,10 +156,10 @@ pub fn list_files(root: &Path, category: &str) -> Result<Vec<Value>> {
 pub fn file_path(root: &Path, category: &str, name: &str) -> Result<PathBuf> {
     let category = sanitize_segment(category)?;
     let name = sanitize_segment(name)?;
-    if !name.ends_with(".mp4") {
+    let path = root.join(&category).join(&name);
+    if !is_library_video(&path) {
         bail!("invalid file name");
     }
-    let path = root.join(&category).join(&name);
     if !path.is_file() {
         bail!("file not found");
     }

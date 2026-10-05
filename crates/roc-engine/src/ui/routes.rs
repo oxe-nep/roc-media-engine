@@ -640,6 +640,7 @@ async fn lib_file_get(
 ) -> Result<Response, UiError> {
     let root = st.ui.recordings_dir();
     let path = library::file_path(&root, &category, &name).map_err(UiError::from)?;
+    let ctype = library::content_type_for(&path);
     let file = File::open(&path).await.map_err(UiError::from)?;
     let meta = tokio::fs::metadata(&path).await.map_err(UiError::from)?;
     let stream = ReaderStream::new(file);
@@ -647,7 +648,7 @@ async fn lib_file_get(
     let mut res = Response::new(body);
     res.headers_mut().insert(
         header::CONTENT_TYPE,
-        header::HeaderValue::from_static("video/mp4"),
+        header::HeaderValue::from_static(ctype),
     );
     res.headers_mut().insert(
         header::CACHE_CONTROL,

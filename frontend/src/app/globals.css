@@ -2034,9 +2034,9 @@ html {
 }
 
 .library-modal {
-  width: min(1280px, calc(100vw - 32px));
-  height: min(860px, calc(100vh - 40px));
-  max-height: calc(100vh - 40px);
+  width: min(1480px, calc(100vw - 24px));
+  height: min(920px, calc(100vh - 24px));
+  max-height: calc(100vh - 24px);
   display: flex;
   flex-direction: column;
   padding: 14px 16px 16px;
@@ -2061,12 +2061,11 @@ html {
 .library-modal .library-layout {
   flex: 1;
   min-height: 0;
-  grid-template-columns: 200px minmax(280px, 1fr) minmax(320px, 1.15fr);
+  grid-template-columns: 220px minmax(0, 1fr);
 }
 
 .library-modal .library-sidebar,
-.library-modal .recordings-list,
-.library-modal .recordings-player-wrap {
+.library-modal .recordings-list {
   max-height: none;
   height: 100%;
   min-height: 0;
@@ -2074,22 +2073,6 @@ html {
 
 .library-modal .recordings-list {
   overflow: auto;
-}
-
-.library-modal .recordings-player-wrap {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.library-modal .recordings-player {
-  max-height: 100%;
-  width: 100%;
-}
-
-.recording-row.active {
-  background: rgba(91, 159, 212, 0.08);
-  border-radius: 3px;
 }
 
 @keyframes library-fade-in {
@@ -2116,20 +2099,20 @@ html {
 
   .library-modal .library-layout {
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(180px, 1fr) minmax(200px, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
     overflow: auto;
   }
 }
 
 .library-layout {
   display: grid;
-  grid-template-columns: 200px 1fr 1.2fr;
+  grid-template-columns: 220px 1fr;
   gap: 12px;
   align-items: start;
 }
 
-.library-layout-uploads {
-  grid-template-columns: 200px 1fr;
+.library-layout-list {
+  grid-template-columns: 220px 1fr;
 }
 
 .library-header-left {
