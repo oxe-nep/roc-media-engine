@@ -218,17 +218,22 @@ pub fn playout_json(orch: &Orchestrator, ui: &UiState) -> Vec<Value> {
         } else {
             "srt"
         };
-        let format_code = p
-            .format_code
-            .clone()
-            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"))
-            .unwrap_or_else(|| {
-                if meta.format_code.is_empty() {
-                    "auto".into()
-                } else {
-                    meta.format_code.clone()
-                }
-            });
+        let format_code = if live {
+            p.format_code
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    if meta.format_code.is_empty() {
+                        "auto".into()
+                    } else {
+                        meta.format_code.clone()
+                    }
+                })
+        } else if meta.format_code.is_empty() {
+            "auto".into()
+        } else {
+            meta.format_code.clone()
+        };
         let file_name = if meta.file_id.starts_with("lib:") {
             meta.file_id
                 .strip_prefix("lib:")
