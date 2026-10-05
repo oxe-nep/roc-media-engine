@@ -3081,75 +3081,102 @@ body:has(.preview-window-root) .container {
     rgba(0, 0, 0, 0.35);
 }
 
-.decode-meta {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 4px;
-  width: 100%;
-  padding: 14px 16px;
+.decode-grid {
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 6px;
+}
+
+.decode-card {
+  min-height: 0;
+}
+
+.decode-card .decode-row {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: stretch;
   min-width: 0;
 }
 
-.decode-meta-status {
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-muted);
+.decode-main {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
 }
 
-.decode-meta-status.running,
-.decode-meta-status.paused {
-  color: #b7e0b7;
+.decode-main > .audio-meter {
+  align-self: stretch;
 }
 
-.decode-meta-status.waiting {
-  color: #e6d29a;
+.decode-main > .decode-body {
+  flex: 1;
+  min-width: 0;
 }
 
-.decode-meta-status.error {
-  color: #f0a39a;
+.decode-card .card-channel-num {
+  flex-basis: 40px;
+  width: 40px;
+  min-width: 40px;
+  font-size: 1.1rem;
 }
 
-.decode-meta-line {
+.decode-card .audio-meter {
+  min-height: 56px;
+  padding: 4px 3px;
+}
+
+.decode-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 6px 8px 7px;
+}
+
+.decode-card .card-top {
+  align-items: flex-start;
+}
+
+.decode-card .card-name {
   font-size: 0.82rem;
-  color: var(--text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-.decode-meta-line:first-of-type {
-  color: var(--text-primary);
-  font-weight: 600;
+.decode-card .card-meta {
+  font-size: 0.7rem;
 }
 
-.decode-meta-clock {
-  margin-top: 2px;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-muted);
+.decode-card .card-actions {
+  flex-shrink: 0;
+}
+
+.decode-card .transport {
+  gap: 3px;
+}
+
+.decode-card .ctrl-btn,
+.decode-card .stream-btn {
+  padding: 3px 8px;
+  font-size: 0.68rem;
 }
 
 .file-timeline {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 8px;
+  gap: 3px;
+  margin-top: 2px;
   min-width: 0;
 }
 
 .file-timeline-track {
   position: relative;
-  height: 18px;
+  height: 14px;
   display: flex;
   align-items: center;
 }
 
 .file-timeline-range {
   position: absolute;
-  top: 6px;
-  height: 6px;
+  top: 4px;
+  height: 5px;
   border-radius: 3px;
   background: rgba(92, 184, 92, 0.35);
   pointer-events: none;
@@ -3162,7 +3189,7 @@ body:has(.preview-window-root) .container {
   margin: 0;
   appearance: none;
   background: transparent;
-  height: 18px;
+  height: 14px;
   cursor: pointer;
 }
 
@@ -3172,30 +3199,30 @@ body:has(.preview-window-root) .container {
 }
 
 .file-timeline-scrub::-webkit-slider-runnable-track {
-  height: 6px;
+  height: 5px;
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.12);
 }
 
 .file-timeline-scrub::-moz-range-track {
-  height: 6px;
+  height: 5px;
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.12);
 }
 
 .file-timeline-scrub::-webkit-slider-thumb {
   appearance: none;
-  width: 12px;
-  height: 12px;
-  margin-top: -3px;
+  width: 10px;
+  height: 10px;
+  margin-top: -2.5px;
   border-radius: 50%;
   background: var(--text-primary, #eee);
   border: 0;
 }
 
 .file-timeline-scrub::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: var(--text-primary, #eee);
   border: 0;
@@ -3209,31 +3236,31 @@ body:has(.preview-window-root) .container {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
 .file-timeline-clock {
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
   white-space: nowrap;
 }
 
 .file-timeline-clock-sep {
-  margin: 0 4px;
+  margin: 0 3px;
   color: var(--text-muted);
 }
 
 .file-timeline-marks {
   display: flex;
-  gap: 4px;
+  gap: 3px;
   flex-shrink: 0;
 }
 
 .ctrl-btn.tiny {
-  padding: 2px 7px;
-  font-size: 0.65rem;
+  padding: 1px 6px;
+  font-size: 0.62rem;
   letter-spacing: 0.04em;
   min-width: 0;
 }
@@ -3242,6 +3269,10 @@ body:has(.preview-window-root) .container {
   font-size: 0.68rem;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+}
+
+.decode-meta {
+  display: none;
 }
 
 /* --- Remote Commentator --- */
