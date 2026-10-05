@@ -793,12 +793,18 @@ html {
 .card-name-row {
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  gap: 7px;
   min-width: 0;
 }
 
 .card-name-row .card-name {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
+  max-width: 70%;
+}
+
+.card-name-row .card-category {
+  flex: 0 1 auto;
+  max-width: 45%;
 }
 
 .card-meta-row {

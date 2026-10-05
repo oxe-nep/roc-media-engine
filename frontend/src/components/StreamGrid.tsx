@@ -258,16 +258,18 @@ export default function StreamGrid() {
                       {s.id}
                     </span>
                     <div className="card-identity-text">
-                      <span className="card-name" title={rec?.name || `ch${s.id}`}>
-                        {rec?.name || `ch${s.id}`}
-                      </span>
-                      <div className="card-meta-row">
+                      <div className="card-name-row">
+                        <span className="card-name" title={rec?.name || `ch${s.id}`}>
+                          {rec?.name || `ch${s.id}`}
+                        </span>
                         <span
                           className="card-category"
                           title={cat === "_unsorted" ? "Unsorted" : cat}
                         >
                           {cat === "_unsorted" ? "Unsorted" : cat}
                         </span>
+                      </div>
+                      <div className="card-meta-row">
                         <span
                           className="card-meta"
                           title={
