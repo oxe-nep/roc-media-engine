@@ -827,14 +827,14 @@ struct WfBody {
 async fn set_workflow_ui(
     State(_st): State<AppState>,
     Path(id): Path<u32>,
-    Json(_body): Json<WfBody>,
+    Json(body): Json<WfBody>,
 ) -> Json<Value> {
-    // TC/commentator not on engine yet — accept and ignore.
+    // TC/commentator not on engine yet — echo accepted flags.
     Json(json!({
         "id": id,
-        "pair": false,
-        "tc": false,
-        "commentator": false,
+        "pair": body.pair.unwrap_or(false),
+        "tc": body.tc.unwrap_or(false),
+        "commentator": body.commentator.unwrap_or(false),
     }))
 }
 

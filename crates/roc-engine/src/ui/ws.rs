@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
@@ -201,6 +200,3 @@ fn handle_client_msg(
         _ => {}
     }
 }
-
-/// Keep Arc clone pattern happy for schedule task.
-pub type SharedState = Arc<()>;

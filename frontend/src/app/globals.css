@@ -688,6 +688,13 @@ html {
   border-top: 1px solid var(--border-subtle);
 }
 
+.card-main {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  min-width: 0;
+}
+
 .card-top {
   display: flex;
   align-items: center;
@@ -719,14 +726,15 @@ html {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 2.4rem;
-  padding: 0 6px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  min-width: 2.85rem;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1.5px solid rgba(255, 255, 255, 0.14);
   background: rgba(255, 255, 255, 0.05);
-  font-size: 1.35rem;
-  font-weight: 800;
+  font-size: 1.55rem;
+  font-weight: 900;
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
   color: var(--text-secondary);
   line-height: 1;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.2);
@@ -792,17 +800,33 @@ html {
   flex: 1 1 auto;
 }
 
+.card-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.card-meta-row .card-meta {
+  margin: 0;
+  min-width: 0;
+}
+
 .card-category {
   flex-shrink: 0;
-  max-width: 42%;
+  max-width: 55%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.68rem;
-  font-weight: 500;
-  letter-spacing: 0.01em;
+  font-size: 0.62rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
   color: var(--text-muted);
-  line-height: 1.2;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .input-badge {
@@ -1351,7 +1375,30 @@ html {
   flex-shrink: 0;
 }
 
-.card-actions .badge {
+.card-actions-primary,
+.card-actions-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.card-actions-primary {
+  justify-content: stretch;
+}
+
+.card-actions-primary .rec-btn,
+.card-actions-primary .stream-btn {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.card-actions-tools {
+  justify-content: flex-end;
+}
+
+.card-actions .badge,
+.card-actions-tools .badge {
   width: 1.7rem;
   height: 1.7rem;
   min-width: 1.7rem;

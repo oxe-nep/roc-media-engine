@@ -184,10 +184,6 @@ impl UiState {
         }
     }
 
-    pub fn public_host(&self) -> &str {
-        &self.public_host
-    }
-
     pub fn recordings_dir(&self) -> PathBuf {
         self.inner.lock().recordings_dir.clone()
     }

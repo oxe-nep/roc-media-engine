@@ -225,27 +225,25 @@ export default function StreamGrid() {
               </div>
 
               <div className="card-footer">
-                <div className="card-top">
-                  <div className="card-identity">
-                    <span
-                      className={`card-channel-num ${s.status}`}
-                      title={s.name || `Input ${s.id}`}
-                    >
-                      {s.id}
+                <div className="card-main">
+                  <span
+                    className={`card-channel-num ${s.status}`}
+                    title={s.name || `Input ${s.id}`}
+                  >
+                    {s.id}
+                  </span>
+                  <div className="card-identity-text">
+                    <span className="card-name" title={rec?.name || `ch${s.id}`}>
+                      {rec?.name || `ch${s.id}`}
                     </span>
-                    <div className="card-identity-text">
-                      <div className="card-name-row">
-                        <span className="card-name" title={rec?.name || `ch${s.id}`}>
-                          {rec?.name || `ch${s.id}`}
-                        </span>
-                        <span
-                          className="card-category"
-                          title={cat === "_unsorted" ? "Unsorted" : cat}
-                        >
-                          {cat === "_unsorted" ? "Unsorted" : cat}
-                        </span>
-                      </div>
-                      <div
+                    <div className="card-meta-row">
+                      <span
+                        className="card-category"
+                        title={cat === "_unsorted" ? "Unsorted" : cat}
+                      >
+                        {cat === "_unsorted" ? "Unsorted" : cat}
+                      </span>
+                      <span
                         className="card-meta"
                         title={
                           s.status === "waiting"
@@ -262,74 +260,77 @@ export default function StreamGrid() {
                         ) : (
                           <span className="card-meta-item">—</span>
                         )}
-                      </div>
-                      <div className="card-presets" title={`Proxy ${proxyLabel || "—"} · REC ${recLabel || "—"}`}>
-                        <span className="card-preset-line">
-                          <span className="card-preset-role">Proxy</span>
-                          <span className="card-preset-value">{proxyLabel || "—"}</span>
-                        </span>
-                        <span className="card-preset-line">
-                          <span className="card-preset-role">REC</span>
-                          <span className="card-preset-value">{recLabel || "—"}</span>
-                        </span>
-                      </div>
+                      </span>
+                    </div>
+                    <div
+                      className="card-presets"
+                      title={`Proxy ${proxyLabel || "—"} · REC ${recLabel || "—"}`}
+                    >
+                      <span className="card-preset-line">
+                        <span className="card-preset-role">Proxy</span>
+                        <span className="card-preset-value">{proxyLabel || "—"}</span>
+                      </span>
+                      <span className="card-preset-line">
+                        <span className="card-preset-role">REC</span>
+                        <span className="card-preset-value">{recLabel || "—"}</span>
+                      </span>
                     </div>
                   </div>
-                  <div className="card-actions">
-                    <>
-                      <button
-                          type="button"
-                          className={`rec-btn ${isRecording ? "recording" : "idle"}`}
-                          onClick={() => toggleRecording(s.id)}
-                          disabled={recBusy[s.id] || (!hasSignal && !isRecording)}
-                          title={
-                            isRecording
-                              ? "Stop recording"
-                              : !hasSignal
-                                ? "No signal"
-                                : "Start recording"
-                          }
-                        >
-                          {recBusy[s.id] ? "…" : "REC"}
-                        </button>
-                        <button
-                          type="button"
-                          className={`stream-btn ${srtOn ? "streaming" : "idle"}`}
-                          onClick={() => toggleSrt(s.id)}
-                          disabled={srtBusy[s.id] || (!hasSignal && !srtOn)}
-                          title={
-                            srtOn
-                              ? srtById[s.id]?.publish_url || "Stop SRT"
-                              : !hasSignal
-                                ? "No signal"
-                                : "Start SRT"
-                          }
-                        >
-                          {srtBusy[s.id] ? "…" : "STREAM"}
-                        </button>
-                    </>
-                    {captureOn && (
-                      <ListenButton
-                        pair={preview?.id === s.id ? preview.pair : null}
-                        onChange={(p) => {
-                          if (p == null) {
-                            setPreview(null);
-                            return;
-                          }
-                          setPreview({ id: s.id, pair: p });
-                        }}
-                      />
-                    )}
-                    <button
-                      type="button"
-                      className="badge settings-btn"
-                      onClick={() => setSettingsId(s.id)}
-                      title="Channel settings"
-                      aria-label="Settings"
-                    >
-                      ⚙
-                    </button>
-                  </div>
+                </div>
+                <div className="card-actions-primary">
+                  <button
+                    type="button"
+                    className={`rec-btn ${isRecording ? "recording" : "idle"}`}
+                    onClick={() => toggleRecording(s.id)}
+                    disabled={recBusy[s.id] || (!hasSignal && !isRecording)}
+                    title={
+                      isRecording
+                        ? `Stop recording (${recLabel || "REC"})`
+                        : !hasSignal
+                          ? "No signal"
+                          : `Start recording (${recLabel || "REC"})`
+                    }
+                  >
+                    {recBusy[s.id] ? "…" : "REC"}
+                  </button>
+                  <button
+                    type="button"
+                    className={`stream-btn ${srtOn ? "streaming" : "idle"}`}
+                    onClick={() => toggleSrt(s.id)}
+                    disabled={srtBusy[s.id] || (!hasSignal && !srtOn)}
+                    title={
+                      srtOn
+                        ? srtById[s.id]?.publish_url || "Stop SRT"
+                        : !hasSignal
+                          ? "No signal"
+                          : "Start SRT"
+                    }
+                  >
+                    {srtBusy[s.id] ? "…" : "SRT"}
+                  </button>
+                </div>
+                <div className="card-actions-tools">
+                  {captureOn && (
+                    <ListenButton
+                      pair={preview?.id === s.id ? preview.pair : null}
+                      onChange={(p) => {
+                        if (p == null) {
+                          setPreview(null);
+                          return;
+                        }
+                        setPreview({ id: s.id, pair: p });
+                      }}
+                    />
+                  )}
+                  <button
+                    type="button"
+                    className="badge settings-btn"
+                    onClick={() => setSettingsId(s.id)}
+                    title="Channel settings"
+                    aria-label="Settings"
+                  >
+                    ⚙
+                  </button>
                 </div>
               </div>
             </div>
