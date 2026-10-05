@@ -480,6 +480,11 @@ impl UiState {
                     anyhow::bail!("caller mode requires a target");
                 }
                 if target.starts_with("srt://") {
+                    // Don't append mode/latency if the URL already carries them
+                    // (UI often stores a full publish URL from encode).
+                    if target.contains("mode=") || target.contains("latency=") {
+                        return Ok(target.to_string());
+                    }
                     let sep = if target.contains('?') { '&' } else { '?' };
                     Ok(format!(
                         "{target}{sep}mode=caller&latency={latency_us}"

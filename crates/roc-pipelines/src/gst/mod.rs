@@ -27,6 +27,60 @@ use crate::{
 
 use self::capture::ChannelPipeline;
 
+fn drain_playout_bus_error(pipeline: &gstreamer::Pipeline) -> Option<String> {
+    use gstreamer::prelude::*;
+    use gstreamer::MessageView;
+    let bus = pipeline.bus()?;
+    let mut last = None;
+    while let Some(msg) = bus.timed_pop(gstreamer::ClockTime::ZERO) {
+        if let MessageView::Error(err) = msg.view() {
+            last = Some(format!(
+                "{}: {}",
+                err.error(),
+                err.debug().unwrap_or_default()
+            ));
+        }
+    }
+    last
+}
+
+fn poll_playout_runtime(p: &mut PlayoutRuntime) {
+    use gstreamer::prelude::*;
+    use gstreamer::MessageView;
+    let Some(pipeline) = p.pipeline.as_ref() else {
+        return;
+    };
+    let Some(bus) = pipeline.bus() else {
+        return;
+    };
+    while let Some(msg) = bus.timed_pop(gstreamer::ClockTime::ZERO) {
+        match msg.view() {
+            MessageView::Error(err) => {
+                let text = format!(
+                    "{}: {}",
+                    err.error(),
+                    err.debug().unwrap_or_default()
+                );
+                tracing::error!(client = %p.name, error = %text, "playout bus error");
+                p.status = ChannelStatus::Error;
+                p.last_error = Some(text);
+            }
+            MessageView::Eos(_) => {
+                tracing::info!(client = %p.name, "playout EOS");
+                p.status = ChannelStatus::Stopped;
+            }
+            MessageView::StateChanged(sc) => {
+                if sc.current() == gstreamer::State::Playing
+                    && matches!(p.status, ChannelStatus::Waiting)
+                {
+                    p.status = ChannelStatus::Running;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub struct GstBackend {
     max_nvenc: usize,
     nvenc_used: AtomicUsize,
@@ -336,6 +390,27 @@ impl PipelineBackend for GstBackend {
         pipeline
             .set_state(gstreamer::State::Playing)
             .context("playout PLAYING")?;
+        // Surface immediate DeckLink / negotiation failures instead of a silent "running".
+        let (_res, state, pending) = pipeline
+            .state(gstreamer::ClockTime::from_seconds(3));
+        if matches!(state, gstreamer::State::Null | gstreamer::State::Ready)
+            && !matches!(pending, gstreamer::State::Playing | gstreamer::State::Paused)
+        {
+            let err = drain_playout_bus_error(&pipeline)
+                .unwrap_or_else(|| format!("playout failed to reach PLAYING (state={state:?})"));
+            let _ = pipeline.set_state(gstreamer::State::Null);
+            bail!("{err}");
+        }
+        if let Some(err) = drain_playout_bus_error(&pipeline) {
+            let _ = pipeline.set_state(gstreamer::State::Null);
+            bail!("{err}");
+        }
+
+        let initial = if source.contains("mode=listener") {
+            ChannelStatus::Waiting
+        } else {
+            ChannelStatus::Running
+        };
 
         let mut map = self.playout.lock();
         if let Some(old) = map.get_mut(&client.id) {
@@ -348,7 +423,7 @@ impl PipelineBackend for GstBackend {
             PlayoutRuntime {
                 name: client.name.clone(),
                 device: client.device.clone(),
-                status: ChannelStatus::Running,
+                status: initial,
                 source: Some(source.to_string()),
                 format_code: Some(format_code),
                 last_error: None,
@@ -405,7 +480,10 @@ impl PipelineBackend for GstBackend {
     }
 
     fn list_playout(&self) -> Vec<PlayoutSnapshot> {
-        let map = self.playout.lock();
+        let mut map = self.playout.lock();
+        for p in map.values_mut() {
+            poll_playout_runtime(p);
+        }
         let mut out: Vec<_> = map
             .iter()
             .map(|(id, p)| PlayoutSnapshot {

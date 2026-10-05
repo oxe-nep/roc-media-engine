@@ -164,6 +164,11 @@ pub fn resolve_playout_format_code(configured: Option<&str>, source: &str) -> St
             cfg.to_string()
         };
     }
+    // SRT listeners have no media until a caller connects — probing just burns
+    // 4s and always falls back. Skip probe; lock Hp50 until mid-stream adapt exists.
+    if source.contains("mode=listener") || source.contains("0.0.0.0") {
+        return "Hp50".into();
+    }
     #[cfg(feature = "gst")]
     {
         match probe_playout_source(source, 4000) {

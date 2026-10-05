@@ -49,13 +49,15 @@ pub fn decklink_device_number(device: &str) -> u32 {
 fn decklink_src(device: &str, mode: &str) -> String {
     // Prefer a concrete mode (caller probes when config is `auto`).
     // drop-no-signal-frames keeps the pipeline alive across brief ST 2110 gaps.
+    // profile=one-sub-device-full allows simultaneous IN (encode) + OUT (decode)
+    // on the same DeckLink IP sub-device.
     let mode = if mode.trim().is_empty() || mode.eq_ignore_ascii_case("auto") {
         "1080p50" // last-resort fallback; prefer probe_input_format first
     } else {
         mode.trim()
     };
     format!(
-        "decklinkvideosrc name=dlsrc device-number={} mode={} drop-no-signal-frames=true",
+        "decklinkvideosrc name=dlsrc device-number={} mode={} drop-no-signal-frames=true profile=one-sub-device-full",
         decklink_device_number(device),
         mode
     )
@@ -314,7 +316,7 @@ fn nvenc_chain(video_codec: &str, preset: &str, bitrate_kbit: u64, gop: u32) -> 
 
 fn decklink_video_sink(device: &str, mode: &str) -> String {
     format!(
-        "decklinkvideosink device-number={} mode={}",
+        "decklinkvideosink device-number={} mode={} profile=one-sub-device-full sync=true",
         decklink_device_number(device),
         mode
     )
@@ -593,7 +595,7 @@ pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
         "{src} \
          d. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
            video/x-h264 ! h264parse config-interval=-1 ! avdec_h264 ! \
-           videoconvert ! videoscale ! videorate ! \
+           videoconvert ! videoscale ! videorate skip-to-first=true ! \
            video/x-raw,format=UYVY,width=1920,height={height},framerate={fr} ! \
            {vsink} \
          d. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
