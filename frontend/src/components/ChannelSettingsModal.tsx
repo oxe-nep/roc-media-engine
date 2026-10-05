@@ -13,7 +13,6 @@ import {
   startSrt,
   startStream,
   stopSrt,
-  stopStream,
   updateSrt,
   type EncodePreset,
   type LibraryCategory,
@@ -78,8 +77,8 @@ export default function ChannelSettingsModal({
   const [srtPassDirty, setSrtPassDirty] = useState(false);
   const [schedStart, setSchedStart] = useState("");
   const [schedStop, setSchedStop] = useState("");
-  const [schedArmProxy, setSchedArmProxy] = useState(true);
-  const [schedArmHq, setSchedArmHq] = useState(true);
+  const [schedArmProxy, setSchedArmProxy] = useState(false);
+  const [schedArmHq, setSchedArmHq] = useState(false);
   const [schedBusy, setSchedBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [logsOpen, setLogsOpen] = useState(false);
@@ -132,8 +131,8 @@ export default function ChannelSettingsModal({
       const d = defaultScheduleInputs();
       setSchedStart(d.start);
       setSchedStop(d.stop);
-      setSchedArmProxy(true);
-      setSchedArmHq(true);
+      setSchedArmProxy(false);
+      setSchedArmHq(false);
     }
 
     fetchSrt(channelId)
@@ -222,27 +221,19 @@ export default function ChannelSettingsModal({
         await setRecordPreset(stream.id, recPreset);
       }
 
-      // Backend relaunches when proxy preset changes on a live channel.
-      // REC preset alone applies on the next recording — no bounce needed.
-      const skipBounce =
-        (proxyChanged && captureOn) ||
-        (recChanged && !proxyChanged && !nameChanged && !categoryChanged && captureOn);
-      if (!skipBounce) {
-        try {
-          await stopSrt(stream.id);
-        } catch {
-          // ignore if SRT was not running
-        }
-        if (captureOn) {
-          try {
-            await stopStream(stream.id);
-          } catch {
-            // already stopped
-          }
-        }
+      // Name / category / HQ preset are metadata only — never bounce capture.
+      // Proxy preset: backend relaunches when capture is already running.
+      // If capture is off and proxy changed, start once so the new preset is live.
+      if (proxyChanged && !captureOn) {
         await startStream(stream.id);
       }
 
+      baselineRef.current = {
+        name: cleanName || baseline.name,
+        category: category || baseline.category,
+        proxyPreset: proxyChanged ? proxyPreset : baseline.proxyPreset,
+        recPreset: recChanged ? recPreset : baseline.recPreset,
+      };
       onSaved();
       onClose();
     } catch (e) {
@@ -302,27 +293,42 @@ export default function ChannelSettingsModal({
     }
   };
 
-  const saveSchedule = async () => {
+  const persistSchedule = async (armProxy: boolean, armHq: boolean) => {
+    const start = new Date(schedStart);
+    const stop = new Date(schedStop);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(stop.getTime())) {
+      throw new Error("Invalid schedule time");
+    }
+    if (!(stop.getTime() > start.getTime())) {
+      throw new Error("Stop must be after start");
+    }
+    if (!armProxy && !armHq) {
+      throw new Error("Arm at least PROXY or HQ");
+    }
+    await setRecordingSchedule(stream.id, start.toISOString(), stop.toISOString(), {
+      arm_proxy: armProxy,
+      arm_hq: armHq,
+    });
+    onSaved();
+  };
+
+  const toggleScheduleArm = async (role: "proxy" | "hq") => {
+    const nextProxy = role === "proxy" ? !schedArmProxy : schedArmProxy;
+    const nextHq = role === "hq" ? !schedArmHq : schedArmHq;
+    if (!nextProxy && !nextHq) {
+      setError("Arm at least PROXY or HQ");
+      return;
+    }
     setSchedBusy(true);
     setError(null);
     try {
-      const start = new Date(schedStart);
-      const stop = new Date(schedStop);
-      if (Number.isNaN(start.getTime()) || Number.isNaN(stop.getTime())) {
-        throw new Error("Invalid schedule time");
-      }
-      if (!(stop.getTime() > start.getTime())) {
-        throw new Error("Stop must be after start");
-      }
-      if (!schedArmProxy && !schedArmHq) {
-        throw new Error("Arm at least PROXY or HQ");
-      }
-      await setRecordingSchedule(stream.id, start.toISOString(), stop.toISOString(), {
-        arm_proxy: schedArmProxy,
-        arm_hq: schedArmHq,
-      });
-      onSaved();
+      if (role === "proxy") setSchedArmProxy(nextProxy);
+      else setSchedArmHq(nextHq);
+      await persistSchedule(nextProxy, nextHq);
     } catch (e) {
+      // Revert optimistic toggle on failure.
+      if (role === "proxy") setSchedArmProxy(!nextProxy);
+      else setSchedArmHq(!nextHq);
       setError(String(e));
     } finally {
       setSchedBusy(false);
@@ -337,8 +343,8 @@ export default function ChannelSettingsModal({
       const d = defaultScheduleInputs();
       setSchedStart(d.start);
       setSchedStop(d.stop);
-      setSchedArmProxy(true);
-      setSchedArmHq(true);
+      setSchedArmProxy(false);
+      setSchedArmHq(false);
       onSaved();
     } catch (e) {
       setError(String(e));
@@ -469,8 +475,8 @@ export default function ChannelSettingsModal({
             </span>
           </div>
           <p className="channel-settings-hint">
-            One-shot record window. Arm PROXY and/or HQ — if there is no signal at start,
-            recording waits until signal or stop.
+            Set start/stop, then arm PROXY and/or HQ — arming saves the schedule. If there is no
+            signal at start, recording waits until signal or stop.
           </p>
           <div className="channel-settings-form">
             <label className="presets-field">
@@ -495,7 +501,7 @@ export default function ChannelSettingsModal({
               <button
                 type="button"
                 className={`schedule-arm-btn ${schedArmHq ? "armed" : ""}`}
-                onClick={() => setSchedArmHq((v) => !v)}
+                onClick={() => toggleScheduleArm("hq")}
                 disabled={schedBusy}
                 aria-pressed={schedArmHq}
               >
@@ -504,7 +510,7 @@ export default function ChannelSettingsModal({
               <button
                 type="button"
                 className={`schedule-arm-btn ${schedArmProxy ? "armed" : ""}`}
-                onClick={() => setSchedArmProxy((v) => !v)}
+                onClick={() => toggleScheduleArm("proxy")}
                 disabled={schedBusy}
                 aria-pressed={schedArmProxy}
               >
@@ -515,9 +521,6 @@ export default function ChannelSettingsModal({
           <div className="channel-settings-actions">
             <button type="button" className="badge" onClick={clearSchedule} disabled={schedBusy || !recording?.schedule}>
               {schedBusy ? "…" : "Clear"}
-            </button>
-            <button type="button" className="global-rec-btn" onClick={saveSchedule} disabled={schedBusy}>
-              {schedBusy ? "…" : "Save"}
             </button>
           </div>
         </div>
