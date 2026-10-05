@@ -38,6 +38,8 @@ export default function PreviewModal({
   const videoRef = useRef<HTMLVideoElement>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   const [pair, setPair] = useState(initialPair);
   const [status, setStatus] = useState("Connecting…");
   const [error, setError] = useState<string | null>(null);
@@ -72,6 +74,15 @@ export default function PreviewModal({
       }
       void video.play().catch(() => {});
       setStatus("Live");
+    };
+    pc.onconnectionstatechange = () => {
+      if (cancelled) return;
+      const st = pc.connectionState;
+      if (st === "connected") setStatus("Live");
+      else if (st === "failed") {
+        setError("WebRTC connection failed");
+        setStatus("Error");
+      } else if (st === "connecting") setStatus("ICE…");
     };
 
     const ws = new WebSocket(previewWsURL());
@@ -121,6 +132,7 @@ export default function PreviewModal({
           setStatus("ICE…");
         } catch (e) {
           setError(String(e));
+          setStatus("Error");
         }
       } else if (msg.type === "preview_ice" && msg.candidate) {
         try {
@@ -137,13 +149,15 @@ export default function PreviewModal({
       }
     };
 
-    ws.onerror = () => setError("WebSocket error");
+    ws.onerror = () => {
+      if (!cancelled) setError("WebSocket error");
+    };
     ws.onclose = () => {
       if (!cancelled) setStatus("Disconnected");
     };
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") onCloseRef.current();
     };
     window.addEventListener("keydown", onKey);
 
@@ -169,13 +183,18 @@ export default function PreviewModal({
       wsRef.current = null;
       if (videoRef.current) videoRef.current.srcObject = null;
     };
-    // Re-open when pair changes so the engine rebuilds the stereo mix.
-  }, [open, channelId, pair, onClose]);
+    // Intentionally omit onClose — parent passes an inline lambda that changes every render
+    // (dashboard meters ~30 Hz) and would tear down the WebRTC session in a loop.
+  }, [open, channelId, pair]);
 
   if (!open) return null;
 
   return (
-    <div className="modal-backdrop library-backdrop" onClick={onClose} role="presentation">
+    <div
+      className="modal-backdrop library-backdrop"
+      onClick={() => onCloseRef.current()}
+      role="presentation"
+    >
       <div
         className="modal-panel preview-modal"
         onClick={(e) => e.stopPropagation()}
@@ -189,7 +208,12 @@ export default function PreviewModal({
           </h2>
           <div className="library-modal-header-actions">
             <ListenButton pair={pair} onChange={(p) => setPair(p ?? 0)} />
-            <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
+            <button
+              type="button"
+              className="modal-close"
+              onClick={() => onCloseRef.current()}
+              aria-label="Close"
+            >
               ×
             </button>
           </div>
