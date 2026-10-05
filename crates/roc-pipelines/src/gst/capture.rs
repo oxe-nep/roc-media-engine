@@ -1254,6 +1254,9 @@ impl ChannelPipeline {
             .context("timecodestamper")?;
         let _ = tc.set_property_from_str("source", "rtc");
         let _ = tc.set_property_from_str("set", "always");
+        // Hot-attach onto a live tee: reset TIME segment so mxfmux does not
+        // assert on huge index_pos_diff from upstream running PTS.
+        let id_v = make_mux_ts_align(&format!("id_rec_v_{}", self.id))?;
 
         let (enc, parse_opt, mux_name): (gstreamer::Element, Option<gstreamer::Element>, &str) =
             if codec.contains("dnx") {
@@ -1302,17 +1305,19 @@ impl ChannelPipeline {
             convert.clone(),
             caps.clone(),
             tc.clone(),
+            id_v.clone(),
             enc.clone(),
             mux.clone(),
             sink.clone(),
         ];
         pipeline.add_many([
-            &queue_v, &convert, &caps, &tc, &enc, &mux, &sink,
+            &queue_v, &convert, &caps, &tc, &id_v, &enc, &mux, &sink,
         ])?;
         queue_v.link(&convert).context("mezz queue→convert")?;
         convert.link(&caps).context("mezz convert→caps")?;
         caps.link(&tc).context("mezz caps→timecode")?;
-        tc.link(&enc).context("mezz timecode→enc")?;
+        tc.link(&id_v).context("mezz timecode→identity")?;
+        id_v.link(&enc).context("mezz identity→enc")?;
         if let Some(parse) = &parse_opt {
             pipeline.add(parse)?;
             // High 4:2:2 Intra profile for XAVC-HD-style Intra.
@@ -1386,7 +1391,7 @@ impl ChannelPipeline {
         Ok(())
     }
 
-    /// Stereo PCM into MXF (XAVC path) — first pair only.
+    /// Stereo PCM into MXF — first pair via audioconvert (no parse-launch matrix).
     fn link_mezz_pcm(
         &self,
         pipeline: &gstreamer::Pipeline,
@@ -1402,19 +1407,29 @@ impl ChannelPipeline {
             .property("max-size-time", gstreamer::ClockTime::from_mseconds(250))
             .build()
             .context("pcm queue")?;
-        let desc = format!(
-            "audioconvert mix-matrix=\"{matrix}\" ! \
-             audio/x-raw,format=S24LE,channels=2,rate=48000"
-        );
-        let bin = gstreamer::parse::bin_from_description(&desc, true)
-            .context("mezz pcm bin")?;
-        let bin_el: gstreamer::Element = bin.upcast();
-        bin_el.set_property("name", format!("pcm_{tag}_{}", self.id));
-        pipeline.add_many([&queue_a, &bin_el])?;
-        queue_a
-            .link(&bin_el)
-            .context("link pcm queue→bin")?;
-        bin_el.link(mux).context("link pcm→mxfmux")?;
+        let id_a = make_mux_ts_align(&format!("id_{tag}_pcm_{}", self.id))?;
+        let aconv = gstreamer::ElementFactory::make("audioconvert")
+            .name(format!("aconv_{tag}_{}", self.id))
+            .build()
+            .context("audioconvert")?;
+        let _ = aconv.set_property_from_str("mix-matrix", &matrix);
+        let acaps = gstreamer::ElementFactory::make("capsfilter")
+            .name(format!("acaps_{tag}_{}", self.id))
+            .property(
+                "caps",
+                gstreamer::Caps::from_str(
+                    "audio/x-raw,format=S24LE,channels=2,rate=48000,layout=interleaved",
+                )
+                .context("pcm caps")?,
+            )
+            .build()
+            .context("pcm capsfilter")?;
+
+        pipeline.add_many([&queue_a, &id_a, &aconv, &acaps])?;
+        queue_a.link(&id_a).context("pcm queue→identity")?;
+        id_a.link(&aconv).context("pcm identity→aconv")?;
+        aconv.link(&acaps).context("pcm aconv→caps")?;
+        acaps.link(mux).context("pcm→mxfmux")?;
 
         let tee_pad = a_tee
             .request_pad_simple("src_%u")
@@ -1423,7 +1438,7 @@ impl ChannelPipeline {
             .static_pad("sink")
             .ok_or_else(|| anyhow!("pcm queue sink"))?;
         tee_pad.link(&sink).context("link audio tee→pcm")?;
-        Ok((vec![tee_pad], vec![queue_a, bin_el]))
+        Ok((vec![tee_pad], vec![queue_a, id_a, aconv, acaps]))
     }
 
     /// Stereo AAC pair(s) into an existing mux (mp4mux / mpegtsmux).
