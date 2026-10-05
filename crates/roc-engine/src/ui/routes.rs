@@ -746,7 +746,7 @@ async fn put_playout_ui(
     if let Some(l) = body.latency_ms {
         meta.latency_ms = l;
     }
-    if file_changed || (meta.source == "file" && (meta.duration_sec.is_none() || meta.video_codec.is_empty())) {
+    if file_changed || meta.source == "file" {
         refresh_file_duration(&st, &mut meta);
     } else {
         normalize_marks(&mut meta);
@@ -882,10 +882,8 @@ async fn start_playout_ui(
         .map_err(UiError::from)?;
     let mut meta = st.ui.playout(id);
     if meta.source == "file" {
-        if meta.duration_sec.is_none() || meta.video_codec.is_empty() {
-            refresh_file_duration(&st, &mut meta);
-            st.ui.set_playout(id, meta.clone());
-        }
+        refresh_file_duration(&st, &mut meta);
+        st.ui.set_playout(id, meta.clone());
         apply_playout_file_control(&st, id, &meta);
         if meta.mark_in_sec > 0.05 {
             let _ = st.orch.seek_playout(&client_id, meta.mark_in_sec);

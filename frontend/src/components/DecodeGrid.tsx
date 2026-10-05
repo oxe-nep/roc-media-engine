@@ -1,12 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import {
   isPlayoutOn,
   isPlayoutPaused,
   pausePlayout,
   resumePlayout,
-  seekPlayout,
   startPlayout,
   stopPlayout,
   updatePlayoutClient,
@@ -17,18 +16,6 @@ import { sortByChannelId } from "@/lib/sortChannels";
 import { useWorkflows } from "@/hooks/useWorkflows";
 import { useDashboard } from "@/hooks/useDashboard";
 import DecodeSettingsModal from "@/components/DecodeSettingsModal";
-
-function formatClock(sec?: number): string {
-  if (sec == null || !Number.isFinite(sec) || sec < 0) return "--:--";
-  const s = Math.floor(sec);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const r = s % 60;
-  if (h > 0) {
-    return `${h}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
-  }
-  return `${m}:${String(r).padStart(2, "0")}`;
-}
 
 function formatDisplay(code?: string): string {
   if (!code) return "—";
@@ -81,13 +68,14 @@ function prettyCodec(raw?: string): string {
   return map[c] || raw.toUpperCase();
 }
 
+/** e.g. `4×AAC 2ch` or `AAC 8ch` or `AAC 2ch`. */
 function audioLayoutLabel(c: PlayoutClient): string {
   const codec = prettyCodec(c.audio_codec) || "Audio";
-  const tracks = c.audio_tracks ?? 0;
-  const ch = c.audio_channels ?? 0;
+  const tracks = Math.max(0, c.audio_tracks ?? 0);
+  const ch = Math.max(0, c.audio_channels ?? 0);
   if (tracks > 1) {
-    const per = tracks > 0 && ch > 0 ? Math.round(ch / tracks) : 2;
-    return `${tracks}×${codec}${per > 0 ? ` ${per}ch` : ""}`;
+    const per = ch > 0 ? Math.max(1, Math.round(ch / tracks)) : 2;
+    return `${tracks}×${codec} ${per}ch`;
   }
   if (ch > 0) return `${codec} ${ch}ch`;
   if (c.audio_codec) return codec;
@@ -119,189 +107,6 @@ function cardMetaLine(c: PlayoutClient): string {
     if ((c.latency_ms ?? 0) > 0) bits.push(`${c.latency_ms} ms`);
   }
   return bits.join(" · ");
-}
-
-function FileTimeline({
-  client: c,
-  disabled,
-  onError,
-}: {
-  client: PlayoutClient;
-  disabled?: boolean;
-  onError: (msg: string) => void;
-}) {
-  const duration = Math.max(0, c.duration_sec ?? 0);
-  const livePos = Math.max(0, c.elapsed_sec ?? 0);
-  const markIn = Math.max(0, c.mark_in_sec ?? 0);
-  const markOut =
-    c.mark_out_sec != null && Number.isFinite(c.mark_out_sec) ? Math.max(0, c.mark_out_sec) : null;
-  const on = isPlayoutOn(c.status);
-  const paused = isPlayoutPaused(c.status);
-  const playing = on && !paused;
-  const [dragging, setDragging] = useState(false);
-  const [scrub, setScrub] = useState<number | null>(null);
-  const [localPos, setLocalPos] = useState(livePos);
-  const seekTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const cueBusy = useRef(false);
-  const userPinned = useRef(false);
-
-  useEffect(() => {
-    if (dragging) return;
-    if (playing) {
-      userPinned.current = false;
-      setLocalPos(livePos);
-      return;
-    }
-    // Paused/stopped: keep scrubbed position until live catches up or play starts.
-    if (userPinned.current) {
-      if (Math.abs(livePos - localPos) < 0.25) {
-        userPinned.current = false;
-        setLocalPos(livePos);
-      }
-      return;
-    }
-    setLocalPos(livePos);
-  }, [livePos, dragging, playing, localPos]);
-
-  useEffect(() => {
-    return () => {
-      if (seekTimer.current) clearTimeout(seekTimer.current);
-    };
-  }, []);
-
-  const canScrub = !!c.file_id && duration > 0;
-  const displayPos = dragging && scrub != null ? scrub : localPos;
-  const inPct = duration > 0 ? Math.min(100, (markIn / duration) * 100) : 0;
-  const outPct = markOut != null && duration > 0 ? Math.min(100, (markOut / duration) * 100) : null;
-  const rangeWidth =
-    outPct != null ? Math.max(0, outPct - inPct) : markIn > 0 ? Math.max(0, 100 - inPct) : 100;
-
-  const ensureCued = async () => {
-    if (on) return;
-    if (cueBusy.current) return;
-    cueBusy.current = true;
-    try {
-      await startPlayout(c.id);
-      await pausePlayout(c.id);
-    } finally {
-      cueBusy.current = false;
-    }
-  };
-
-  const commitSeek = (sec: number) => {
-    userPinned.current = true;
-    setLocalPos(sec);
-    if (!canScrub) return;
-    if (seekTimer.current) clearTimeout(seekTimer.current);
-    seekTimer.current = setTimeout(() => {
-      void (async () => {
-        try {
-          await ensureCued();
-          await seekPlayout(c.id, sec);
-          userPinned.current = true;
-          setLocalPos(sec);
-        } catch (e) {
-          onError(String(e));
-        }
-      })();
-    }, 120);
-  };
-
-  return (
-    <div className="file-timeline">
-      <div className="file-timeline-track">
-        {(markIn > 0 || markOut != null) && (
-          <div
-            className="file-timeline-range"
-            style={{ left: `${inPct}%`, width: `${rangeWidth}%` }}
-          />
-        )}
-        <input
-          type="range"
-          className="file-timeline-scrub"
-          min={0}
-          max={duration || 1}
-          step={0.04}
-          value={Math.min(displayPos, duration || 1)}
-          disabled={disabled || !canScrub}
-          aria-label="Scrub timeline"
-          onPointerDown={() => setDragging(true)}
-          onPointerUp={() => {
-            setDragging(false);
-            if (scrub != null) commitSeek(scrub);
-            setScrub(null);
-          }}
-          onPointerCancel={() => {
-            setDragging(false);
-            setScrub(null);
-          }}
-          onChange={(e) => {
-            const sec = Number(e.target.value);
-            setScrub(sec);
-            setLocalPos(sec);
-            userPinned.current = true;
-            // Live preview seeks while dragging (debounced); final on pointer up.
-            if (dragging) commitSeek(sec);
-          }}
-        />
-      </div>
-      <div className="file-timeline-row">
-        <span className="file-timeline-clock">
-          {formatClock(displayPos)}
-          <span className="file-timeline-clock-sep">/</span>
-          {formatClock(duration)}
-          {paused ? <span className="file-timeline-paused">paused</span> : null}
-        </span>
-        <div className="file-timeline-marks">
-          <button
-            type="button"
-            className="ctrl-btn tiny"
-            disabled={disabled || !canScrub}
-            onClick={() =>
-              void updatePlayoutClient(c.id, { mark_in_sec: displayPos }).catch((e) =>
-                onError(String(e)),
-              )
-            }
-            title="Mark in at scrub position"
-          >
-            IN
-          </button>
-          <button
-            type="button"
-            className="ctrl-btn tiny"
-            disabled={disabled || !canScrub}
-            onClick={() =>
-              void updatePlayoutClient(c.id, { mark_out_sec: displayPos }).catch((e) =>
-                onError(String(e)),
-              )
-            }
-            title="Mark out at scrub position"
-          >
-            OUT
-          </button>
-          <button
-            type="button"
-            className="ctrl-btn tiny"
-            disabled={disabled || (markIn <= 0 && markOut == null)}
-            onClick={() =>
-              void updatePlayoutClient(c.id, { mark_in_sec: 0, mark_out_sec: null }).catch((e) =>
-                onError(String(e)),
-              )
-            }
-            title="Clear in/out"
-          >
-            CLR
-          </button>
-        </div>
-      </div>
-      {(markIn > 0 || markOut != null) && (
-        <div className="file-timeline-mark-meta">
-          In {formatClock(markIn)}
-          {markOut != null ? ` · Out ${formatClock(markOut)}` : ""}
-        </div>
-      )}
-    </div>
-  );
 }
 
 export default function DecodeGrid() {
@@ -451,39 +256,25 @@ export default function DecodeGrid() {
                       </button>
                     </div>
 
-                    <div className="decode-stage">
-                      {isFile ? (
-                        <FileTimeline
-                          client={c}
-                          disabled={!!busy[c.id]}
-                          onError={(msg) => setCardError((prev) => ({ ...prev, [c.id]: msg }))}
-                        />
-                      ) : (
-                        <div className="decode-stage-spacer" aria-hidden />
-                      )}
-                    </div>
-
-                    <div className={`card-error-slot${showError ? " has-error" : ""}`}>
-                      {showError ? (
-                        <div className="card-error" title={showError}>
-                          <button
-                            type="button"
-                            className="card-error-dismiss"
-                            onClick={() =>
-                              setCardError((prev) => {
-                                const next = { ...prev };
-                                delete next[c.id];
-                                return next;
-                              })
-                            }
-                            aria-label="Dismiss"
-                          >
-                            ×
-                          </button>
-                          {actionError || engineError}
-                        </div>
-                      ) : null}
-                    </div>
+                    {showError && (
+                      <div className="card-error" title={showError}>
+                        <button
+                          type="button"
+                          className="card-error-dismiss"
+                          onClick={() =>
+                            setCardError((prev) => {
+                              const next = { ...prev };
+                              delete next[c.id];
+                              return next;
+                            })
+                          }
+                          aria-label="Dismiss"
+                        >
+                          ×
+                        </button>
+                        {actionError || engineError}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

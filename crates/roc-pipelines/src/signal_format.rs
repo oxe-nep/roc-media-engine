@@ -392,39 +392,68 @@ mod gst_probe {
         if source.starts_with("srt://") {
             return default;
         }
-        let Ok(out) = std::process::Command::new("ffprobe")
+
+        let video_codec = std::process::Command::new("ffprobe")
             .args([
                 "-v",
                 "error",
+                "-select_streams",
+                "v:0",
                 "-show_entries",
-                "stream=codec_type,codec_name,channels",
+                "stream=codec_name",
+                "-of",
+                "csv=p=0",
+                source,
+            ])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
+
+        let Ok(audio_out) = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=codec_name,channels",
                 "-of",
                 "csv=p=0",
                 source,
             ])
             .output()
         else {
-            return default;
+            let mut d = default;
+            d.video_codec = video_codec;
+            return d;
         };
-        if !out.status.success() {
-            return default;
+        if !audio_out.status.success() {
+            let mut d = default;
+            d.video_codec = video_codec;
+            return d;
         }
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut video_codec = String::new();
+
+        let text = String::from_utf8_lossy(&audio_out.stdout);
         let mut tracks: Vec<(String, u32)> = Vec::new();
         for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
             let mut parts = line.split(',');
-            let kind = parts.next().unwrap_or("").trim();
             let codec = parts.next().unwrap_or("").trim();
             let ch = parts
                 .next()
                 .and_then(|s| s.trim().parse::<u32>().ok())
-                .unwrap_or(2);
-            if kind == "video" && video_codec.is_empty() && !codec.is_empty() {
-                video_codec = codec.to_string();
-            } else if kind == "audio" && !codec.is_empty() {
-                tracks.push((codec.to_string(), ch.max(1)));
+                .unwrap_or(2)
+                .max(1);
+            if codec.is_empty() {
+                continue;
             }
+            tracks.push((codec.to_string(), ch));
         }
         if tracks.is_empty() {
             let mut d = default;
