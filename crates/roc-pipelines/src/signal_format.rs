@@ -390,7 +390,15 @@ mod gst_probe {
             audio_channels: 2,
         };
         if source.starts_with("srt://") {
-            return default;
+            // Our encode egress is 4×AAC stereo pairs → 8ch DeckLink (same as file REC).
+            return PlayoutAudioProbe {
+                pairs: 4,
+                compressed: true,
+                video_codec: "h264".into(),
+                audio_codec: "aac".into(),
+                audio_tracks: 4,
+                audio_channels: 8,
+            };
         }
 
         let video_codec = std::process::Command::new("ffprobe")
