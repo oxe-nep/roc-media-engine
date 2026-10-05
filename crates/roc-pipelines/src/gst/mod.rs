@@ -56,59 +56,63 @@ fn apply_playout_level(peaks: &mut [f64; 2], s: &gstreamer::StructureRef) {
     }
 }
 
-fn playout_seek_pipeline(pipeline: &gstreamer::Pipeline, position_sec: f64) -> Result<()> {
+fn playout_seek_pipeline(
+    pipeline: &gstreamer::Pipeline,
+    position_sec: f64,
+    accurate: bool,
+) -> Result<()> {
     use gstreamer::prelude::*;
     let ns = if position_sec.is_finite() && position_sec > 0.0 {
         (position_sec * 1_000_000_000.0).round() as u64
     } else {
         0
     };
+    let mut flags = gstreamer::SeekFlags::FLUSH;
+    if accurate {
+        flags.insert(gstreamer::SeekFlags::ACCURATE);
+    } else {
+        flags.insert(gstreamer::SeekFlags::KEY_UNIT);
+    }
     pipeline
-        .seek_simple(
-            gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
-            gstreamer::ClockTime::from_nseconds(ns),
-        )
+        .seek_simple(flags, gstreamer::ClockTime::from_nseconds(ns))
         .map_err(|e| anyhow!("seek to {position_sec:.3}s failed: {e}"))?;
+    // Preroll so DeckLink shows the scrubbed frame while PAUSED.
+    let _ = pipeline.state(gstreamer::ClockTime::from_mseconds(400));
     Ok(())
 }
 
-fn query_playout_clock(pipeline: &gstreamer::Pipeline) -> (Option<f64>, Option<f64>) {
+fn element_time_sec(el: &gstreamer::Element) -> (Option<f64>, Option<f64>) {
     use gstreamer::prelude::*;
-    let position_sec = pipeline
+    let position_sec = el
         .query_position::<gstreamer::ClockTime>()
-        .map(|t| t.nseconds() as f64 / 1_000_000_000.0);
-    let duration_sec = pipeline
+        .map(|t| t.nseconds() as f64 / 1_000_000_000.0)
+        .filter(|p| p.is_finite() && *p >= 0.0);
+    let duration_sec = el
         .query_duration::<gstreamer::ClockTime>()
         .map(|t| t.nseconds() as f64 / 1_000_000_000.0)
         .filter(|d| d.is_finite() && *d > 0.0);
     (position_sec, duration_sec)
 }
 
-fn file_transport_position(p: &PlayoutRuntime) -> f64 {
-    let mut pos = p.play_origin_sec.max(0.0);
-    if matches!(p.status, ChannelStatus::Running | ChannelStatus::Waiting) {
-        if let Some(origin) = p.rate_origin {
-            pos += origin.elapsed().as_secs_f64();
+/// File media time from decoder-side `vpos` (PTS), then demux `d`, then pipeline.
+/// Avoids DeckLink sink clocks that stick at EOF while frames are still held.
+fn query_playout_media_time(pipeline: &gstreamer::Pipeline) -> (Option<f64>, Option<f64>) {
+    use gstreamer::prelude::*;
+    let mut position_sec = None;
+    let mut duration_sec = None;
+    for name in ["vpos", "d"] {
+        if let Some(el) = pipeline.by_name(name) {
+            let (p, d) = element_time_sec(&el);
+            position_sec = position_sec.or(p);
+            duration_sec = duration_sec.or(d);
         }
     }
-    if let Some(d) = p.duration_sec {
-        pos = pos.min(d.max(0.0));
+    if position_sec.is_none() || duration_sec.is_none() {
+        let (p, d) = element_time_sec(pipeline.upcast_ref());
+        position_sec = position_sec.or(p);
+        duration_sec = duration_sec.or(d);
     }
-    pos
-}
-
-fn arm_file_transport(p: &mut PlayoutRuntime, position_sec: f64, running: bool) {
-    let mut pos = position_sec.max(0.0);
-    if let Some(d) = p.duration_sec {
-        pos = pos.min(d.max(0.0));
-    }
-    p.play_origin_sec = pos;
-    p.position_sec = Some(pos);
-    p.rate_origin = if running {
-        Some(std::time::Instant::now())
-    } else {
-        None
-    };
+    (position_sec, duration_sec)
 }
 
 fn poll_playout_runtime(p: &mut PlayoutRuntime) {
@@ -133,7 +137,6 @@ fn poll_playout_runtime(p: &mut PlayoutRuntime) {
                 tracing::error!(client = %p.name, error = %text, "playout bus error");
                 p.status = ChannelStatus::Error;
                 p.last_error = Some(text);
-                p.rate_origin = None;
             }
             MessageView::Eos(_) => {
                 tracing::info!(client = %p.name, "playout EOS");
@@ -146,9 +149,6 @@ fn poll_playout_runtime(p: &mut PlayoutRuntime) {
                         p.last_level_at = Some(std::time::Instant::now());
                         if matches!(p.status, ChannelStatus::Waiting) {
                             p.status = ChannelStatus::Running;
-                            if p.is_file && p.rate_origin.is_none() {
-                                p.rate_origin = Some(std::time::Instant::now());
-                            }
                         }
                     }
                 }
@@ -158,100 +158,72 @@ fn poll_playout_runtime(p: &mut PlayoutRuntime) {
                     && matches!(p.status, ChannelStatus::Waiting)
                 {
                     p.status = ChannelStatus::Running;
-                    if p.is_file && p.rate_origin.is_none() {
-                        p.rate_origin = Some(std::time::Instant::now());
-                    }
                 }
             }
             _ => {}
         }
     }
 
-    // Refresh duration from GST when available (position from DeckLink pipelines is unreliable).
     if matches!(
         p.status,
         ChannelStatus::Running | ChannelStatus::Paused | ChannelStatus::Waiting
     ) {
-        let (_gst_pos, dur) = query_playout_clock(&pipeline);
+        let (gst_pos, dur) = if p.is_file {
+            query_playout_media_time(&pipeline)
+        } else {
+            element_time_sec(pipeline.upcast_ref())
+        };
         if let Some(d) = dur {
             p.duration_sec = Some(d);
         }
-    }
-
-    if p.is_file
-        && matches!(
-            p.status,
-            ChannelStatus::Running | ChannelStatus::Paused | ChannelStatus::Waiting
-        )
-    {
-        let pos = file_transport_position(p);
-        p.position_sec = Some(pos);
-        if matches!(p.status, ChannelStatus::Running) {
-            if let Some(out) = p.mark_out_sec {
-                if out > p.mark_in_sec && pos >= out - 0.04 {
-                    if p.loop_file {
-                        seek_to_in = true;
-                    } else if let Err(e) = pipeline.set_state(gstreamer::State::Paused) {
-                        tracing::warn!(client = %p.name, error = %e, "pause at mark-out failed");
-                    } else {
-                        p.status = ChannelStatus::Paused;
-                        arm_file_transport(p, out, false);
-                    }
-                }
-            } else if let Some(d) = p.duration_sec {
-                // Soft end: DeckLink sinks often hold the last frame and never emit EOS.
-                if d > 0.0 && pos >= d - 0.04 {
-                    if p.loop_file {
-                        seek_to_in = true;
-                    } else if let Err(e) = pipeline.set_state(gstreamer::State::Paused) {
-                        tracing::warn!(client = %p.name, error = %e, "pause at EOF failed");
-                    } else {
-                        p.status = ChannelStatus::Paused;
-                        arm_file_transport(p, d, false);
+        if let Some(pos) = gst_pos {
+            p.position_sec = Some(pos);
+            if p.is_file && matches!(p.status, ChannelStatus::Running) {
+                if let Some(out) = p.mark_out_sec {
+                    if out > p.mark_in_sec && pos >= out - 0.04 {
+                        if p.loop_file {
+                            seek_to_in = true;
+                        } else if let Err(e) = pipeline.set_state(gstreamer::State::Paused) {
+                            tracing::warn!(client = %p.name, error = %e, "pause at mark-out failed");
+                        } else {
+                            p.status = ChannelStatus::Paused;
+                            p.position_sec = Some(out);
+                        }
                     }
                 }
             }
         }
-    } else if matches!(
-        p.status,
-        ChannelStatus::Running | ChannelStatus::Paused | ChannelStatus::Waiting
-    ) {
-        let (pos, _) = query_playout_clock(&pipeline);
-        if let Some(pos) = pos {
-            p.position_sec = Some(pos);
-        }
     }
 
     if hit_eos {
-        if p.is_file && p.loop_file {
+        if p.is_file && p.loop_file && matches!(p.status, ChannelStatus::Running) {
             seek_to_in = true;
-        } else {
-            p.status = ChannelStatus::Stopped;
-            p.rate_origin = None;
-            p.position_sec = p.duration_sec.or(p.position_sec);
+        } else if matches!(p.status, ChannelStatus::Running) {
+            // Park paused at EOF so the user can scrub / set marks.
+            if pipeline.set_state(gstreamer::State::Paused).is_ok() {
+                p.status = ChannelStatus::Paused;
+                p.position_sec = p.duration_sec.or(p.position_sec);
+            } else {
+                p.status = ChannelStatus::Stopped;
+                p.position_sec = p.duration_sec.or(p.position_sec);
+            }
         }
     }
 
     if seek_to_in {
         let target = p.mark_in_sec.max(0.0);
-        match playout_seek_pipeline(&pipeline, target) {
+        match playout_seek_pipeline(&pipeline, target, false) {
             Ok(()) => {
-                let running = !matches!(p.status, ChannelStatus::Paused);
-                if matches!(p.status, ChannelStatus::Stopped | ChannelStatus::Paused) {
+                p.position_sec = Some(target);
+                if !matches!(p.status, ChannelStatus::Running) {
                     if pipeline.set_state(gstreamer::State::Playing).is_ok() {
                         p.status = ChannelStatus::Running;
-                        arm_file_transport(p, target, true);
-                    } else {
-                        arm_file_transport(p, target, false);
                     }
-                } else {
-                    arm_file_transport(p, target, running);
                 }
             }
             Err(e) => {
                 tracing::warn!(client = %p.name, error = %e, "loop seek failed");
                 p.status = ChannelStatus::Stopped;
-                p.rate_origin = None;
             }
         }
     }
@@ -292,10 +264,6 @@ struct PlayoutRuntime {
     mark_out_sec: Option<f64>,
     position_sec: Option<f64>,
     duration_sec: Option<f64>,
-    /// Media time at `rate_origin` (file transport clock).
-    play_origin_sec: f64,
-    /// Wall clock when `play_origin_sec` was anchored (Running only).
-    rate_origin: Option<std::time::Instant>,
 }
 
 impl GstBackend {
@@ -642,7 +610,7 @@ impl PipelineBackend for GstBackend {
                 let _ = p.set_state(gstreamer::State::Null);
             }
         }
-        let (_, duration_sec) = query_playout_clock(&pipeline);
+        let (_, duration_sec) = query_playout_media_time(&pipeline);
         map.insert(
             client.id.clone(),
             PlayoutRuntime {
@@ -661,12 +629,6 @@ impl PipelineBackend for GstBackend {
                 mark_out_sec: None,
                 position_sec: if is_file { Some(0.0) } else { None },
                 duration_sec,
-                play_origin_sec: 0.0,
-                rate_origin: if is_file && matches!(initial, ChannelStatus::Running) {
-                    Some(std::time::Instant::now())
-                } else {
-                    None
-                },
             },
         );
         Ok(())
@@ -683,8 +645,6 @@ impl PipelineBackend for GstBackend {
             p.source = None;
             p.format_code = None;
             p.position_sec = None;
-            p.rate_origin = None;
-            p.play_origin_sec = 0.0;
         }
         Ok(())
     }
@@ -695,15 +655,20 @@ impl PipelineBackend for GstBackend {
         let p = map
             .get_mut(client_id)
             .with_context(|| format!("playout {client_id} not running"))?;
-        if p.is_file {
-            let pos = file_transport_position(p);
-            arm_file_transport(p, pos, false);
-        }
         let pipe = p
             .pipeline
             .as_ref()
             .with_context(|| format!("playout {client_id} has no pipeline"))?
             .clone();
+        if p.is_file {
+            let (pos, dur) = query_playout_media_time(&pipe);
+            if let Some(d) = dur {
+                p.duration_sec = Some(d);
+            }
+            if let Some(pos) = pos {
+                p.position_sec = Some(pos);
+            }
+        }
         pipe.set_state(gstreamer::State::Paused)
             .context("playout PAUSED")?;
         p.status = ChannelStatus::Paused;
@@ -723,7 +688,7 @@ impl PipelineBackend for GstBackend {
             .clone();
         // If parked at mark-out / EOF, restart from mark-in on resume.
         if p.is_file {
-            let pos = file_transport_position(p);
+            let pos = p.position_sec.unwrap_or(0.0);
             let at_out = p
                 .mark_out_sec
                 .filter(|o| *o > p.mark_in_sec)
@@ -737,9 +702,9 @@ impl PipelineBackend for GstBackend {
                 pos
             };
             if (target - pos).abs() > 0.02 {
-                playout_seek_pipeline(&pipe, target)?;
+                playout_seek_pipeline(&pipe, target, false)?;
             }
-            arm_file_transport(p, target, true);
+            p.position_sec = Some(target);
         }
         pipe.set_state(gstreamer::State::Playing)
             .context("playout PLAYING")?;
@@ -748,6 +713,7 @@ impl PipelineBackend for GstBackend {
     }
 
     fn seek_playout(&self, client_id: &str, position_sec: f64) -> Result<()> {
+        use gstreamer::prelude::*;
         let mut map = self.playout.lock();
         let p = map
             .get_mut(client_id)
@@ -771,9 +737,14 @@ impl PipelineBackend for GstBackend {
             }
             t
         };
-        playout_seek_pipeline(&pipe, target)?;
-        let running = matches!(p.status, ChannelStatus::Running | ChannelStatus::Waiting);
-        arm_file_transport(p, target, running);
+        let paused = matches!(p.status, ChannelStatus::Paused);
+        // Accurate seek while paused so in/out scrub lands on the shown frame.
+        playout_seek_pipeline(&pipe, target, paused)?;
+        p.position_sec = Some(target);
+        if paused {
+            pipe.set_state(gstreamer::State::Paused)
+                .context("keep playout PAUSED after scrub")?;
+        }
         Ok(())
     }
 
@@ -795,10 +766,10 @@ impl PipelineBackend for GstBackend {
         if let (Some(pos), Some(out)) = (p.position_sec, p.mark_out_sec) {
             if matches!(p.status, ChannelStatus::Running) && pos >= out {
                 if let Some(pipe) = p.pipeline.as_ref() {
-                    let _ = playout_seek_pipeline(pipe, out);
+                    let _ = playout_seek_pipeline(pipe, out, true);
                     let _ = pipe.set_state(gstreamer::State::Paused);
                     p.status = ChannelStatus::Paused;
-                    arm_file_transport(p, out, false);
+                    p.position_sec = Some(out);
                 }
             }
         }

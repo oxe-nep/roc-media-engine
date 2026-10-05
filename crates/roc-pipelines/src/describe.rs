@@ -623,7 +623,7 @@ pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
         "{src} \
          d. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
            video/x-h264 ! h264parse config-interval=-1 ! avdec_h264 ! \
-           videoconvert ! tee name=v \
+           videoconvert ! identity name=vpos silent=true ! tee name=v \
          v. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
            videoscale ! videorate skip-to-first=true ! \
            video/x-raw,format=UYVY,width=1920,height={height},framerate={fr} ! \
