@@ -5,6 +5,7 @@ mod routes;
 mod snapshot;
 pub mod state;
 mod sysmetrics;
+mod tc;
 mod ws;
 
 use std::path::PathBuf;
@@ -86,6 +87,10 @@ pub fn spawn_encode_autostart(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
         tokio::time::sleep(Duration::from_secs(2)).await;
         let ids: Vec<u32> = orch.list_channels().into_iter().map(|c| c.id).collect();
         for id in ids {
+            // TC workflow owns the DeckLink pair — skip encode restore.
+            if ui.workflow_mode(id) == "tc" || ui.tc(id).enabled {
+                continue;
+            }
             // Explicit false = user stopped; None/true = bring back after restart.
             if ui.encode_wanted(id) == Some(false) {
                 continue;
@@ -107,6 +112,25 @@ pub fn spawn_encode_autostart(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
                 }
             }
             tokio::time::sleep(Duration::from_millis(750)).await;
+        }
+    });
+}
+
+/// Restore TC burn-in loops that were left enabled.
+pub fn spawn_tc_autostart(orch: Arc<Orchestrator>, ui: Arc<UiState>, hls_dir: PathBuf) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let hls = hls_dir.to_string_lossy().to_string();
+        let ids: Vec<u32> = orch.list_channels().into_iter().map(|c| c.id).collect();
+        for id in ids {
+            if ui.workflow_mode(id) != "tc" && !ui.tc(id).enabled {
+                continue;
+            }
+            match tc::start_tc(orch.as_ref(), ui.as_ref(), id, &hls) {
+                Ok(_) => tracing::info!(channel = id, "TC burn-in autostart"),
+                Err(e) => tracing::warn!(channel = id, error = %e, "TC autostart failed"),
+            }
+            tokio::time::sleep(Duration::from_millis(900)).await;
         }
     });
 }

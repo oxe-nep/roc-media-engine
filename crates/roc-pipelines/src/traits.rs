@@ -82,6 +82,12 @@ pub trait PipelineBackend: Send + Sync {
     fn set_playout_file_control(&self, client_id: &str, control: &PlayoutFileControl) -> Result<()>;
     fn list_playout(&self) -> Vec<PlayoutSnapshot>;
 
+    /// TC burn-in: DeckLink IN → overlay → DeckLink OUT.
+    fn start_tc_loop(&self, channel_id: u32, opts: &crate::TcLoopLaunchOpts) -> Result<()>;
+    fn stop_tc_loop(&self, channel_id: u32) -> Result<()>;
+    fn list_tc_loops(&self) -> Vec<crate::TcLoopSnapshot>;
+    fn tc_loop_snapshot(&self, channel_id: u32) -> Option<crate::TcLoopSnapshot>;
+
     /// Fas 4 stub: apply exclusive workflow (TC / commentator).
     fn set_workflow(&self, channel_id: u32, kind: WorkflowKind, active: bool) -> Result<()>;
     fn list_workflows(&self) -> Vec<WorkflowSnapshot>;

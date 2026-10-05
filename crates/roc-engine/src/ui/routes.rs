@@ -14,6 +14,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::ui::library;
 use crate::ui::snapshot;
+use crate::ui::tc;
 use crate::ui::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -58,6 +59,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/playout/{id}/resume", post(resume_playout_ui))
         .route("/api/playout/{id}/seek", post(seek_playout_ui))
         .route("/api/playout/{id}/logs", get(playout_logs_ui))
+        .route("/api/playout/{id}/tc-loop", get(get_tc_loop).put(put_tc_loop))
         .route("/api/playout/devices", get(playout_devices))
         .route("/api/library/categories", get(lib_categories).post(lib_create_cat))
         .route(
@@ -95,6 +97,9 @@ async fn start_stream(
     State(st): State<AppState>,
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
+    if st.ui.workflow_mode(id) == "tc" || st.ui.tc(id).enabled {
+        return Err(UiError::bad("stop TC burn-in before starting encode"));
+    }
     st.orch.start_capture(id).map_err(UiError::from)?;
     st.ui.set_encode_wanted(id, true);
     snapshot::stream_json(st.orch.as_ref(), st.ui.as_ref(), id)
@@ -870,6 +875,9 @@ async fn start_playout_ui(
     Path(id): Path<u32>,
     body: Result<Json<PlayoutStartBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Value>, UiError> {
+    if st.ui.workflow_mode(id) == "tc" || st.ui.tc(id).enabled {
+        return Err(UiError::bad("stop TC burn-in before starting decode"));
+    }
     let body = body.ok().map(|j| j.0).unwrap_or(PlayoutStartBody {
         source: None,
         target: None,
@@ -1228,7 +1236,7 @@ async fn workflows_map(State(st): State<AppState>) -> Json<Value> {
     for ch in st.orch.list_channels() {
         m.insert(
             ch.id.to_string(),
-            json!({ "pair": false, "tc": false, "commentator": false }),
+            json!({ "mode": st.ui.workflow_mode(ch.id) }),
         );
     }
     Json(Value::Object(m))
@@ -1236,6 +1244,9 @@ async fn workflows_map(State(st): State<AppState>) -> Json<Value> {
 
 #[derive(Deserialize)]
 struct WfBody {
+    #[serde(default)]
+    mode: Option<String>,
+    // Legacy boolean fields — ignored if `mode` is set.
     #[serde(default)]
     pair: Option<bool>,
     #[serde(default)]
@@ -1245,17 +1256,129 @@ struct WfBody {
 }
 
 async fn set_workflow_ui(
-    State(_st): State<AppState>,
+    State(st): State<AppState>,
     Path(id): Path<u32>,
     Json(body): Json<WfBody>,
-) -> Json<Value> {
-    // TC/commentator not on engine yet — echo accepted flags.
-    Json(json!({
-        "id": id,
-        "pair": body.pair.unwrap_or(false),
-        "tc": body.tc.unwrap_or(false),
-        "commentator": body.commentator.unwrap_or(false),
-    }))
+) -> Result<Json<Value>, UiError> {
+    let prev = st.ui.workflow_mode(id);
+    let mode = body
+        .mode
+        .clone()
+        .or_else(|| {
+            if body.tc == Some(true) {
+                Some("tc".into())
+            } else if body.commentator == Some(true) {
+                Some("remote_commentator".into())
+            } else if body.pair == Some(true) {
+                Some("pair".into())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "pair".into());
+    let mode = match mode.as_str() {
+        "tc" => "tc",
+        "remote_commentator" => "remote_commentator",
+        _ => "pair",
+    };
+
+    if prev != mode {
+        if prev == "tc" {
+            let _ = tc::stop_tc(st.orch.as_ref(), st.ui.as_ref(), id);
+        }
+        if mode == "tc" {
+            st.ui.set_workflow_mode(id, mode);
+            let hls = st.hls_dir.to_string_lossy().to_string();
+            let _ = tc::start_tc(st.orch.as_ref(), st.ui.as_ref(), id, &hls);
+        } else {
+            st.ui.set_workflow_mode(id, mode);
+            if mode == "pair" && st.ui.encode_wanted(id).unwrap_or(true) {
+                let _ = st.orch.start_capture(id);
+            }
+        }
+    } else {
+        st.ui.set_workflow_mode(id, mode);
+    }
+
+    Ok(Json(json!({ "id": id, "mode": st.ui.workflow_mode(id) })))
+}
+
+#[derive(Deserialize)]
+struct TcLoopBody {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    udp_port: Option<u16>,
+    #[serde(default)]
+    fontsize: Option<u32>,
+    #[serde(default)]
+    opacity: Option<f64>,
+    #[serde(default)]
+    position: Option<String>,
+}
+
+async fn get_tc_loop(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+) -> Result<Json<Value>, UiError> {
+    if st.orch.channel_config(id).is_err() {
+        return Err(UiError::not_found("channel not found"));
+    }
+    let meta = st.ui.tc(id);
+    let live = st.orch.tc_loop_snapshot(id);
+    Ok(Json(tc::tc_info_json(id, &meta, live.as_ref())))
+}
+
+async fn put_tc_loop(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+    Json(body): Json<TcLoopBody>,
+) -> Result<Json<Value>, UiError> {
+    if st.orch.channel_config(id).is_err() {
+        return Err(UiError::not_found("channel not found"));
+    }
+    let mut meta = st.ui.tc(id);
+    if let Some(s) = body.source {
+        meta.source = if s.eq_ignore_ascii_case("external") {
+            "external".into()
+        } else {
+            "tod".into()
+        };
+    }
+    if let Some(p) = body.udp_port {
+        meta.udp_port = p;
+    }
+    if let Some(f) = body.fontsize {
+        meta.fontsize = f.clamp(24, 256);
+    }
+    if let Some(o) = body.opacity {
+        meta.opacity = o.clamp(0.15, 1.0);
+    }
+    if let Some(p) = body.position {
+        meta.position = match p.as_str() {
+            "bottom_right" | "bottom_left" | "top_right" | "top_left" | "center" => p,
+            _ => "top_left".into(),
+        };
+    }
+
+    let want = body.enabled.unwrap_or(meta.enabled);
+    let was = meta.enabled;
+    meta.enabled = want;
+    st.ui.set_tc(id, meta);
+
+    let hls = st.hls_dir.to_string_lossy().to_string();
+    let out = if want {
+        st.ui.set_workflow_mode(id, "tc");
+        // Restart when settings change while running, or first start.
+        tc::start_tc(st.orch.as_ref(), st.ui.as_ref(), id, &hls).map_err(UiError::from)?
+    } else if was {
+        tc::stop_tc(st.orch.as_ref(), st.ui.as_ref(), id).map_err(UiError::from)?
+    } else {
+        tc::tc_info_json(id, &st.ui.tc(id), None)
+    };
+    Ok(Json(out))
 }
 
 async fn thumb(

@@ -486,4 +486,37 @@ impl Orchestrator {
     ) -> Result<()> {
         self.backend.set_playout_file_control(client_id, &control)
     }
+
+    pub fn start_tc_loop(
+        &self,
+        channel_id: u32,
+        opts: roc_pipelines::TcLoopLaunchOpts,
+    ) -> Result<roc_pipelines::TcLoopSnapshot> {
+        self.backend.start_tc_loop(channel_id, &opts)?;
+        self.backend
+            .tc_loop_snapshot(channel_id)
+            .context("TC snapshot missing after start")
+    }
+
+    pub fn stop_tc_loop(&self, channel_id: u32) -> Result<()> {
+        self.backend.stop_tc_loop(channel_id)
+    }
+
+    pub fn list_tc_loops(&self) -> Vec<roc_pipelines::TcLoopSnapshot> {
+        self.backend.list_tc_loops()
+    }
+
+    pub fn tc_loop_snapshot(&self, channel_id: u32) -> Option<roc_pipelines::TcLoopSnapshot> {
+        self.backend.tc_loop_snapshot(channel_id)
+    }
+
+    pub fn channel_config(&self, id: u32) -> Result<&roc_config::ChannelConfig> {
+        self.cfg
+            .channel(id)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    pub fn playout_config(&self, client_id: &str) -> Option<&roc_config::PlayoutClientConfig> {
+        self.cfg.playout.iter().find(|c| c.id == client_id)
+    }
 }

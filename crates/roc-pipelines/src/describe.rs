@@ -31,6 +31,25 @@ pub struct PlayoutLaunchOpts {
     pub audio_compressed: bool,
 }
 
+/// DeckLink IN → TC overlay → DeckLink OUT (+ HLS preview).
+#[derive(Debug, Clone)]
+pub struct TcLoopLaunchOpts {
+    pub input_device: String,
+    pub output_device: String,
+    /// GStreamer mode for `decklinkvideosrc` (e.g. `1080p50`).
+    pub input_mode: String,
+    /// GStreamer mode for `decklinkvideosink` (e.g. `1080p50`).
+    pub output_mode: String,
+    /// `tod` uses `clockoverlay`; `external` uses `textoverlay name=tc_text`.
+    pub source: crate::TcLoopSource,
+    /// UDP listen port when `source == External` (default 9300+id).
+    pub udp_port: u16,
+    pub fontsize: u32,
+    pub opacity: f64,
+    pub position: crate::TcLoopPosition,
+    pub hls_dir: Option<String>,
+}
+
 /// Map `"DeckLink IP 100G (1)"` / `"1"` / `"0"` → DeckLink `device-number` (0-based).
 pub fn decklink_device_number(device: &str) -> u32 {
     let s = device.trim();
@@ -719,6 +738,127 @@ pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
          {audio} \
          {preview}",
         vsink = decklink_video_sink(&opts.device, mode),
+    )
+}
+
+fn tc_overlay_halign(pos: crate::TcLoopPosition) -> &'static str {
+    match pos {
+        crate::TcLoopPosition::TopLeft | crate::TcLoopPosition::BottomLeft => "left",
+        crate::TcLoopPosition::TopRight | crate::TcLoopPosition::BottomRight => "right",
+        crate::TcLoopPosition::Center => "center",
+    }
+}
+
+fn tc_overlay_valign(pos: crate::TcLoopPosition) -> &'static str {
+    match pos {
+        crate::TcLoopPosition::TopLeft | crate::TcLoopPosition::TopRight => "top",
+        crate::TcLoopPosition::BottomLeft | crate::TcLoopPosition::BottomRight => "bottom",
+        crate::TcLoopPosition::Center => "center",
+    }
+}
+
+fn tc_overlay_color(opacity: f64) -> u32 {
+    let a = ((opacity.clamp(0.15, 1.0) * 255.0).round() as u32).min(255);
+    // AARRGGBB — white text
+    (a << 24) | 0x00FF_FFFF
+}
+
+fn tc_overlay_element(opts: &TcLoopLaunchOpts) -> String {
+    let font = opts.fontsize.clamp(24, 256);
+    let ha = tc_overlay_halign(opts.position);
+    let va = tc_overlay_valign(opts.position);
+    let color = tc_overlay_color(opts.opacity);
+    let font_desc = format!("Sans Bold {font}");
+    match opts.source {
+        crate::TcLoopSource::Tod => format!(
+            "clockoverlay name=tc_overlay font-desc=\"{font_desc}\" \
+             halignment={ha} valignment={va} shaded-background=true \
+             draw-shadow=false color={color}"
+        ),
+        crate::TcLoopSource::External => format!(
+            "textoverlay name=tc_text text=\"--:--:--\" font-desc=\"{font_desc}\" \
+             halignment={ha} valignment={va} shaded-background=true \
+             draw-shadow=false color={color}"
+        ),
+    }
+}
+
+/// Map UI / BMD format codes to GST sink mode names.
+pub fn tc_sink_mode(format_code: &str) -> String {
+    match format_code.trim() {
+        "auto" | "" => "1080p50".into(),
+        "Hp50" | "hp50" | "1080p50" => "1080p50".into(),
+        "Hi50" | "hi50" | "1080i50" => "1080i50".into(),
+        "Hp25" | "hp25" | "1080p25" => "1080p25".into(),
+        "Hp59.94" | "Hp5994" | "1080p5994" => "1080p5994".into(),
+        "Hi59.94" | "Hi5994" | "1080i5994" => "1080i5994".into(),
+        other => other.to_string(),
+    }
+}
+
+fn tc_sink_geometry(mode: &str) -> (&'static str, &'static str) {
+    match mode {
+        "1080i50" | "1080p25" => ("1080", "25/1"),
+        "1080i5994" => ("1080", "30000/1001"),
+        "1080p5994" => ("1080", "60000/1001"),
+        _ => ("1080", "50/1"),
+    }
+}
+
+/// Build TC burn-in: DeckLink IN → overlay → DeckLink OUT + HLS preview.
+pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
+    let src = decklink_src(&opts.input_device, &opts.input_mode);
+    let overlay = tc_overlay_element(opts);
+    let out_mode = if opts.output_mode.trim().is_empty() {
+        "1080p50"
+    } else {
+        opts.output_mode.trim()
+    };
+    let (height, fr) = tc_sink_geometry(out_mode);
+    let vsink = decklink_video_sink(&opts.output_device, out_mode);
+    let asink = decklink_audio_sink(&opts.output_device);
+    let in_num = decklink_device_number(&opts.input_device);
+
+    let preview = if let Some(dir) = &opts.hls_dir {
+        let _ = std::fs::create_dir_all(dir);
+        let seg = format!("{dir}/pv%05d.ts");
+        let playlist = format!("{dir}/listen_0.m3u8");
+        let thumb = format!("{dir}/thumb%05d.jpg");
+        format!(
+            "v. ! queue max-size-buffers=8 leaky=downstream ! \
+               videoconvert ! videoscale ! videorate skip-to-first=true ! \
+               video/x-raw,width=640,height=360,framerate=10/1 ! \
+               x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=20 bframes=0 ! \
+               video/x-h264,profile=baseline ! h264parse config-interval=-1 ! \
+               hlssink2 name=hls_l0 location=\"{seg}\" playlist-location=\"{playlist}\" \
+               target-duration=1 max-files=6 playlist-length=6 \
+             v. ! queue max-size-buffers=2 leaky=downstream ! \
+               videoconvert ! videoscale ! videorate skip-to-first=true ! \
+               video/x-raw,width=640,height=360,framerate=1/1 ! \
+               jpegenc quality=80 idct-method=float ! \
+               multifilesink location=\"{thumb}\" max-files=1 next-file=buffer \
+               post-messages=false sync=false async=false"
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        "{src} ! \
+           deinterlace mode=auto ! videoconvert ! {overlay} ! tee name=v \
+         v. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
+           videoscale ! videorate skip-to-first=true ! \
+           video/x-raw,format=UYVY,width=1920,height={height},framerate={fr} ! \
+           {vsink} \
+         decklinkaudiosrc device-number={in_num} channels=8 ! \
+           audioconvert ! audio/x-raw,channels=8,rate=48000,layout=interleaved ! tee name=a \
+         a. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
+           audioconvert ! audio/x-raw,format=S16LE,channels=8,rate=48000,layout=interleaved ! \
+           {asink} \
+         a. ! queue max-size-buffers=8 leaky=downstream ! \
+           level name=ameter interval=33000000 post-messages=true ! \
+           fakesink sync=false async=false \
+         {preview}"
     )
 }
 

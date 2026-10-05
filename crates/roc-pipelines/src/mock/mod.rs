@@ -11,7 +11,7 @@ use roc_devices::DeviceProbeReport;
 
 use crate::{
     ChannelSnapshot, ChannelStatus, PipelineBackend, PlayoutFileControl, PlayoutSnapshot,
-    RecordingRole, WorkflowKind, WorkflowSnapshot,
+    RecordingRole, TcLoopLaunchOpts, TcLoopSnapshot, TcLoopStatus, WorkflowKind, WorkflowSnapshot,
 };
 
 struct Chan {
@@ -53,6 +53,7 @@ pub struct MockBackend {
     nvenc_used: AtomicUsize,
     channels: Mutex<HashMap<u32, Chan>>,
     playout: Mutex<HashMap<String, Play>>,
+    tc_loops: Mutex<HashMap<u32, TcLoopSnapshot>>,
     workflows: Mutex<HashMap<u32, (WorkflowKind, bool)>>,
 }
 
@@ -63,6 +64,7 @@ impl MockBackend {
             nvenc_used: AtomicUsize::new(0),
             channels: Mutex::new(HashMap::new()),
             playout: Mutex::new(HashMap::new()),
+            tc_loops: Mutex::new(HashMap::new()),
             workflows: Mutex::new(HashMap::new()),
         }
     }
@@ -550,6 +552,49 @@ impl PipelineBackend for MockBackend {
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
+    }
+
+    fn start_tc_loop(&self, channel_id: u32, opts: &TcLoopLaunchOpts) -> Result<()> {
+        self.tc_loops.lock().insert(
+            channel_id,
+            TcLoopSnapshot {
+                id: channel_id,
+                enabled: true,
+                status: TcLoopStatus::Running,
+                source: opts.source,
+                udp_port: opts.udp_port,
+                fontsize: opts.fontsize,
+                opacity: opts.opacity,
+                position: opts.position,
+                error: None,
+                timecode: Some("12:00:00".into()),
+                audio_peaks: Some(vec![-90.0, -90.0]),
+            },
+        );
+        self.workflows
+            .lock()
+            .insert(channel_id, (WorkflowKind::Timecode, true));
+        Ok(())
+    }
+
+    fn stop_tc_loop(&self, channel_id: u32) -> Result<()> {
+        self.tc_loops.lock().remove(&channel_id);
+        if let Some(entry) = self.workflows.lock().get_mut(&channel_id) {
+            if matches!(entry.0, WorkflowKind::Timecode) {
+                entry.1 = false;
+            }
+        }
+        Ok(())
+    }
+
+    fn list_tc_loops(&self) -> Vec<TcLoopSnapshot> {
+        let mut out: Vec<_> = self.tc_loops.lock().values().cloned().collect();
+        out.sort_by_key(|t| t.id);
+        out
+    }
+
+    fn tc_loop_snapshot(&self, channel_id: u32) -> Option<TcLoopSnapshot> {
+        self.tc_loops.lock().get(&channel_id).cloned()
     }
 
     fn set_workflow(&self, channel_id: u32, kind: WorkflowKind, active: bool) -> Result<()> {

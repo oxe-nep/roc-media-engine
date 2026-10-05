@@ -197,7 +197,65 @@ struct PersistFile {
     #[serde(default)]
     encode_wanted: HashMap<String, bool>,
     #[serde(default)]
+    tc: HashMap<String, TcMeta>,
+    /// Per-channel workflow mode: `pair` | `tc` | `remote_commentator`.
+    #[serde(default)]
+    workflows: HashMap<String, String>,
+    #[serde(default)]
     recordings_dir: Option<PathBuf>,
+}
+
+/// Persisted TC burn-in settings (UI + auto-start).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TcMeta {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_tc_source")]
+    pub source: String,
+    #[serde(default)]
+    pub udp_port: u16,
+    #[serde(default = "default_tc_fontsize")]
+    pub fontsize: u32,
+    #[serde(default = "default_tc_opacity")]
+    pub opacity: f64,
+    #[serde(default = "default_tc_position")]
+    pub position: String,
+}
+
+fn default_tc_source() -> String {
+    "tod".into()
+}
+fn default_tc_fontsize() -> u32 {
+    96
+}
+fn default_tc_opacity() -> f64 {
+    0.9
+}
+fn default_tc_position() -> String {
+    "top_left".into()
+}
+
+impl Default for TcMeta {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            source: default_tc_source(),
+            udp_port: 0,
+            fontsize: default_tc_fontsize(),
+            opacity: default_tc_opacity(),
+            position: default_tc_position(),
+        }
+    }
+}
+
+impl TcMeta {
+    pub fn effective_udp_port(&self, channel_id: u32) -> u16 {
+        if self.udp_port > 0 {
+            self.udp_port
+        } else {
+            9300 + channel_id as u16
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -222,6 +280,8 @@ struct Inner {
     playout: HashMap<u32, PlayoutMeta>,
     /// When true (or unset), encode capture should come back after engine restart.
     encode_wanted: HashMap<u32, bool>,
+    tc: HashMap<u32, TcMeta>,
+    workflows: HashMap<u32, String>,
     recordings_dir: PathBuf,
 }
 
@@ -233,6 +293,8 @@ impl UiState {
         let mut recordings = HashMap::new();
         let mut playout = HashMap::new();
         let mut encode_wanted = HashMap::new();
+        let mut tc = HashMap::new();
+        let mut workflows = HashMap::new();
         let mut recordings_dir = default_recordings;
         if let Ok(raw) = fs::read_to_string(&path) {
             if let Ok(f) = serde_json::from_str::<PersistFile>(&raw) {
@@ -269,6 +331,16 @@ impl UiState {
                         encode_wanted.insert(id, v);
                     }
                 }
+                for (k, v) in f.tc {
+                    if let Ok(id) = k.parse::<u32>() {
+                        tc.insert(id, v);
+                    }
+                }
+                for (k, v) in f.workflows {
+                    if let Ok(id) = k.parse::<u32>() {
+                        workflows.insert(id, normalize_workflow_mode(&v));
+                    }
+                }
                 if let Some(p) = f.recordings_dir {
                     if !p.as_os_str().is_empty() {
                         recordings_dir = p;
@@ -284,6 +356,8 @@ impl UiState {
                 recordings,
                 playout,
                 encode_wanted,
+                tc,
+                workflows,
                 recordings_dir,
             }),
         }
@@ -310,6 +384,12 @@ impl UiState {
         }
         for (id, w) in &guard.encode_wanted {
             f.encode_wanted.insert(id.to_string(), *w);
+        }
+        for (id, t) in &guard.tc {
+            f.tc.insert(id.to_string(), t.clone());
+        }
+        for (id, mode) in &guard.workflows {
+            f.workflows.insert(id.to_string(), mode.clone());
         }
         f.recordings_dir = Some(guard.recordings_dir.clone());
         drop(guard);
@@ -608,6 +688,43 @@ impl UiState {
                 )
             }
         }
+    }
+
+    pub fn tc(&self, id: u32) -> TcMeta {
+        self.inner
+            .lock()
+            .tc
+            .get(&id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn set_tc(&self, id: u32, meta: TcMeta) {
+        self.inner.lock().tc.insert(id, meta);
+        self.persist();
+    }
+
+    pub fn workflow_mode(&self, id: u32) -> String {
+        self.inner
+            .lock()
+            .workflows
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| "pair".into())
+    }
+
+    pub fn set_workflow_mode(&self, id: u32, mode: &str) {
+        let mode = normalize_workflow_mode(mode);
+        self.inner.lock().workflows.insert(id, mode);
+        self.persist();
+    }
+}
+
+fn normalize_workflow_mode(mode: &str) -> String {
+    match mode.trim() {
+        "tc" => "tc".into(),
+        "remote_commentator" => "remote_commentator".into(),
+        _ => "pair".into(),
     }
 }
 

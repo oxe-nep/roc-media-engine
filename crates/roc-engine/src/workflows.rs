@@ -40,7 +40,7 @@ pub fn adapter_manifest() -> Value {
         },
         "workflows": {
             "pair": "default encode+decode pair (current product mode)",
-            "tc": "stub — cairooverlay / clockoverlay burn-in (no FFmpeg drawtext file reload)",
+            "tc": "DeckLink IN → clockoverlay/textoverlay → DeckLink OUT (+ HLS preview)",
             "commentator": "stub — appsrc/appsink WebRTC bridge (no pipe+FFmpeg)"
         },
         "go_adapter_sketch": {

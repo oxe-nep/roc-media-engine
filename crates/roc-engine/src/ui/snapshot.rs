@@ -349,6 +349,20 @@ pub fn meters_maps(orch: &Orchestrator) -> (serde_json::Map<String, Value>, serd
             serde_json::to_value(m).unwrap_or(json!({"l": -90.0, "r": -90.0, "channels": silence_peaks()})),
         );
     }
+    // TC burn-in feeds the playout meter bus (UI listens on bus=playout).
+    for t in orch.list_tc_loops() {
+        if matches!(
+            t.status,
+            roc_pipelines::TcLoopStatus::Running | roc_pipelines::TcLoopStatus::Restarting
+        ) {
+            let m = from_peaks(t.audio_peaks.as_deref());
+            play.insert(
+                t.id.to_string(),
+                serde_json::to_value(m)
+                    .unwrap_or(json!({"l": -90.0, "r": -90.0, "channels": silence_peaks()})),
+            );
+        }
+    }
     (enc, play)
 }
 
@@ -357,6 +371,7 @@ pub fn dashboard_snapshot(orch: &Orchestrator, ui: &UiState) -> Value {
     let mut streams = Vec::new();
     let mut recordings = Vec::new();
     let mut srt = Vec::new();
+    let mut tc = Vec::new();
     let mut workflows = serde_json::Map::new();
     for ch in &channels {
         ui.ensure_channel(ch.id, &ch.name);
@@ -367,22 +382,22 @@ pub fn dashboard_snapshot(orch: &Orchestrator, ui: &UiState) -> Value {
         srt.push(srt_json(orch, ui, ch.id));
         workflows.insert(
             ch.id.to_string(),
-            json!({
-                "pair": false,
-                "tc": false,
-                "commentator": false,
-            }),
+            json!({ "mode": ui.workflow_mode(ch.id) }),
         );
+        let meta = ui.tc(ch.id);
+        let live = orch.tc_loop_snapshot(ch.id);
+        tc.push(crate::ui::tc::tc_info_json(ch.id, &meta, live.as_ref()));
     }
     streams.sort_by_key(|v| v.get("id").and_then(|x| x.as_u64()).unwrap_or(0));
     recordings.sort_by_key(|v| v.get("id").and_then(|x| x.as_u64()).unwrap_or(0));
     srt.sort_by_key(|v| v.get("id").and_then(|x| x.as_u64()).unwrap_or(0));
+    tc.sort_by_key(|v| v.get("id").and_then(|x| x.as_u64()).unwrap_or(0));
     let (meters_encode, meters_playout) = meters_maps(orch);
     json!({
         "type": "snapshot",
         "streams": streams,
         "playout": playout_json(orch, ui),
-        "tc": [],
+        "tc": tc,
         "commentator": [],
         "recordings": recordings,
         "srt": srt,

@@ -137,3 +137,106 @@ pub struct WorkflowSnapshot {
     pub active: bool,
     pub detail: Option<String>,
 }
+
+/// TC burn-in loop status (DeckLink IN → overlay → DeckLink OUT).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TcLoopStatus {
+    Off,
+    Running,
+    Restarting,
+    Error,
+}
+
+impl Default for TcLoopStatus {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TcLoopSource {
+    Tod,
+    External,
+}
+
+impl Default for TcLoopSource {
+    fn default() -> Self {
+        Self::Tod
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TcLoopPosition {
+    BottomRight,
+    BottomLeft,
+    TopRight,
+    TopLeft,
+    Center,
+}
+
+impl Default for TcLoopPosition {
+    fn default() -> Self {
+        Self::TopLeft
+    }
+}
+
+impl TcLoopPosition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BottomRight => "bottom_right",
+            Self::BottomLeft => "bottom_left",
+            Self::TopRight => "top_right",
+            Self::TopLeft => "top_left",
+            Self::Center => "center",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "bottom_right" => Self::BottomRight,
+            "bottom_left" => Self::BottomLeft,
+            "top_right" => Self::TopRight,
+            "top_left" => Self::TopLeft,
+            "center" => Self::Center,
+            _ => Self::TopLeft,
+        }
+    }
+}
+
+impl TcLoopSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tod => "tod",
+            Self::External => "external",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "external" => Self::External,
+            _ => Self::Tod,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TcLoopSnapshot {
+    pub id: u32,
+    pub enabled: bool,
+    pub status: TcLoopStatus,
+    pub source: TcLoopSource,
+    pub udp_port: u16,
+    pub fontsize: u32,
+    pub opacity: f64,
+    pub position: TcLoopPosition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timecode: Option<String>,
+    /// Peak levels for TC preview meters (playout bus).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_peaks: Option<Vec<f64>>,
+}

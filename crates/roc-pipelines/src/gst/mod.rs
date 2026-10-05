@@ -4,16 +4,18 @@ mod bitrate;
 mod capture;
 mod preview_webrtc;
 mod probe;
+mod tc_loop;
 
 pub use crate::describe::{
-    build_capture_launch, build_playout_launch, build_spike_tee_launch, CaptureLaunchOpts,
-    PlayoutLaunchOpts,
+    build_capture_launch, build_playout_launch, build_spike_tee_launch, build_tc_loop_launch,
+    CaptureLaunchOpts, PlayoutLaunchOpts, TcLoopLaunchOpts,
 };
 pub use preview_webrtc::WebRtcPreview;
 pub use probe::probe_gst_devices;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use parking_lot::Mutex;
@@ -22,7 +24,7 @@ use roc_devices::DeviceProbeReport;
 
 use crate::{
     ChannelSnapshot, ChannelStatus, PipelineBackend, PlayoutFileControl, PlayoutSnapshot,
-    WorkflowKind, WorkflowSnapshot,
+    TcLoopSnapshot, TcLoopSource, TcLoopStatus, WorkflowKind, WorkflowSnapshot,
 };
 
 use self::capture::ChannelPipeline;
@@ -54,6 +56,92 @@ fn apply_playout_level(peaks: &mut [f64; 2], s: &gstreamer::StructureRef) {
         };
         peaks[i] = if db.is_finite() { db.max(-90.0) } else { -90.0 };
     }
+}
+
+fn poll_tc_runtime(rt: &mut TcLoopRuntime) {
+    use gstreamer::prelude::*;
+    use gstreamer::MessageView;
+    let Some(pipeline) = rt.pipeline.as_ref() else {
+        return;
+    };
+    let Some(bus) = pipeline.bus() else {
+        return;
+    };
+    while let Some(msg) = bus.timed_pop(gstreamer::ClockTime::ZERO) {
+        match msg.view() {
+            MessageView::Error(err) => {
+                rt.status = TcLoopStatus::Error;
+                rt.last_error = Some(format!(
+                    "{}: {}",
+                    err.error(),
+                    err.debug().unwrap_or_default()
+                ));
+            }
+            MessageView::Element(el) => {
+                let Some(s) = el.structure() else { continue };
+                if s.name() == "level" {
+                    apply_playout_level(&mut rt.audio_peaks, s);
+                    rt.last_level_at = Some(std::time::Instant::now());
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(at) = rt.last_level_at {
+        if at.elapsed() > std::time::Duration::from_millis(500) {
+            rt.audio_peaks = [-90.0; 2];
+        }
+    }
+}
+
+fn tc_runtime_snapshot(id: u32, rt: &TcLoopRuntime) -> TcLoopSnapshot {
+    let timecode = match (rt.status, rt.source) {
+        (TcLoopStatus::Running, TcLoopSource::Tod) => Some(wall_clock_hms()),
+        (TcLoopStatus::Running, TcLoopSource::External) => {
+            // Best-effort: read current textoverlay text.
+            rt.pipeline.as_ref().and_then(|p| {
+                use gstreamer::prelude::*;
+                let el = p.by_name("tc_text")?;
+                let text: String = el.property("text");
+                if text.trim().is_empty() || text == "--:--:--" {
+                    None
+                } else {
+                    Some(text)
+                }
+            })
+        }
+        _ => None,
+    };
+    TcLoopSnapshot {
+        id,
+        enabled: rt.enabled,
+        status: rt.status,
+        source: rt.source,
+        udp_port: rt.udp_port,
+        fontsize: rt.fontsize,
+        opacity: rt.opacity,
+        position: rt.position,
+        error: rt.last_error.clone(),
+        timecode,
+        audio_peaks: Some(rt.audio_peaks.to_vec()),
+    }
+}
+
+fn wall_clock_hms() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Local offset is host TZ; for burn-in display we use UTC+local via libc is overkill —
+    // clockoverlay itself uses local TZ; API timecode is approximate wall UTC for cards.
+    let tod = secs % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}",
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
+    )
 }
 
 fn playout_seek_pipeline(
@@ -253,6 +341,7 @@ pub struct GstBackend {
     presets: Mutex<HashMap<u32, EncodePreset>>,
     configs: Mutex<HashMap<u32, ChannelConfig>>,
     playout: Mutex<HashMap<String, PlayoutRuntime>>,
+    tc_loops: Mutex<HashMap<u32, TcLoopRuntime>>,
     workflows: Mutex<HashMap<u32, (WorkflowKind, bool)>>,
 }
 
@@ -274,6 +363,21 @@ struct PlayoutRuntime {
     duration_sec: Option<f64>,
 }
 
+struct TcLoopRuntime {
+    enabled: bool,
+    status: TcLoopStatus,
+    source: TcLoopSource,
+    udp_port: u16,
+    fontsize: u32,
+    opacity: f64,
+    position: crate::TcLoopPosition,
+    last_error: Option<String>,
+    audio_peaks: [f64; 2],
+    last_level_at: Option<std::time::Instant>,
+    pipeline: Option<gstreamer::Pipeline>,
+    udp_stop: Option<Arc<AtomicBool>>,
+}
+
 impl GstBackend {
     pub fn new() -> Result<Self> {
         gstreamer::init().context("gstreamer::init")?;
@@ -285,6 +389,7 @@ impl GstBackend {
             presets: Mutex::new(HashMap::new()),
             configs: Mutex::new(HashMap::new()),
             playout: Mutex::new(HashMap::new()),
+            tc_loops: Mutex::new(HashMap::new()),
             workflows: Mutex::new(HashMap::new()),
         })
     }
@@ -827,6 +932,124 @@ impl PipelineBackend for GstBackend {
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
+    }
+
+    fn start_tc_loop(&self, channel_id: u32, opts: &TcLoopLaunchOpts) -> Result<()> {
+        use gstreamer::prelude::*;
+        let _gst = self.gst_op.lock();
+
+        // Tear down any previous TC on this channel.
+        {
+            let mut map = self.tc_loops.lock();
+            if let Some(old) = map.remove(&channel_id) {
+                if let Some(flag) = &old.udp_stop {
+                    flag.store(true, Ordering::SeqCst);
+                }
+                if let Some(p) = old.pipeline {
+                    let _ = p.set_state(gstreamer::State::Null);
+                }
+            }
+        }
+
+        let launch = build_tc_loop_launch(opts);
+        tracing::info!(channel_id, %launch, "starting TC burn-in pipeline");
+        let pipeline = gstreamer::parse::launch(&launch)
+            .with_context(|| format!("parse TC launch for channel {channel_id}"))?
+            .downcast::<gstreamer::Pipeline>()
+            .map_err(|_| anyhow!("TC launch did not yield a Pipeline"))?;
+
+        let udp_stop = if matches!(opts.source, TcLoopSource::External) {
+            let flag = Arc::new(AtomicBool::new(false));
+            tc_loop::spawn_external_tc_updater(&pipeline, opts.udp_port, flag.clone())?;
+            Some(flag)
+        } else {
+            None
+        };
+
+        pipeline
+            .set_state(gstreamer::State::Playing)
+            .context("TC PLAYING")?;
+        let (_res, state, pending) = pipeline.state(gstreamer::ClockTime::from_seconds(3));
+        if matches!(state, gstreamer::State::Null | gstreamer::State::Ready)
+            && !matches!(pending, gstreamer::State::Playing | gstreamer::State::Paused)
+        {
+            if let Some(flag) = &udp_stop {
+                flag.store(true, Ordering::SeqCst);
+            }
+            let err = drain_playout_bus_error(&pipeline)
+                .unwrap_or_else(|| format!("TC failed to reach PLAYING (state={state:?})"));
+            let _ = pipeline.set_state(gstreamer::State::Null);
+            bail!("{err}");
+        }
+        if let Some(err) = drain_playout_bus_error(&pipeline) {
+            if let Some(flag) = &udp_stop {
+                flag.store(true, Ordering::SeqCst);
+            }
+            let _ = pipeline.set_state(gstreamer::State::Null);
+            bail!("{err}");
+        }
+
+        self.tc_loops.lock().insert(
+            channel_id,
+            TcLoopRuntime {
+                enabled: true,
+                status: TcLoopStatus::Running,
+                source: opts.source,
+                udp_port: opts.udp_port,
+                fontsize: opts.fontsize,
+                opacity: opts.opacity,
+                position: opts.position,
+                last_error: None,
+                audio_peaks: [-90.0; 2],
+                last_level_at: None,
+                pipeline: Some(pipeline),
+                udp_stop,
+            },
+        );
+        self.workflows
+            .lock()
+            .insert(channel_id, (WorkflowKind::Timecode, true));
+        Ok(())
+    }
+
+    fn stop_tc_loop(&self, channel_id: u32) -> Result<()> {
+        use gstreamer::prelude::*;
+        let _gst = self.gst_op.lock();
+        let mut map = self.tc_loops.lock();
+        if let Some(mut rt) = map.remove(&channel_id) {
+            if let Some(flag) = rt.udp_stop.take() {
+                flag.store(true, Ordering::SeqCst);
+            }
+            if let Some(p) = rt.pipeline.take() {
+                let _ = p.set_state(gstreamer::State::Null);
+            }
+        }
+        if let Some(entry) = self.workflows.lock().get_mut(&channel_id) {
+            if matches!(entry.0, WorkflowKind::Timecode) {
+                entry.1 = false;
+            }
+        }
+        Ok(())
+    }
+
+    fn list_tc_loops(&self) -> Vec<TcLoopSnapshot> {
+        let mut map = self.tc_loops.lock();
+        for rt in map.values_mut() {
+            poll_tc_runtime(rt);
+        }
+        let mut out: Vec<_> = map
+            .iter()
+            .map(|(id, rt)| tc_runtime_snapshot(*id, rt))
+            .collect();
+        out.sort_by_key(|t| t.id);
+        out
+    }
+
+    fn tc_loop_snapshot(&self, channel_id: u32) -> Option<TcLoopSnapshot> {
+        let mut map = self.tc_loops.lock();
+        let rt = map.get_mut(&channel_id)?;
+        poll_tc_runtime(rt);
+        Some(tc_runtime_snapshot(channel_id, rt))
     }
 
     fn set_workflow(&self, channel_id: u32, kind: WorkflowKind, active: bool) -> Result<()> {
