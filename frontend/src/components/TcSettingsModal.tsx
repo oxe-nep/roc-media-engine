@@ -1,7 +1,17 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { fetchTcLoop, updateTcLoop, type TcLoopPosition, type TcLoopSource } from "@/lib/api";
+import {
+  fetchEncodePresets,
+  fetchTcLoop,
+  setEncodePreset,
+  setRecordingName,
+  updateTcLoop,
+  type EncodePreset,
+  type TcLoopPosition,
+  type TcLoopSource,
+} from "@/lib/api";
+import { isProxyPreset } from "@/lib/presetRoles";
 import TcPositionPreview from "@/components/TcPositionPreview";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import {
@@ -13,6 +23,10 @@ import {
 type Props = {
   open: boolean;
   channelId: number | null;
+  /** Display / recording name for this channel. */
+  channelName?: string;
+  /** Current proxy encode preset id. */
+  encodePreset?: string;
   onClose: () => void;
   onSaved: () => void;
 };
@@ -21,7 +35,14 @@ const DEFAULT_X = 0.04;
 const DEFAULT_Y = 0.04;
 const DEFAULT_FONT = 48;
 
-export default function TcSettingsModal({ open, channelId, onClose, onSaved }: Props) {
+export default function TcSettingsModal({
+  open,
+  channelId,
+  channelName,
+  encodePreset,
+  onClose,
+  onSaved,
+}: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tcEnabled, setTcEnabled] = useState(false);
@@ -35,16 +56,33 @@ export default function TcSettingsModal({ open, channelId, onClose, onSaved }: P
   const [tcY, setTcY] = useState(DEFAULT_Y);
   const [tcError, setTcError] = useState("");
   const [tcApplyMsg, setTcApplyMsg] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [proxyPreset, setProxyPreset] = useState("");
+  const [presets, setPresets] = useState<EncodePreset[]>([]);
 
   useBodyScrollLock(open);
 
   const tcOn = tcEnabled || tcStatus === "running" || tcStatus === "restarting";
   const tcEffectivePort = tcUdpPort > 0 ? tcUdpPort : defaultTcUdpPort(channelId ?? 0);
+  const proxyPresets = presets.filter(isProxyPreset);
 
   useEffect(() => {
     if (!open || channelId == null) return;
     setError(null);
     setTcApplyMsg(null);
+    setName((channelName || `ch${channelId}`).trim() || `ch${channelId}`);
+    setProxyPreset(encodePreset || "");
+    fetchEncodePresets()
+      .then((list) => {
+        setPresets(list);
+        const proxies = list.filter(isProxyPreset);
+        setProxyPreset((prev) => {
+          const want = encodePreset || prev;
+          if (want && proxies.some((p) => p.id === want)) return want;
+          return proxies[0]?.id || want || "";
+        });
+      })
+      .catch(() => {});
     fetchTcLoop(channelId)
       .then((tc) => {
         setTcEnabled(!!tc.enabled);
@@ -59,7 +97,7 @@ export default function TcSettingsModal({ open, channelId, onClose, onSaved }: P
         setTcError(tc.error || "");
       })
       .catch((e) => setError(String(e)));
-  }, [open, channelId]);
+  }, [open, channelId, channelName, encodePreset]);
 
   useEffect(() => {
     if (!open) return;
@@ -77,6 +115,12 @@ export default function TcSettingsModal({ open, channelId, onClose, onSaved }: P
     setError(null);
     setTcApplyMsg(enabled ? "Starting…" : "Stopping…");
     try {
+      const cleanName = name.trim() || `ch${channelId}`;
+      await setRecordingName(channelId, cleanName);
+      setName(cleanName);
+      if (proxyPreset) {
+        await setEncodePreset(channelId, proxyPreset);
+      }
       const tc = await updateTcLoop(channelId, {
         enabled,
         source: tcSource,
@@ -158,6 +202,32 @@ export default function TcSettingsModal({ open, channelId, onClose, onSaved }: P
             <div className="tc-settings-body">
               <div className="tc-settings-row">
                 <div className="tc-settings-fields">
+                  <label className="presets-field">
+                    <span>Name</span>
+                    <input
+                      type="text"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      disabled={busy}
+                      placeholder={`ch${channelId}`}
+                      autoComplete="off"
+                    />
+                  </label>
+                  <label className="presets-field">
+                    <span>Proxy preset</span>
+                    <select
+                      value={proxyPreset}
+                      onChange={(e) => setProxyPreset(e.target.value)}
+                      disabled={busy || proxyPresets.length === 0}
+                    >
+                      {proxyPresets.length === 0 && <option value="">No proxy presets</option>}
+                      {proxyPresets.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.label || p.id}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <div className="presets-field">
                     <span>Timecode source</span>
                     <div className="tc-source-options">

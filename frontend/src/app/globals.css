@@ -1616,7 +1616,9 @@ html {
 }
 
 .card-actions-primary .rec-btn,
-.card-actions-primary .stream-btn {
+.card-actions-primary .stream-btn,
+.card-actions-primary .tc-start-btn,
+.card-actions-primary .tc-stop-btn {
   flex: 0 0 auto;
 }
 
