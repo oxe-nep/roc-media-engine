@@ -8,10 +8,23 @@ use crate::{ChannelSnapshot, ChannelStatus, PlayoutSnapshot, WorkflowKind, Workf
 pub trait PipelineBackend: Send + Sync {
     fn probe_devices(&self) -> Result<DeviceProbeReport>;
 
-    fn ensure_channel(&self, ch: &ChannelConfig, preset: &EncodePreset) -> Result<()>;
+    fn ensure_channel(
+        &self,
+        ch: &ChannelConfig,
+        encode: &EncodePreset,
+        record: &EncodePreset,
+    ) -> Result<()>;
 
     /// Hot-swap encode preset (relaunch graph if capture is live). `preset_id` is the config key.
     fn apply_encode_preset(
+        &self,
+        channel_id: u32,
+        preset_id: &str,
+        preset: &EncodePreset,
+    ) -> Result<()>;
+
+    /// Hot-swap recording preset (no relaunch; applies on next REC start).
+    fn apply_record_preset(
         &self,
         channel_id: u32,
         preset_id: &str,

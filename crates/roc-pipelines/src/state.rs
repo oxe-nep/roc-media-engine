@@ -22,6 +22,9 @@ pub struct ChannelSnapshot {
     pub name: String,
     pub status: ChannelStatus,
     pub encode_preset: String,
+    /// Preset used for file REC (may differ from live/proxy encode_preset).
+    #[serde(default)]
+    pub record_preset: String,
     /// Live encoded video bitrate (kbps) from pad probe — omit until first sample.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_bitrate_kbps: Option<f64>,

@@ -17,6 +17,7 @@ use crate::{
 struct Chan {
     name: String,
     encode_preset: String,
+    record_preset: String,
     status: ChannelStatus,
     recording: bool,
     srt: bool,
@@ -68,14 +69,25 @@ impl PipelineBackend for MockBackend {
         Ok(DeviceProbeReport::empty_mock())
     }
 
-    fn ensure_channel(&self, ch: &ChannelConfig, preset: &EncodePreset) -> Result<()> {
+    fn ensure_channel(
+        &self,
+        ch: &ChannelConfig,
+        encode: &EncodePreset,
+        record: &EncodePreset,
+    ) -> Result<()> {
+        let encode_id = ch
+            .encode_preset
+            .clone()
+            .unwrap_or_else(|| "hq".into());
+        let record_id = ch
+            .record_preset
+            .clone()
+            .unwrap_or_else(|| encode_id.clone());
         let mut map = self.channels.lock();
         map.entry(ch.id).or_insert_with(|| Chan {
             name: ch.name.clone(),
-            encode_preset: ch
-                .encode_preset
-                .clone()
-                .unwrap_or_else(|| "hq".into()),
+            encode_preset: encode_id.clone(),
+            record_preset: record_id.clone(),
             status: ChannelStatus::Stopped,
             recording: false,
             srt: false,
@@ -90,7 +102,12 @@ impl PipelineBackend for MockBackend {
             existing.encode_preset = ch
                 .encode_preset
                 .clone()
-                .unwrap_or_else(|| preset.label.clone());
+                .unwrap_or_else(|| encode_id);
+            existing.record_preset = ch
+                .record_preset
+                .clone()
+                .unwrap_or_else(|| existing.encode_preset.clone());
+            let _ = (encode, record);
             existing.udp_egress = ch.udp_egress.clone();
             if existing.srt_url.is_none() {
                 existing.srt_url = ch.srt_url.clone();
@@ -112,8 +129,28 @@ impl PipelineBackend for MockBackend {
         if ch.recording {
             bail!("stop recording before changing encode preset");
         }
+        if roc_config::is_mezz_codec(&preset.video_codec) {
+            bail!("mezz codecs belong on the record preset — pick an NVENC proxy for live/SRT");
+        }
         ch.encode_preset = preset_id.to_string();
-        let _ = preset; // mock ignores encode params
+        Ok(())
+    }
+
+    fn apply_record_preset(
+        &self,
+        channel_id: u32,
+        preset_id: &str,
+        preset: &EncodePreset,
+    ) -> Result<()> {
+        let mut map = self.channels.lock();
+        let ch = map
+            .get_mut(&channel_id)
+            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+        if ch.recording {
+            bail!("stop recording before changing record preset");
+        }
+        ch.record_preset = preset_id.to_string();
+        let _ = preset;
         Ok(())
     }
 
@@ -218,6 +255,7 @@ impl PipelineBackend for MockBackend {
             name: ch.name.clone(),
             status: ch.status,
             encode_preset: ch.encode_preset.clone(),
+            record_preset: ch.record_preset.clone(),
             video_bitrate_kbps: if matches!(ch.status, ChannelStatus::Running) {
                 Some(11_500.0)
             } else {
@@ -253,6 +291,7 @@ impl PipelineBackend for MockBackend {
                     name: ch.name.clone(),
                     status: ch.status,
                     encode_preset: ch.encode_preset.clone(),
+                    record_preset: ch.record_preset.clone(),
                     video_bitrate_kbps: if matches!(ch.status, ChannelStatus::Running) {
                         Some(11_500.0)
                     } else {

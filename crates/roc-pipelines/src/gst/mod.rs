@@ -73,14 +73,19 @@ impl PipelineBackend for GstBackend {
         probe_gst_devices()
     }
 
-    fn ensure_channel(&self, ch: &ChannelConfig, preset: &EncodePreset) -> Result<()> {
+    fn ensure_channel(
+        &self,
+        ch: &ChannelConfig,
+        encode: &EncodePreset,
+        record: &EncodePreset,
+    ) -> Result<()> {
         self.configs.lock().insert(ch.id, ch.clone());
-        self.presets.lock().insert(ch.id, preset.clone());
+        self.presets.lock().insert(ch.id, encode.clone());
         let mut map = self.channels.lock();
         if !map.contains_key(&ch.id) {
-            map.insert(ch.id, ChannelPipeline::new(ch, preset)?);
+            map.insert(ch.id, ChannelPipeline::new(ch, encode, record)?);
         } else if let Some(p) = map.get_mut(&ch.id) {
-            p.update_config(ch, preset);
+            p.update_config(ch, encode, record);
         }
         Ok(())
     }
@@ -101,6 +106,23 @@ impl PipelineBackend for GstBackend {
             .get_mut(&channel_id)
             .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
         pipe.apply_encode_preset(preset_id, preset)
+    }
+
+    fn apply_record_preset(
+        &self,
+        channel_id: u32,
+        preset_id: &str,
+        preset: &EncodePreset,
+    ) -> Result<()> {
+        let _gst = self.gst_op.lock();
+        if let Some(ch) = self.configs.lock().get_mut(&channel_id) {
+            ch.record_preset = Some(preset_id.to_string());
+        }
+        let mut map = self.channels.lock();
+        let pipe = map
+            .get_mut(&channel_id)
+            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+        pipe.apply_record_preset(preset_id, preset)
     }
 
     fn start_capture(&self, channel_id: u32) -> Result<()> {

@@ -57,6 +57,7 @@ pub fn stream_json(orch: &Orchestrator, _ui: &UiState, id: u32) -> Option<Value>
         "error": ch.last_error.unwrap_or_default(),
         "format": ch.input_format.unwrap_or_default(),
         "encode_preset": ch.encode_preset,
+        "record_preset": ch.record_preset,
         "hls_url": format!("/hls/{}/preview.m3u8", ch.id),
         "preview_epoch": ch.preview_epoch,
         "backend": "media_engine",

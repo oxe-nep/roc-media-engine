@@ -4,9 +4,14 @@ export PATH=/home/oxe/.cargo/bin:/usr/bin:/bin
 BASE=http://127.0.0.1:8080
 CH=4
 
+# Proxy stays HQ NVENC; REC uses DNxHD mezz.
 curl -sS -X PUT "$BASE/api/streams/$CH/encode-preset" \
   -H 'Content-Type: application/json' \
-  -d '{"preset":"dnxhd_185"}' | tee /tmp/rme-preset.json
+  -d '{"preset":"hq"}' | tee /tmp/rme-proxy.json
+echo
+curl -sS -X PUT "$BASE/api/streams/$CH/record-preset" \
+  -H 'Content-Type: application/json' \
+  -d '{"preset":"dnxhd_185"}' | tee /tmp/rme-recpreset.json
 echo
 curl -sS -X POST "$BASE/api/streams/$CH/start" >/dev/null || true
 sleep 4
@@ -14,7 +19,10 @@ curl -sS "$BASE/api/channels" -o /tmp/rme-chs.json
 python3 - <<'PY'
 import json
 c=next(x for x in json.load(open("/tmp/rme-chs.json"))["channels"] if x["id"]==4)
-print("status", c["status"], "preset", c["encode_preset"], "err", c.get("last_error"))
+print("status", c["status"],
+      "proxy", c.get("encode_preset"),
+      "rec", c.get("record_preset"),
+      "err", c.get("last_error"))
 PY
 
 curl -sS -X PUT "$BASE/api/recordings/$CH/name" \
@@ -39,5 +47,5 @@ else
 fi
 
 curl -sS -X POST "$BASE/api/streams/$CH/stop" >/dev/null || true
-curl -sS -X PUT "$BASE/api/streams/$CH/encode-preset" \
+curl -sS -X PUT "$BASE/api/streams/$CH/record-preset" \
   -H 'Content-Type: application/json' -d '{"preset":"hq"}' >/dev/null || true

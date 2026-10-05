@@ -25,6 +25,7 @@ pub fn router(orch: Arc<Orchestrator>) -> Router {
         .route("/api/channels/{id}/srt/start", post(start_srt))
         .route("/api/channels/{id}/srt/stop", post(stop_srt))
         .route("/api/channels/{id}/encode-preset", post(set_encode_preset))
+        .route("/api/channels/{id}/record-preset", post(set_record_preset))
         .route("/api/meters", get(meters))
         .route("/api/adapter/manifest", get(adapter_manifest))
         .with_state(orch)
@@ -149,6 +150,20 @@ async fn set_encode_preset(
     }
     let snap = orch
         .set_encode_preset(id, body.preset.trim())
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::to_value(snap).unwrap()))
+}
+
+async fn set_record_preset(
+    State(orch): State<ApiState>,
+    Path(id): Path<u32>,
+    Json(body): Json<EncodePresetBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if body.preset.trim().is_empty() {
+        return Err(ApiError::bad_request("preset is required"));
+    }
+    let snap = orch
+        .set_record_preset(id, body.preset.trim())
         .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }

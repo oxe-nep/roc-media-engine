@@ -22,6 +22,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/streams/{id}/stop", post(stop_stream))
         .route("/api/streams/{id}/logs", get(stream_logs))
         .route("/api/streams/{id}/encode-preset", put(set_stream_preset))
+        .route("/api/streams/{id}/record-preset", put(set_stream_record_preset))
         .route("/api/recordings", get(list_recordings))
         .route("/api/recordings/{id}/start", post(start_recording))
         .route("/api/recordings/{id}/stop", post(stop_recording))
@@ -113,6 +114,19 @@ async fn set_stream_preset(
 ) -> Result<Json<Value>, UiError> {
     st.orch
         .set_encode_preset(id, body.preset.trim())
+        .map_err(UiError::from)?;
+    snapshot::stream_json(st.orch.as_ref(), st.ui.as_ref(), id)
+        .map(Json)
+        .ok_or_else(|| UiError::not_found("channel not found"))
+}
+
+async fn set_stream_record_preset(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+    Json(body): Json<PresetBody>,
+) -> Result<Json<Value>, UiError> {
+    st.orch
+        .set_record_preset(id, body.preset.trim())
         .map_err(UiError::from)?;
     snapshot::stream_json(st.orch.as_ref(), st.ui.as_ref(), id)
         .map(Json)

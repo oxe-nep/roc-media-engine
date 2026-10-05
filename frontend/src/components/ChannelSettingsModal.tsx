@@ -5,6 +5,7 @@ import {
   fetchSrt,
   fetchStreamLogs,
   setEncodePreset,
+  setRecordPreset,
   setRecordingCategory,
   setRecordingName,
   setRecordingSchedule,
@@ -22,6 +23,7 @@ import {
   isCaptureOn,
 } from "@/lib/api";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
+import { isProxyPreset } from "@/lib/presetRoles";
 
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
@@ -62,7 +64,8 @@ export default function ChannelSettingsModal({
 }: Props) {
   const [name, setName] = useState("");
   const [category, setCategory] = useState("_unsorted");
-  const [preset, setPreset] = useState("");
+  const [proxyPreset, setProxyPreset] = useState("");
+  const [recPreset, setRecPreset] = useState("");
   const [busy, setBusy] = useState(false);
   const [srtBusy, setSrtBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -79,7 +82,7 @@ export default function ChannelSettingsModal({
   const [logs, setLogs] = useState<string[]>([]);
   const [logsOpen, setLogsOpen] = useState(false);
   const logBoxRef = useRef<HTMLPreElement>(null);
-  const baselineRef = useRef({ name: "", category: "", preset: "" });
+  const baselineRef = useRef({ name: "", category: "", proxyPreset: "", recPreset: "" });
 
   useBodyScrollLock(open);
 
@@ -88,20 +91,25 @@ export default function ChannelSettingsModal({
   const isRecording = recording?.status === "recording";
   const channelId = stream?.id;
   const srtStreaming = srt?.status === "streaming";
+  const proxyPresets = presets.filter(isProxyPreset);
+  const recPresets = presets;
 
   // Hydrate once when the modal opens for a channel — not on every 1s poll.
   useEffect(() => {
     if (!open || channelId == null || !stream) return;
     const nextName = recording?.name || `ch${channelId}`;
     const nextCategory = recording?.category || "_unsorted";
-    const nextPreset = stream.encode_preset || "";
+    const nextProxy = stream.encode_preset || "";
+    const nextRec = stream.record_preset || stream.encode_preset || "";
     setName(nextName);
     setCategory(nextCategory);
-    setPreset(nextPreset);
+    setProxyPreset(nextProxy);
+    setRecPreset(nextRec);
     baselineRef.current = {
       name: nextName,
       category: nextCategory,
-      preset: nextPreset,
+      proxyPreset: nextProxy,
+      recPreset: nextRec,
     };
     setError(null);
     setSrtPassphrase("");
@@ -186,21 +194,29 @@ export default function ChannelSettingsModal({
     try {
       const baseline = baselineRef.current;
       const cleanName = name.trim();
-      if (cleanName && cleanName !== baseline.name) {
+      const nameChanged = Boolean(cleanName && cleanName !== baseline.name);
+      const categoryChanged = Boolean(category && category !== baseline.category);
+      if (nameChanged) {
         await setRecordingName(stream.id, cleanName);
       }
-      if (category && category !== baseline.category) {
+      if (categoryChanged) {
         await setRecordingCategory(stream.id, category);
       }
-      const presetChanged = Boolean(preset && preset !== baseline.preset);
-      if (presetChanged) {
-        await setEncodePreset(stream.id, preset);
+      const proxyChanged = Boolean(proxyPreset && proxyPreset !== baseline.proxyPreset);
+      const recChanged = Boolean(recPreset && recPreset !== baseline.recPreset);
+      if (proxyChanged) {
+        await setEncodePreset(stream.id, proxyPreset);
+      }
+      if (recChanged) {
+        await setRecordPreset(stream.id, recPreset);
       }
 
-      // Backend restarts capture (and restores SRT) when the preset changes on
-      // a live channel. Otherwise bounce capture so a stopped channel starts
-      // (e.g. after TC → Encode) and name-only saves keep the previous behavior.
-      if (!(presetChanged && captureOn)) {
+      // Backend relaunches when proxy preset changes on a live channel.
+      // REC preset alone applies on the next recording — no bounce needed.
+      const skipBounce =
+        (proxyChanged && captureOn) ||
+        (recChanged && !proxyChanged && !nameChanged && !categoryChanged && captureOn);
+      if (!skipBounce) {
         try {
           await stopSrt(stream.id);
         } catch {
@@ -378,13 +394,28 @@ export default function ChannelSettingsModal({
           </label>
 
           <label className="presets-field">
-            <span>Preset</span>
+            <span>Proxy preset</span>
             <select
-              value={preset}
-              onChange={(e) => setPreset(e.target.value)}
-              disabled={busy || isRecording || presets.length === 0}
+              value={proxyPreset}
+              onChange={(e) => setProxyPreset(e.target.value)}
+              disabled={busy || isRecording || proxyPresets.length === 0}
             >
-              {presets.map((p) => (
+              {proxyPresets.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="presets-field">
+            <span>REC preset</span>
+            <select
+              value={recPreset}
+              onChange={(e) => setRecPreset(e.target.value)}
+              disabled={busy || isRecording || recPresets.length === 0}
+            >
+              {recPresets.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.label}
                 </option>

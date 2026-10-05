@@ -74,9 +74,10 @@ fn main() -> Result<()> {
         let cfg = roc_config::Config::example();
         let backend = roc_pipelines::mock::MockBackend::new(cfg.max_nvenc_sessions);
         let ch = &cfg.channels[0];
-        let preset = cfg.preset_for_channel(ch)?;
+        let encode = cfg.preset_for_channel(ch)?;
+        let record = cfg.record_preset_for_channel(ch)?;
         use roc_pipelines::PipelineBackend;
-        backend.ensure_channel(ch, preset)?;
+        backend.ensure_channel(ch, encode, record)?;
         backend.start_capture(ch.id)?;
         backend.start_recording(ch.id, &args.output.to_string_lossy())?;
         println!("mock running {}s …", args.duration_secs);

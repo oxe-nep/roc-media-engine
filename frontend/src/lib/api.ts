@@ -13,6 +13,8 @@ export interface Stream {
   error?: string;
   format?: string;
   encode_preset: string;
+  /** Mezz/REC encode preset (falls back to encode_preset when unset). */
+  record_preset?: string;
   hls_url: string;
   /** Bumps when capture graph relaunches — remount HLS players. */
   preview_epoch?: number;
@@ -85,6 +87,18 @@ export async function setEncodePreset(id: number, preset: string): Promise<Strea
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `setEncodePreset: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function setRecordPreset(id: number, preset: string): Promise<Stream> {
+  const res = await apiFetch(`/api/streams/${id}/record-preset`, {
+    method: "PUT",
+    body: JSON.stringify({ preset }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `setRecordPreset: ${res.status}`);
   }
   return res.json();
 }

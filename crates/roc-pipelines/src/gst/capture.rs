@@ -80,6 +80,42 @@ fn arm_av_gate_on_keyframe(video_identity: &gstreamer::Element, gate: std::sync:
     });
 }
 
+/// Hot-attach onto a live tee often skips a fresh TIME segment, so
+/// `identity single-segment` alone leaves PTS in the running domain and
+/// `mxfmux` aborts on `index_pos_diff`. Rewrite PTS/DTS from 0 with a fixed
+/// frame duration derived from caps (fallback 50 fps).
+fn arm_mezz_pts_reset(video_identity: &gstreamer::Element, frame_duration_ns: u64) {
+    use gstreamer::{ClockTime, PadProbeReturn, PadProbeType};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let Some(pad) = video_identity.static_pad("src") else {
+        return;
+    };
+    let base = Arc::new(AtomicU64::new(u64::MAX));
+    let frame_i = Arc::new(AtomicU64::new(0));
+    pad.add_probe(PadProbeType::BUFFER, move |_, info| {
+        let Some(buf) = info.buffer_mut() else {
+            return PadProbeReturn::Ok;
+        };
+        let buf = buf.make_mut();
+        let pts_ns = buf.pts().map(|t| t.nseconds()).unwrap_or(0);
+        let mut b = base.load(Ordering::SeqCst);
+        if b == u64::MAX {
+            base.store(pts_ns, Ordering::SeqCst);
+            b = pts_ns;
+        }
+        let i = frame_i.fetch_add(1, Ordering::SeqCst);
+        // Prefer sequential CFR timestamps — more stable for mxfmux than raw delta.
+        let out = i.saturating_mul(frame_duration_ns);
+        buf.set_pts(ClockTime::from_nseconds(out));
+        buf.set_dts(ClockTime::from_nseconds(out));
+        buf.set_duration(ClockTime::from_nseconds(frame_duration_ns));
+        let _ = b; // base kept for diagnostics if we switch back to delta mode
+        PadProbeReturn::Ok
+    });
+}
+
 /// Wire `appsink srt_in` → gated `appsrc` → `srtsink`.
 ///
 /// Pad-probe Drop was leaking poison BUFFER_LISTs (open-chunk dump was clean A/V
@@ -691,9 +727,12 @@ mod srt_uri_tests {
 pub struct ChannelPipeline {
     pub id: u32,
     pub name: String,
-    /// Config key (`hq`, `proxy`, …) — what UI/Go send on preset change.
+    /// Live/proxy preset key (`hq`, `proxy`, …).
     pub encode_preset_id: String,
     pub encode_preset_label: String,
+    /// REC preset key (may be mezz).
+    pub record_preset_id: String,
+    pub record_preset_label: String,
     pub status: ChannelStatus,
     pub recording: bool,
     pub srt: bool,
@@ -706,7 +745,10 @@ pub struct ChannelPipeline {
     /// Mode locked into the running graph.
     locked_mode: String,
     detected: Option<InputFormat>,
+    /// Live/proxy encode settings (NVENC path).
     preset: EncodePreset,
+    /// Recording encode settings (NVENC bitstream or mezz from raw tee).
+    record_preset: EncodePreset,
     udp_egress: Option<String>,
     parse_element: String,
     pipeline: Option<gstreamer::Pipeline>,
@@ -743,16 +785,22 @@ fn parse_element_for_codec(video_codec: &str) -> &'static str {
 }
 
 impl ChannelPipeline {
-    pub fn new(ch: &ChannelConfig, preset: &EncodePreset) -> Result<Self> {
-        let preset_id = ch
+    pub fn new(ch: &ChannelConfig, encode: &EncodePreset, record: &EncodePreset) -> Result<Self> {
+        let encode_id = ch
             .encode_preset
             .clone()
             .unwrap_or_else(|| "hq".into());
+        let record_id = ch
+            .record_preset
+            .clone()
+            .unwrap_or_else(|| encode_id.clone());
         Ok(Self {
             id: ch.id,
             name: ch.name.clone(),
-            encode_preset_id: preset_id,
-            encode_preset_label: preset.label.clone(),
+            encode_preset_id: encode_id,
+            encode_preset_label: encode.label.clone(),
+            record_preset_id: record_id,
+            record_preset_label: record.label.clone(),
             status: ChannelStatus::Stopped,
             recording: false,
             srt: false,
@@ -766,8 +814,9 @@ impl ChannelPipeline {
                 .unwrap_or_else(|| "auto".into()),
             locked_mode: String::new(),
             detected: None,
-            parse_element: parse_element_for_codec(&preset.video_codec).to_string(),
-            preset: preset.clone(),
+            parse_element: parse_element_for_codec(&record.video_codec).to_string(),
+            preset: encode.clone(),
+            record_preset: record.clone(),
             udp_egress: ch.udp_egress.clone(),
             pipeline: None,
             rec_branch: None,
@@ -779,24 +828,39 @@ impl ChannelPipeline {
         })
     }
 
-    pub fn update_config(&mut self, ch: &ChannelConfig, preset: &EncodePreset) {
+    pub fn update_config(
+        &mut self,
+        ch: &ChannelConfig,
+        encode: &EncodePreset,
+        record: &EncodePreset,
+    ) {
         self.name = ch.name.clone();
         self.device = ch.device.clone();
         self.configured_mode = ch.mode.clone().unwrap_or_else(|| "auto".into());
-        self.preset = preset.clone();
+        self.preset = encode.clone();
+        self.record_preset = record.clone();
         if let Some(id) = &ch.encode_preset {
             self.encode_preset_id = id.clone();
         }
-        self.encode_preset_label = preset.label.clone();
-        self.parse_element = parse_element_for_codec(&preset.video_codec).to_string();
+        self.encode_preset_label = encode.label.clone();
+        if let Some(id) = &ch.record_preset {
+            self.record_preset_id = id.clone();
+        } else if let Some(id) = &ch.encode_preset {
+            self.record_preset_id = id.clone();
+        }
+        self.record_preset_label = record.label.clone();
+        self.parse_element = parse_element_for_codec(&record.video_codec).to_string();
         self.udp_egress = ch.udp_egress.clone();
         if self.srt_url.is_none() {
             self.srt_url = ch.srt_url.clone();
         }
     }
 
-    /// Apply a new encode preset. Relunches the capture graph when live (preserves REC/SRT).
+    /// Apply a new live/proxy encode preset. Relunches when live (preserves REC/SRT).
     pub fn apply_encode_preset(&mut self, preset_id: &str, preset: &EncodePreset) -> Result<()> {
+        if roc_config::is_mezz_codec(&preset.video_codec) {
+            bail!("mezz codecs belong on the record preset — pick an NVENC proxy for live/SRT");
+        }
         if self.recording {
             bail!("stop recording before changing encode preset");
         }
@@ -807,12 +871,11 @@ impl ChannelPipeline {
         self.encode_preset_id = preset_id.to_string();
         self.encode_preset_label = preset.label.clone();
         self.preset = preset.clone();
-        self.parse_element = parse_element_for_codec(&preset.video_codec).to_string();
         if !live {
             tracing::info!(
                 channel = self.id,
                 preset_id,
-                "encode preset updated (applies on next start)"
+                "encode (proxy) preset updated (applies on next start)"
             );
             return Ok(());
         }
@@ -825,9 +888,27 @@ impl ChannelPipeline {
             channel = self.id,
             preset_id,
             %mode,
-            "encode preset changed — relaunching capture"
+            "encode (proxy) preset changed — relaunching capture"
         );
         self.relaunch_preserving_branches(&mode)
+    }
+
+    /// Apply REC preset. No graph relaunch; used on next start_recording.
+    pub fn apply_record_preset(&mut self, preset_id: &str, preset: &EncodePreset) -> Result<()> {
+        if self.recording {
+            bail!("stop recording before changing record preset");
+        }
+        self.record_preset_id = preset_id.to_string();
+        self.record_preset_label = preset.label.clone();
+        self.record_preset = preset.clone();
+        self.parse_element = parse_element_for_codec(&preset.video_codec).to_string();
+        tracing::info!(
+            channel = self.id,
+            preset_id,
+            codec = %preset.video_codec,
+            "record preset updated"
+        );
+        Ok(())
     }
 
     fn relaunch_preserving_branches(&mut self, mode: &str) -> Result<()> {
@@ -1089,7 +1170,7 @@ impl ChannelPipeline {
     }
 
     fn attach_recording(&mut self, path: &str) -> Result<()> {
-        if roc_config::is_mezz_codec(&self.preset.video_codec) {
+        if roc_config::is_mezz_codec(&self.record_preset.video_codec) {
             self.attach_mezz_recording(path)
         } else {
             self.attach_encoded_recording(path)
@@ -1224,8 +1305,8 @@ impl ChannelPipeline {
             .clone();
         let tee = self.raw_tee()?;
         let audio_tee = pipeline.by_name("a");
-        let codec = self.preset.video_codec.to_ascii_lowercase();
-        let bitrate = crate::parse_bitrate(&self.preset.video_bitrate).unwrap_or(185_000_000);
+        let codec = self.record_preset.video_codec.to_ascii_lowercase();
+        let bitrate = crate::parse_bitrate(&self.record_preset.video_bitrate).unwrap_or(185_000_000);
 
         let queue_v = gstreamer::ElementFactory::make("queue")
             .name(format!("q_rec_v_{}", self.id))
@@ -1238,12 +1319,30 @@ impl ChannelPipeline {
             .name(format!("vconv_rec_{}", self.id))
             .build()
             .context("videoconvert")?;
+        let (fps_n, fps_d) = self
+            .detected
+            .as_ref()
+            .map(|f| {
+                // After deinterlace, field rate becomes frame rate.
+                if f.interlaced {
+                    (f.fps_num.saturating_mul(2).max(1), f.fps_den.max(1))
+                } else {
+                    (f.fps_num.max(1), f.fps_den.max(1))
+                }
+            })
+            .unwrap_or((50, 1));
+        let frame_duration_ns = 1_000_000_000u64
+            .saturating_mul(fps_d as u64)
+            .saturating_div(fps_n as u64)
+            .max(1);
         let caps = gstreamer::ElementFactory::make("capsfilter")
             .name(format!("caps_rec_{}", self.id))
             .property(
                 "caps",
-                gstreamer::Caps::from_str("video/x-raw,format=Y42B")
-                    .context("Y42B caps")?,
+                gstreamer::Caps::from_str(&format!(
+                    "video/x-raw,format=Y42B,framerate={fps_n}/{fps_d}"
+                ))
+                .context("Y42B caps")?,
             )
             .build()
             .context("capsfilter")?;
@@ -1254,9 +1353,6 @@ impl ChannelPipeline {
             .context("timecodestamper")?;
         let _ = tc.set_property_from_str("source", "rtc");
         let _ = tc.set_property_from_str("set", "always");
-        // Hot-attach onto a live tee: reset TIME segment so mxfmux does not
-        // assert on huge index_pos_diff from upstream running PTS.
-        let id_v = make_mux_ts_align(&format!("id_rec_v_{}", self.id))?;
 
         let (enc, parse_opt, mux_name): (gstreamer::Element, Option<gstreamer::Element>, &str) =
             if codec.contains("dnx") {
@@ -1285,8 +1381,12 @@ impl ChannelPipeline {
                 let _ = parse.set_property_from_str("config-interval", "-1");
                 (enc, Some(parse), "mxfmux")
             } else {
-                bail!("unsupported mezz codec {}", self.preset.video_codec);
+                bail!("unsupported mezz codec {}", self.record_preset.video_codec);
             };
+
+        // Hot-attach onto a live tee: reset TIME segment *after* encode so
+        // mxfmux sees pts≈0 (raw-side identity alone is not enough for avenc).
+        let id_v = make_mux_ts_align(&format!("id_rec_v_{}", self.id))?;
 
         let mux = gstreamer::ElementFactory::make(mux_name)
             .name(format!("mux_rec_{}", self.id))
@@ -1305,19 +1405,18 @@ impl ChannelPipeline {
             convert.clone(),
             caps.clone(),
             tc.clone(),
-            id_v.clone(),
             enc.clone(),
+            id_v.clone(),
             mux.clone(),
             sink.clone(),
         ];
         pipeline.add_many([
-            &queue_v, &convert, &caps, &tc, &id_v, &enc, &mux, &sink,
+            &queue_v, &convert, &caps, &tc, &enc, &id_v, &mux, &sink,
         ])?;
         queue_v.link(&convert).context("mezz queue→convert")?;
         convert.link(&caps).context("mezz convert→caps")?;
         caps.link(&tc).context("mezz caps→timecode")?;
-        tc.link(&id_v).context("mezz timecode→identity")?;
-        id_v.link(&enc).context("mezz identity→enc")?;
+        tc.link(&enc).context("mezz timecode→enc")?;
         if let Some(parse) = &parse_opt {
             pipeline.add(parse)?;
             // High 4:2:2 Intra profile for XAVC-HD-style Intra.
@@ -1333,21 +1432,30 @@ impl ChannelPipeline {
             pipeline.add(&profile_caps)?;
             enc.link(&profile_caps).context("xavc enc→profile")?;
             profile_caps.link(parse).context("xavc profile→parse")?;
-            parse.link(&mux).context("xavc parse→mux")?;
+            parse.link(&id_v).context("xavc parse→identity")?;
             elements.push(profile_caps);
             elements.push(parse.clone());
         } else {
-            enc.link(&mux).context("dnxhd enc→mux")?;
+            enc.link(&id_v).context("dnxhd enc→identity")?;
         }
+        id_v.link(&mux).context("mezz identity→mux")?;
         mux.link(&sink).context("mezz mux→sink")?;
 
+        // Gate PCM until the first video buffer reaches post-encode identity so
+        // mxfmux does not open on audio alone with a huge running PTS.
+        let av_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut audio_tee_pads = Vec::new();
         if let Some(a_tee) = audio_tee {
-            // MXF path: stereo PCM (voaacenc bitrates in mezz presets exceed live AAC limits).
             match self.link_mezz_pcm(&pipeline, &a_tee, &mux, "rec") {
                 Ok((a_pads, audio_els)) => {
+                    for el in &audio_els {
+                        if el.name().starts_with("q_rec_pcm") {
+                            install_av_start_gate(el, av_gate.clone());
+                        }
+                    }
                     audio_tee_pads = a_pads;
                     elements.extend(audio_els);
+                    install_mux_av_sync_log("mezz");
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -1364,6 +1472,14 @@ impl ChannelPipeline {
                 .context("sync_state_with_parent mezz record")?;
         }
 
+        // Force CFR timestamps into mxfmux (hot-attach skips a fresh segment).
+        arm_mezz_pts_reset(&id_v, frame_duration_ns);
+
+        if !audio_tee_pads.is_empty() {
+            // Intra codecs: every frame is a keyframe — first buffer opens the gate.
+            arm_av_gate_on_keyframe(&id_v, av_gate);
+        }
+
         let tee_pad = tee
             .request_pad_simple("src_%u")
             .ok_or_else(|| anyhow!("raw tee request_pad failed"))?;
@@ -1377,7 +1493,7 @@ impl ChannelPipeline {
         tracing::info!(
             channel = self.id,
             %path,
-            codec = %self.preset.video_codec,
+            codec = %self.record_preset.video_codec,
             mux = mux_name,
             bitrate,
             audio_pads = audio_tee_pads.len(),
@@ -1391,7 +1507,8 @@ impl ChannelPipeline {
         Ok(())
     }
 
-    /// Stereo PCM into MXF — first two channels via audioconvert.
+    /// PCM into MXF — stereo pairs from the 8ch raw tee via mix-matrix.
+    /// `audio_channels >= 8` → four stereo PCM tracks (ch 1–2 … 7–8).
     fn link_mezz_pcm(
         &self,
         pipeline: &gstreamer::Pipeline,
@@ -1399,44 +1516,55 @@ impl ChannelPipeline {
         mux: &gstreamer::Element,
         tag: &str,
     ) -> Result<(Vec<gstreamer::Pad>, Vec<gstreamer::Element>)> {
-        let queue_a = gstreamer::ElementFactory::make("queue")
-            .name(format!("q_{tag}_pcm_{}", self.id))
-            .property("max-size-buffers", 64u32)
-            .property("max-size-bytes", 0u32)
-            .property("max-size-time", gstreamer::ClockTime::from_mseconds(250))
-            .build()
-            .context("pcm queue")?;
-        let id_a = make_mux_ts_align(&format!("id_{tag}_pcm_{}", self.id))?;
-        let aconv = gstreamer::ElementFactory::make("audioconvert")
-            .name(format!("aconv_{tag}_{}", self.id))
-            .build()
-            .context("audioconvert")?;
-        let acaps = gstreamer::ElementFactory::make("capsfilter")
-            .name(format!("acaps_{tag}_{}", self.id))
-            .property(
-                "caps",
-                gstreamer::Caps::from_str(
-                    "audio/x-raw,format=S24LE,channels=2,rate=48000,layout=interleaved",
-                )
-                .context("pcm caps")?,
-            )
-            .build()
-            .context("pcm capsfilter")?;
+        let pairs = if self.record_preset.audio_channels >= 8 {
+            4
+        } else {
+            1
+        };
+        let mut pads = Vec::with_capacity(pairs);
+        let mut els = Vec::with_capacity(pairs * 3);
 
-        pipeline.add_many([&queue_a, &id_a, &aconv, &acaps])?;
-        queue_a.link(&id_a).context("pcm queue→identity")?;
-        id_a.link(&aconv).context("pcm identity→aconv")?;
-        aconv.link(&acaps).context("pcm aconv→caps")?;
-        acaps.link(mux).context("pcm→mxfmux")?;
+        for pair in 0..pairs {
+            let queue_a = gstreamer::ElementFactory::make("queue")
+                .name(format!("q_{tag}_pcm{pair}_{}", self.id))
+                .property("max-size-buffers", 64u32)
+                .property("max-size-bytes", 0u32)
+                .property("max-size-time", gstreamer::ClockTime::from_mseconds(250))
+                .build()
+                .context("pcm queue")?;
+            let id_a = make_mux_ts_align(&format!("id_{tag}_pcm{pair}_{}", self.id))?;
+            // Same parse style as AAC bins — avoid bare `format=S24LE` after mix-matrix.
+            let matrix = stereo_pair_matrix(pair);
+            let desc = format!(
+                "audioconvert mix-matrix=\"{matrix}\" ! \
+                 audio/x-raw,channels=2,rate=48000,layout=interleaved ! \
+                 capsfilter caps=audio/x-raw,format=S24LE,channels=2,rate=48000,layout=interleaved"
+            );
+            let abin = gstreamer::parse::bin_from_description(&desc, true)
+                .with_context(|| format!("mezz pcm bin pair {pair}: {desc}"))?;
+            abin.set_property("name", format!("{tag}_pcm{pair}_bin_{}", self.id));
+            let abin_el: gstreamer::Element = abin.upcast();
 
-        let tee_pad = a_tee
-            .request_pad_simple("src_%u")
-            .ok_or_else(|| anyhow!("audio tee pad"))?;
-        let sink = queue_a
-            .static_pad("sink")
-            .ok_or_else(|| anyhow!("pcm queue sink"))?;
-        tee_pad.link(&sink).context("link audio tee→pcm")?;
-        Ok((vec![tee_pad], vec![queue_a, id_a, aconv, acaps]))
+            pipeline.add_many([&queue_a, &abin_el, &id_a])?;
+            queue_a.link(&abin_el).context("pcm queue→bin")?;
+            abin_el.link(&id_a).context("pcm bin→identity")?;
+            id_a.link(mux).context("pcm→mxfmux")?;
+
+            let tee_pad = a_tee
+                .request_pad_simple("src_%u")
+                .ok_or_else(|| anyhow!("audio tee pad"))?;
+            let sink = queue_a
+                .static_pad("sink")
+                .ok_or_else(|| anyhow!("pcm queue sink"))?;
+            tee_pad.link(&sink).context("link audio tee→pcm")?;
+
+            pads.push(tee_pad);
+            els.push(queue_a);
+            els.push(abin_el);
+            els.push(id_a);
+        }
+
+        Ok((pads, els))
     }
 
     /// Stereo AAC pair(s) into an existing mux (mp4mux / mpegtsmux).
@@ -1452,9 +1580,9 @@ impl ChannelPipeline {
         tag: &str,
         ts_align: bool,
     ) -> Result<(Vec<gstreamer::Pad>, Vec<gstreamer::Element>)> {
-        let pairs = aac_stereo_pairs(self.preset.audio_channels);
+        let pairs = aac_stereo_pairs(self.record_preset.audio_channels);
         let hold_ms = if ts_align { 40u64 } else { 0 };
-        let aac_bps = crate::parse_bitrate(&self.preset.audio_bitrate).unwrap_or(192_000);
+        let aac_bps = crate::parse_bitrate(&self.record_preset.audio_bitrate).unwrap_or(192_000);
         let mut pads = Vec::with_capacity(pairs);
         let mut els = Vec::new();
 
@@ -1742,6 +1870,7 @@ impl ChannelPipeline {
             name: self.name.clone(),
             status: self.status,
             encode_preset: self.encode_preset_id.clone(),
+            record_preset: self.record_preset_id.clone(),
             video_bitrate_kbps: self.encode_bitrate.kbps(),
             srt_bitrate_kbps: self.srt_bitrate.as_ref().and_then(|m| m.kbps()),
             recording: self.recording,

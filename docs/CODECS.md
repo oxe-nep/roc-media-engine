@@ -25,8 +25,10 @@ real-time clock. Capture host has **no PTP**; chrony syncs RTC from LAN NTP:
 Install/refresh: [`deploy/remote-ntp-roc.sh`](../deploy/remote-ntp-roc.sh) +
 [`deploy/chrony-roc-ntp.sources`](../deploy/chrony-roc-ntp.sources).
 
-When a mezz preset is selected, SRT/UDP/preview keep a fixed H.264 NVENC proxy;
-only the REC branch switches to DNxHD/XAVC.
+When `record_preset` is a mezz codec (`dnxhd_*` / `xavc_*`), SRT/UDP/preview
+keep the channel's `encode_preset` (NVENC proxy); only the REC branch uses the
+mezz encoder from raw tee `t`. Proxy and REC are selected independently in the
+UI (`encode_preset` vs `record_preset`).
 
 ## Later
 
@@ -39,4 +41,4 @@ only the REC branch switches to DNxHD/XAVC.
 ## Deferred audio
 
 Full 8ch AAC (4× pairs) on SRT/REC remains deferred; stereo default stays.
-Mezz MXF uses stereo PCM for both DNxHD and XAVC.
+Mezz MXF uses PCM (stereo or 8ch as four stereo pairs) for both DNxHD and XAVC.

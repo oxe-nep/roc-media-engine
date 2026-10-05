@@ -146,10 +146,19 @@ export default function StreamGrid() {
           const isListeningPair = listenPair[s.id] ?? null;
           const srtOn = srtById[s.id]?.status === "streaming";
           const activePreset = presets.find((p) => p.id === s.encode_preset);
+          const activeRecPreset = presets.find(
+            (p) => p.id === (s.record_preset || s.encode_preset),
+          );
           const cat = rec?.category || "_unsorted";
           const captureOn = isCaptureOn(s.status);
           const hasSignal = s.status === "running";
           const tslText = s.tsl_text?.trim();
+          const proxyLabel = activePreset?.label || s.encode_preset || null;
+          const recLabel =
+            activeRecPreset?.label || s.record_preset || s.encode_preset || null;
+          const dualPreset =
+            Boolean(proxyLabel && recLabel) &&
+            (s.record_preset || s.encode_preset) !== s.encode_preset;
           return (
             <div key={s.id} className={`card-panel ${s.status}`}>
               <div className="card-stage">
@@ -219,7 +228,9 @@ export default function StreamGrid() {
                         title={[
                           s.format || (s.status === "waiting" ? "No signal" : null),
                           cat === "_unsorted" ? "Unsorted" : cat,
-                          activePreset?.label || s.encode_preset || null,
+                          dualPreset
+                            ? `Proxy ${proxyLabel} · REC ${recLabel}`
+                            : proxyLabel,
                         ]
                           .filter(Boolean)
                           .join(" · ")}
@@ -240,7 +251,9 @@ export default function StreamGrid() {
                         </span>
                         <span className="card-meta-sep">·</span>
                         <span className="card-meta-item">
-                          {activePreset?.label || s.encode_preset || "—"}
+                          {dualPreset
+                            ? `Proxy ${proxyLabel} · REC ${recLabel}`
+                            : proxyLabel || "—"}
                         </span>
                       </div>
                     </div>

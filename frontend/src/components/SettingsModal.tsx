@@ -13,7 +13,7 @@ import { useWorkflows } from "@/hooks/useWorkflows";
 import { WORKFLOW_OPTIONS, workflowMode, type ChannelWorkflowMode } from "@/lib/workflow";
 import EncodePresetsEditor from "@/components/EncodePresetsEditor";
 
-type Tab = "storage" | "presets" | "workflows";
+type Tab = "storage" | "proxy-presets" | "rec-presets" | "workflows";
 
 type Props = {
   open: boolean;
@@ -103,10 +103,13 @@ export default function SettingsModal({
       [
         { id: "workflows" as const, label: "Workflows" },
         { id: "storage" as const, label: "Storage" },
-        { id: "presets" as const, label: "Presets" },
+        { id: "proxy-presets" as const, label: "Proxy presets" },
+        { id: "rec-presets" as const, label: "REC presets" },
       ] satisfies { id: Tab; label: string }[],
     [],
   );
+
+  const presetsLocked = anyRecording;
 
   if (!open) return null;
 
@@ -126,23 +129,27 @@ export default function SettingsModal({
         </div>
 
         <div className="settings-tabs" role="tablist">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              role="tab"
-              aria-selected={tab === t.id}
-              className={`settings-tab${tab === t.id ? " active" : ""}${t.id === "presets" && anyRecording ? " locked" : ""}`}
-              onClick={() => {
-                if (t.id === "presets" && anyRecording) return;
-                setTab(t.id);
-              }}
-              disabled={t.id === "presets" && anyRecording}
-              title={t.id === "presets" && anyRecording ? "Locked while recording" : undefined}
-            >
-              {t.label}
-            </button>
-          ))}
+          {tabs.map((t) => {
+            const isPresetTab = t.id === "proxy-presets" || t.id === "rec-presets";
+            const locked = isPresetTab && presetsLocked;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                role="tab"
+                aria-selected={tab === t.id}
+                className={`settings-tab${tab === t.id ? " active" : ""}${locked ? " locked" : ""}`}
+                onClick={() => {
+                  if (locked) return;
+                  setTab(t.id);
+                }}
+                disabled={locked}
+                title={locked ? "Locked while recording" : undefined}
+              >
+                {t.label}
+              </button>
+            );
+          })}
         </div>
 
         {error && <div className="error-message">{error}</div>}
@@ -173,10 +180,20 @@ export default function SettingsModal({
           </div>
         )}
 
-        {tab === "presets" && (
+        {tab === "proxy-presets" && (
           <EncodePresetsEditor
+            kind="proxy"
             embedded
-            open={tab === "presets"}
+            open={tab === "proxy-presets"}
+            onChanged={() => window.dispatchEvent(new Event("roc-presets-changed"))}
+          />
+        )}
+
+        {tab === "rec-presets" && (
+          <EncodePresetsEditor
+            kind="rec"
+            embedded
+            open={tab === "rec-presets"}
             onChanged={() => window.dispatchEvent(new Event("roc-presets-changed"))}
           />
         )}

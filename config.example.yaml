@@ -65,7 +65,7 @@ encode_presets:
     video_preset: dnxhd
     video_gop: 1
     audio_bitrate: "384k"
-    audio_channels: 2
+    audio_channels: 8
   dnxhd_185:
     label: "DNxHD 185"
     video_codec: avenc_dnxhd
@@ -73,7 +73,7 @@ encode_presets:
     video_preset: dnxhd
     video_gop: 1
     audio_bitrate: "384k"
-    audio_channels: 2
+    audio_channels: 8
   xavc_intra_hd:
     label: "XAVC Intra HD"
     video_codec: xavc_intra
@@ -81,12 +81,14 @@ encode_presets:
     video_preset: intra
     video_gop: 1
     audio_bitrate: "384k"
-    audio_channels: 2
+    audio_channels: 8
 
 channels:
   - id: 1
     name: "Channel 1"
     encode_preset: hq
+    # Optional: REC can differ from live/proxy (e.g. dnxhd_185). Defaults to encode_preset.
+    # record_preset: dnxhd_185
     device: "DeckLink IP 100G (1)"
     mode: "auto"
     udp_egress: "udp://239.255.28.1:21001?pkt_size=1316&reuse=1&ttl=1"

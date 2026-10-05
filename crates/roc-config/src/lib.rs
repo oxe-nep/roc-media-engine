@@ -170,8 +170,12 @@ fn default_audio_channels() -> u32 {
 pub struct ChannelConfig {
     pub id: u32,
     pub name: String,
+    /// Live/proxy encode (NVENC → SRT/UDP/preview).
     #[serde(default)]
     pub encode_preset: Option<String>,
+    /// Recording encode (may be mezz DNxHD/XAVC). Defaults to `encode_preset`.
+    #[serde(default)]
+    pub record_preset: Option<String>,
     /// DeckLink device name, e.g. "DeckLink IP 100G (1)"
     pub device: String,
     #[serde(default)]
@@ -242,6 +246,7 @@ impl Config {
                     id,
                     name: format!("Channel {id}"),
                     encode_preset: Some("hq".into()),
+                    record_preset: Some("hq".into()),
                     device: format!("DeckLink IP 100G ({id})"),
                     connection: None,
                     mode: Some("auto".into()),
@@ -262,11 +267,30 @@ impl Config {
         }
     }
 
-    pub fn preset_for_channel(&self, ch: &ChannelConfig) -> Result<&EncodePreset, ConfigError> {
-        let id = ch
-            .encode_preset
+    /// Live/proxy preset id (SRT/UDP/preview).
+    pub fn encode_preset_id_for_channel<'a>(&'a self, ch: &'a ChannelConfig) -> &'a str {
+        ch.encode_preset
             .as_deref()
-            .unwrap_or(&self.default_encode_preset);
+            .unwrap_or(&self.default_encode_preset)
+    }
+
+    /// REC preset id (falls back to encode/proxy preset).
+    pub fn record_preset_id_for_channel<'a>(&'a self, ch: &'a ChannelConfig) -> &'a str {
+        ch.record_preset
+            .as_deref()
+            .or(ch.encode_preset.as_deref())
+            .unwrap_or(&self.default_encode_preset)
+    }
+
+    pub fn preset_for_channel(&self, ch: &ChannelConfig) -> Result<&EncodePreset, ConfigError> {
+        let id = self.encode_preset_id_for_channel(ch);
+        self.encode_presets
+            .get(id)
+            .ok_or_else(|| ConfigError::MissingPreset(id.to_string()))
+    }
+
+    pub fn record_preset_for_channel(&self, ch: &ChannelConfig) -> Result<&EncodePreset, ConfigError> {
+        let id = self.record_preset_id_for_channel(ch);
         self.encode_presets
             .get(id)
             .ok_or_else(|| ConfigError::MissingPreset(id.to_string()))
@@ -365,7 +389,7 @@ fn default_presets() -> std::collections::HashMap<String, EncodePreset> {
             video_preset: "dnxhd".into(),
             video_gop: 1,
             audio_bitrate: "384k".into(),
-            audio_channels: 2,
+            audio_channels: 8,
         },
     );
     m.insert(
@@ -379,7 +403,7 @@ fn default_presets() -> std::collections::HashMap<String, EncodePreset> {
             video_preset: "dnxhd".into(),
             video_gop: 1,
             audio_bitrate: "384k".into(),
-            audio_channels: 2,
+            audio_channels: 8,
         },
     );
     m.insert(
@@ -394,7 +418,7 @@ fn default_presets() -> std::collections::HashMap<String, EncodePreset> {
             video_preset: "intra".into(),
             video_gop: 1,
             audio_bitrate: "384k".into(),
-            audio_channels: 2,
+            audio_channels: 8,
         },
     );
     m

@@ -53,18 +53,23 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
-    /// File extension for the channel's current encode preset (.mp4 / .mov / .mxf).
+    /// File extension for the channel's current *record* preset (.mp4 / .mxf).
     pub fn recording_ext(&self, id: u32) -> &'static str {
         let preset_id = self
             .backend
             .channel_snapshot(id)
             .ok()
-            .map(|c| c.encode_preset)
+            .map(|c| {
+                if c.record_preset.is_empty() {
+                    c.encode_preset
+                } else {
+                    c.record_preset
+                }
+            })
             .or_else(|| {
-                self.cfg
-                    .channel(id)
-                    .ok()
-                    .and_then(|c| c.encode_preset.clone())
+                self.cfg.channel(id).ok().map(|c| {
+                    self.cfg.record_preset_id_for_channel(c).to_string()
+                })
             })
             .unwrap_or_else(|| self.cfg.default_encode_preset.clone());
         let codec = self
@@ -78,8 +83,9 @@ impl Orchestrator {
 
     pub fn new(cfg: Config, backend: Arc<dyn PipelineBackend>) -> Result<Self> {
         for ch in &cfg.channels {
-            let preset = cfg.preset_for_channel(ch)?;
-            backend.ensure_channel(ch, preset)?;
+            let encode = cfg.preset_for_channel(ch)?;
+            let record = cfg.record_preset_for_channel(ch)?;
+            backend.ensure_channel(ch, encode, record)?;
         }
         let presets = Mutex::new(cfg.encode_presets.clone());
         Ok(Self {
@@ -131,6 +137,16 @@ impl Orchestrator {
                         preset_id = id,
                         error = %e,
                         "failed to reapply updated encode preset"
+                    );
+                }
+            }
+            if ch.record_preset == id {
+                if let Err(e) = self.backend.apply_record_preset(ch.id, id, &preset) {
+                    tracing::warn!(
+                        channel = ch.id,
+                        preset_id = id,
+                        error = %e,
+                        "failed to reapply updated record preset"
                     );
                 }
             }
@@ -245,6 +261,18 @@ impl Orchestrator {
             .with_context(|| format!("encode preset `{preset_id}` not found"))?;
         self.backend
             .apply_encode_preset(id, preset_id, &preset)?;
+        self.backend.channel_snapshot(id)
+    }
+
+    pub fn set_record_preset(&self, id: u32, preset_id: &str) -> Result<ChannelSnapshot> {
+        let preset = self
+            .presets
+            .lock()
+            .get(preset_id)
+            .cloned()
+            .with_context(|| format!("record preset `{preset_id}` not found"))?;
+        self.backend
+            .apply_record_preset(id, preset_id, &preset)?;
         self.backend.channel_snapshot(id)
     }
 
