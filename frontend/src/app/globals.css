@@ -3082,88 +3082,130 @@ body:has(.preview-window-root) .container {
 }
 
 .decode-grid {
-  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  grid-auto-rows: 1fr;
+  align-items: stretch;
+  gap: 12px;
 }
 
 .decode-card {
-  min-height: 0;
+  height: 100%;
+  min-height: 168px;
+  display: flex;
+  flex-direction: column;
 }
 
 .decode-card .decode-row {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-columns: 44px minmax(0, 1fr);
   align-items: stretch;
   min-width: 0;
+  flex: 1;
+  height: 100%;
 }
 
 .decode-card .card-channel-num {
-  flex-basis: 48px;
-  width: 48px;
-  min-width: 48px;
-  font-size: 1.25rem;
+  flex-basis: 44px;
+  width: 44px;
+  min-width: 44px;
+  font-size: 1.2rem;
 }
 
 .decode-body {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
-  padding: 10px 12px 11px;
+  flex: 1;
+  padding: 12px 14px 12px;
 }
 
-.decode-card .card-top {
-  align-items: center;
-  gap: 10px;
+.decode-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
 }
 
 .decode-card .card-name {
-  font-size: 0.9rem;
-}
-
-.decode-card .card-meta {
-  font-size: 0.75rem;
+  font-size: 0.92rem;
+  line-height: 1.25;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.decode-card .card-actions {
+.decode-card .card-meta {
+  font-size: 0.74rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.decode-toolbar {
   display: flex;
-  flex-direction: row;
   align-items: center;
-  flex-shrink: 0;
-  gap: 6px;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
 }
 
 .decode-card .transport {
-  gap: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
 }
 
 .decode-card .ctrl-btn,
 .decode-card .stream-btn {
-  padding: 5px 10px;
+  padding: 6px 11px;
   font-size: 0.72rem;
+}
+
+.decode-card .ctrl-btn.on {
+  background: rgba(74, 144, 226, 0.28);
+  border-color: rgba(74, 144, 226, 0.55);
+}
+
+.decode-stage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  min-height: 64px;
+}
+
+.decode-stage-spacer {
+  flex: 1;
+  min-height: 64px;
+}
+
+.card-error-slot {
+  min-height: 0;
+}
+
+.card-error-slot.has-error {
+  min-height: 1.6rem;
 }
 
 .file-timeline {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  margin-top: 2px;
+  gap: 6px;
   min-width: 0;
 }
 
 .file-timeline-track {
   position: relative;
-  height: 18px;
+  height: 20px;
   display: flex;
   align-items: center;
 }
 
 .file-timeline-range {
   position: absolute;
-  top: 6px;
+  top: 7px;
   height: 6px;
   border-radius: 3px;
   background: rgba(92, 184, 92, 0.35);
@@ -3177,7 +3219,7 @@ body:has(.preview-window-root) .container {
   margin: 0;
   appearance: none;
   background: transparent;
-  height: 18px;
+  height: 20px;
   cursor: pointer;
 }
 
@@ -3200,17 +3242,17 @@ body:has(.preview-window-root) .container {
 
 .file-timeline-scrub::-webkit-slider-thumb {
   appearance: none;
-  width: 12px;
-  height: 12px;
-  margin-top: -3px;
+  width: 13px;
+  height: 13px;
+  margin-top: -3.5px;
   border-radius: 50%;
   background: var(--text-primary, #eee);
   border: 0;
 }
 
 .file-timeline-scrub::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
   background: var(--text-primary, #eee);
   border: 0;
@@ -3224,12 +3266,12 @@ body:has(.preview-window-root) .container {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
 }
 
 .file-timeline-clock {
-  font-size: 0.75rem;
+  font-size: 0.76rem;
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
   white-space: nowrap;
@@ -3241,7 +3283,7 @@ body:has(.preview-window-root) .container {
 }
 
 .file-timeline-paused {
-  margin-left: 6px;
+  margin-left: 8px;
   color: #e6d29a;
   font-size: 0.68rem;
   text-transform: uppercase;
@@ -3250,18 +3292,19 @@ body:has(.preview-window-root) .container {
 
 .file-timeline-marks {
   display: flex;
-  gap: 4px;
+  gap: 5px;
   flex-shrink: 0;
 }
 
 .ctrl-btn.tiny {
-  padding: 3px 8px;
+  padding: 4px 9px;
   font-size: 0.68rem;
   letter-spacing: 0.04em;
   min-width: 0;
 }
 
 .file-timeline-mark-meta {
+  min-height: 1rem;
   font-size: 0.7rem;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;

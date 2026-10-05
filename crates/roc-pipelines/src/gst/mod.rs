@@ -176,18 +176,22 @@ fn poll_playout_runtime(p: &mut PlayoutRuntime) {
         if let Some(d) = dur {
             p.duration_sec = Some(d);
         }
-        if let Some(pos) = gst_pos {
-            p.position_sec = Some(pos);
-            if p.is_file && matches!(p.status, ChannelStatus::Running) {
-                if let Some(out) = p.mark_out_sec {
-                    if out > p.mark_in_sec && pos >= out - 0.04 {
-                        if p.loop_file {
-                            seek_to_in = true;
-                        } else if let Err(e) = pipeline.set_state(gstreamer::State::Paused) {
-                            tracing::warn!(client = %p.name, error = %e, "pause at mark-out failed");
-                        } else {
-                            p.status = ChannelStatus::Paused;
-                            p.position_sec = Some(out);
+        // While paused, keep scrubbed/seek position sticky — GST/DeckLink often
+        // still reports EOF until the next Playing preroll.
+        if !matches!(p.status, ChannelStatus::Paused) {
+            if let Some(pos) = gst_pos {
+                p.position_sec = Some(pos);
+                if p.is_file && matches!(p.status, ChannelStatus::Running) {
+                    if let Some(out) = p.mark_out_sec {
+                        if out > p.mark_in_sec && pos >= out - 0.04 {
+                            if p.loop_file {
+                                seek_to_in = true;
+                            } else if let Err(e) = pipeline.set_state(gstreamer::State::Paused) {
+                                tracing::warn!(client = %p.name, error = %e, "pause at mark-out failed");
+                            } else {
+                                p.status = ChannelStatus::Paused;
+                                p.position_sec = Some(out);
+                            }
                         }
                     }
                 }
@@ -208,6 +212,7 @@ fn poll_playout_runtime(p: &mut PlayoutRuntime) {
                 p.position_sec = p.duration_sec.or(p.position_sec);
             }
         }
+        // Ignore EOS while already paused (stale bus after scrub/seek).
     }
 
     if seek_to_in {
@@ -701,14 +706,23 @@ impl PipelineBackend for GstBackend {
             } else {
                 pos
             };
-            if (target - pos).abs() > 0.02 {
+            if (target - pos).abs() > 0.02 || at_out || at_eof {
                 playout_seek_pipeline(&pipe, target, false)?;
             }
             p.position_sec = Some(target);
         }
+        // Wait for scrub preroll to settle before PLAYING (avoids DeckLink state races).
+        let _ = pipe.state(gstreamer::ClockTime::from_mseconds(250));
         pipe.set_state(gstreamer::State::Playing)
             .context("playout PLAYING")?;
+        let (_res, state, pending) = pipe.state(gstreamer::ClockTime::from_seconds(2));
+        if !matches!(state, gstreamer::State::Playing)
+            && !matches!(pending, gstreamer::State::Playing)
+        {
+            bail!("playout PLAYING: Element failed to change its state (state={state:?})");
+        }
         p.status = ChannelStatus::Running;
+        p.last_error = None;
         Ok(())
     }
 
@@ -740,8 +754,17 @@ impl PipelineBackend for GstBackend {
         let paused = matches!(p.status, ChannelStatus::Paused);
         // Accurate seek while paused so in/out scrub lands on the shown frame.
         playout_seek_pipeline(&pipe, target, paused)?;
+        // Drop stale EOS from the previous play-through so poll does not park at EOF.
+        if let Some(bus) = pipe.bus() {
+            while let Some(msg) = bus.timed_pop(gstreamer::ClockTime::ZERO) {
+                if matches!(msg.view(), gstreamer::MessageView::Error(_)) {
+                    // leave for poll
+                }
+            }
+        }
         p.position_sec = Some(target);
         if paused {
+            let _ = pipe.state(gstreamer::ClockTime::from_mseconds(200));
             pipe.set_state(gstreamer::State::Paused)
                 .context("keep playout PAUSED after scrub")?;
         }
