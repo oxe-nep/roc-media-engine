@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-
-const BASE = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8080";
+import { mediaBase } from "@/lib/mediaBase";
 
 interface ThumbnailProps {
   id: number;
@@ -13,7 +12,7 @@ interface ThumbnailProps {
 
 export default function Thumbnail({ id, active, path }: ThumbnailProps) {
   const basePath = path ?? `/thumb/${id}`;
-  const [src, setSrc] = useState(`${BASE}${basePath}?t=${Date.now()}`);
+  const [src, setSrc] = useState(`${mediaBase()}${basePath}?t=${Date.now()}`);
   const [hasError, setHasError] = useState(!active);
 
   useEffect(() => {
@@ -21,9 +20,9 @@ export default function Thumbnail({ id, active, path }: ThumbnailProps) {
       setHasError(true);
       return;
     }
-    setSrc(`${BASE}${basePath}?t=${Date.now()}`);
+    setSrc(`${mediaBase()}${basePath}?t=${Date.now()}`);
     const interval = setInterval(() => {
-      setSrc(`${BASE}${basePath}?t=${Date.now()}`);
+      setSrc(`${mediaBase()}${basePath}?t=${Date.now()}`);
     }, 1000);
     return () => clearInterval(interval);
   }, [id, active, basePath]);

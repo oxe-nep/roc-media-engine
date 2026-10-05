@@ -139,11 +139,12 @@ function MeterBank({ dbs, labels, title }: { dbs: number[]; labels: string[]; ti
   );
 }
 
-/** Prefer HLS listen-pair peaks for all 8 channels; WS delay only as fallback. */
+/** Prefer WS `level` peaks for all 8 channels (synced). HLS banks unused on encode grid. */
 function mergeHlsBanks(
   levels: AudioLevels | undefined,
   banks: HlsMeterBanks,
 ): AudioLevels | undefined {
+  // Encode grid / WebRTC modal: trust GST meters only when no HLS banks are fed.
   const anyHls = banks.some((p) => p != null);
   if (!anyHls) return levels;
   const ch = meterChannels(levels);
@@ -170,8 +171,10 @@ function AudioMetersInner({
 }) {
   const live = useMeterLevels(channelId, bus);
   const delayMs = usePreviewDelayMs();
-  const delayed = useDelayedMeterLevels(live, delayMs);
   const hlsBanks = useHlsMeterBanks();
+  const anyHls = hlsBanks.some((p) => p != null);
+  // JPEG grid / WebRTC modal: show GST `level` meters with no artificial delay.
+  const delayed = useDelayedMeterLevels(live, anyHls ? delayMs : 0);
   const levels = mergeHlsBanks(delayed, hlsBanks);
   const ch = meterChannels(levels);
   if (channels === 2) {

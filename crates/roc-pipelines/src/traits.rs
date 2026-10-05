@@ -40,6 +40,17 @@ pub trait PipelineBackend: Send + Sync {
     fn start_srt(&self, channel_id: u32, url: &str) -> Result<()>;
     fn stop_srt(&self, channel_id: u32) -> Result<()>;
 
+    /// On-demand WebRTC encode preview (sendonly). `pair` is stereo pair 0..=3.
+    fn start_webrtc_preview(
+        &self,
+        channel_id: u32,
+        pair: u8,
+        signal_tx: crate::PreviewSignalTx,
+    ) -> Result<String>;
+    fn set_webrtc_answer(&self, channel_id: u32, sdp: &str) -> Result<()>;
+    fn add_webrtc_ice(&self, channel_id: u32, sdp_mline_index: u32, candidate: &str) -> Result<()>;
+    fn stop_webrtc_preview(&self, channel_id: u32) -> Result<()>;
+
     fn channel_snapshot(&self, channel_id: u32) -> Result<ChannelSnapshot>;
     fn list_channels(&self) -> Vec<ChannelSnapshot>;
 

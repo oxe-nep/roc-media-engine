@@ -2044,6 +2044,38 @@ html {
   animation: library-rise-in 180ms ease-out;
 }
 
+.preview-modal {
+  width: min(1100px, calc(100vw - 24px));
+  height: min(720px, calc(100vh - 24px));
+  max-height: calc(100vh - 24px);
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px 16px;
+}
+
+.preview-modal-status {
+  margin-left: 10px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.preview-modal-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.preview-modal-video {
+  width: 100%;
+  height: 100%;
+  max-height: calc(100vh - 120px);
+  background: #000;
+  object-fit: contain;
+}
+
 .library-modal .modal-header {
   flex-shrink: 0;
 }

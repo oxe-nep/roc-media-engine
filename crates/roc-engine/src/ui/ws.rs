@@ -5,7 +5,11 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::watch;
+use roc_pipelines::{new_preview_signal_tx, PreviewSignal};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use tokio::sync::mpsc;
+use tracing::warn;
 
 use crate::ui::{snapshot, AppState};
 
@@ -14,6 +18,18 @@ pub async fn ws_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
+}
+
+#[derive(Debug, Deserialize)]
+struct ClientMsg {
+    #[serde(rename = "type")]
+    kind: String,
+    channel: Option<u32>,
+    pair: Option<u8>,
+    sdp: Option<String>,
+    candidate: Option<String>,
+    #[serde(default, rename = "sdpMLineIndex")]
+    sdp_mline_index: Option<u32>,
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
@@ -28,28 +44,45 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 
     let mut tick_snap = tokio::time::interval(Duration::from_millis(500));
-    let mut tick_meters = tokio::time::interval(Duration::from_millis(80));
-    // Skip immediate first ticks after connect (already sent snapshot).
+    let mut tick_meters = tokio::time::interval(Duration::from_millis(33));
     tick_snap.tick().await;
     tick_meters.tick().await;
 
-    let (cancel_tx, mut cancel_rx) = watch::channel(false);
-    let reader = tokio::spawn(async move {
-        while let Some(Ok(msg)) = receiver.next().await {
-            if matches!(msg, Message::Close(_) | Message::Text(_)) {
-                // Ignore client pings/text; close ends loop.
-                if matches!(msg, Message::Close(_)) {
-                    break;
-                }
-            }
-        }
-        let _ = cancel_tx.send(true);
-    });
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Value>();
+    let mut preview_channel: Option<u32> = None;
+    let mut preview_rx: Option<std::sync::mpsc::Receiver<PreviewSignal>> = None;
 
     loop {
+        // Drain GStreamer → WS preview signals without blocking the async loop.
+        if let Some(rx) = preview_rx.as_ref() {
+            while let Ok(sig) = rx.try_recv() {
+                let _ = out_tx.send(preview_signal_json(sig));
+            }
+        }
+
         tokio::select! {
-            _ = cancel_rx.changed() => {
-                if *cancel_rx.borrow() { break; }
+            msg = receiver.next() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(m) = serde_json::from_str::<ClientMsg>(&text) {
+                            handle_client_msg(
+                                &state,
+                                &m,
+                                &mut preview_channel,
+                                &mut preview_rx,
+                                &out_tx,
+                            );
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+            Some(v) = out_rx.recv() => {
+                if sender.send(Message::Text(v.to_string().into())).await.is_err() {
+                    break;
+                }
             }
             _ = tick_snap.tick() => {
                 let snap = snapshot::dashboard_snapshot(state.orch.as_ref(), state.ui.as_ref());
@@ -65,7 +98,103 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
         }
     }
-    reader.abort();
+
+    if let Some(ch) = preview_channel.take() {
+        let _ = state.orch.stop_webrtc_preview(ch);
+    }
+}
+
+fn preview_signal_json(sig: PreviewSignal) -> Value {
+    match sig {
+        PreviewSignal::Offer { channel, sdp } => json!({
+            "type": "preview_offer",
+            "channel": channel,
+            "sdp": sdp,
+        }),
+        PreviewSignal::Ice {
+            channel,
+            candidate,
+            sdp_mline_index,
+        } => json!({
+            "type": "preview_ice",
+            "channel": channel,
+            "candidate": candidate,
+            "sdpMLineIndex": sdp_mline_index,
+        }),
+        PreviewSignal::Error { channel, message } => json!({
+            "type": "preview_error",
+            "channel": channel,
+            "message": message,
+        }),
+    }
+}
+
+fn handle_client_msg(
+    state: &AppState,
+    m: &ClientMsg,
+    preview_channel: &mut Option<u32>,
+    preview_rx: &mut Option<std::sync::mpsc::Receiver<PreviewSignal>>,
+    out_tx: &mpsc::UnboundedSender<Value>,
+) {
+    match m.kind.as_str() {
+        "preview_open" => {
+            let Some(channel) = m.channel else { return };
+            let pair = m.pair.unwrap_or(0);
+            if let Some(prev) = preview_channel.take() {
+                let _ = state.orch.stop_webrtc_preview(prev);
+            }
+            *preview_rx = None;
+            let (tx, rx) = new_preview_signal_tx();
+            match state.orch.start_webrtc_preview(channel, pair, tx) {
+                Ok(session_id) => {
+                    *preview_channel = Some(channel);
+                    *preview_rx = Some(rx);
+                    let _ = out_tx.send(json!({
+                        "type": "preview_opened",
+                        "channel": channel,
+                        "pair": pair,
+                        "session_id": session_id,
+                    }));
+                }
+                Err(err) => {
+                    warn!(channel, error = %err, "preview_open failed");
+                    let _ = out_tx.send(json!({
+                        "type": "preview_error",
+                        "channel": channel,
+                        "message": err.to_string(),
+                    }));
+                }
+            }
+        }
+        "preview_answer" => {
+            let Some(channel) = m.channel.or(*preview_channel) else { return };
+            let Some(sdp) = m.sdp.as_deref() else { return };
+            if let Err(err) = state.orch.set_webrtc_answer(channel, sdp) {
+                warn!(channel, error = %err, "preview_answer failed");
+                let _ = out_tx.send(json!({
+                    "type": "preview_error",
+                    "channel": channel,
+                    "message": err.to_string(),
+                }));
+            }
+        }
+        "preview_ice" => {
+            let Some(channel) = m.channel.or(*preview_channel) else { return };
+            let Some(candidate) = m.candidate.as_deref() else { return };
+            let mline = m.sdp_mline_index.unwrap_or(0);
+            if let Err(err) = state.orch.add_webrtc_ice(channel, mline, candidate) {
+                warn!(channel, error = %err, "preview_ice failed");
+            }
+        }
+        "preview_close" => {
+            if let Some(ch) = preview_channel.take() {
+                let _ = state.orch.stop_webrtc_preview(ch);
+            }
+            *preview_rx = None;
+            let _ = out_tx.send(json!({ "type": "preview_closed" }));
+        }
+        _ => {}
+    }
 }
 
 /// Keep Arc clone pattern happy for schedule task.

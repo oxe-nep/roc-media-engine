@@ -2,12 +2,14 @@
 
 mod bitrate;
 mod capture;
+mod preview_webrtc;
 mod probe;
 
 pub use crate::describe::{
     build_capture_launch, build_playout_launch, build_spike_tee_launch, CaptureLaunchOpts,
     PlayoutLaunchOpts,
 };
+pub use preview_webrtc::WebRtcPreview;
 pub use probe::probe_gst_devices;
 
 use std::collections::HashMap;
@@ -194,6 +196,56 @@ impl PipelineBackend for GstBackend {
             .get_mut(&channel_id)
             .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
         pipe.stop_srt()
+    }
+
+    fn start_webrtc_preview(
+        &self,
+        channel_id: u32,
+        pair: u8,
+        signal_tx: crate::PreviewSignalTx,
+    ) -> Result<String> {
+        let _gst = self.gst_op.lock();
+        // Only one preview session engine-wide.
+        {
+            let mut map = self.channels.lock();
+            for (id, pipe) in map.iter_mut() {
+                if *id != channel_id {
+                    pipe.stop_webrtc_preview();
+                }
+            }
+        }
+        let mut map = self.channels.lock();
+        let pipe = map
+            .get_mut(&channel_id)
+            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+        pipe.start_webrtc_preview(pair, signal_tx)
+    }
+
+    fn set_webrtc_answer(&self, channel_id: u32, sdp: &str) -> Result<()> {
+        let _gst = self.gst_op.lock();
+        let map = self.channels.lock();
+        let pipe = map
+            .get(&channel_id)
+            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+        pipe.set_webrtc_answer(sdp)
+    }
+
+    fn add_webrtc_ice(&self, channel_id: u32, sdp_mline_index: u32, candidate: &str) -> Result<()> {
+        let _gst = self.gst_op.lock();
+        let map = self.channels.lock();
+        let pipe = map
+            .get(&channel_id)
+            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+        pipe.add_webrtc_ice(sdp_mline_index, candidate)
+    }
+
+    fn stop_webrtc_preview(&self, channel_id: u32) -> Result<()> {
+        let _gst = self.gst_op.lock();
+        let mut map = self.channels.lock();
+        if let Some(pipe) = map.get_mut(&channel_id) {
+            pipe.stop_webrtc_preview();
+        }
+        Ok(())
     }
 
     fn channel_snapshot(&self, channel_id: u32) -> Result<ChannelSnapshot> {

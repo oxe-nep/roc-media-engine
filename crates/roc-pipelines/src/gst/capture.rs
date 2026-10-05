@@ -753,6 +753,8 @@ pub struct ChannelPipeline {
     parse_element: String,
     pipeline: Option<gstreamer::Pipeline>,
     rec_branch: Option<Branch>,
+    /// On-demand WebRTC encode preview (modal). At most one per channel.
+    webrtc_preview: Option<crate::gst::preview_webrtc::WebRtcPreview>,
     /// Avoid relaunch storms: last adapt attempt.
     last_adapt: Option<std::time::Instant>,
     /// Peak dBFS per discrete channel (8). Updated from `level` bus messages.
@@ -820,6 +822,7 @@ impl ChannelPipeline {
             udp_egress: ch.udp_egress.clone(),
             pipeline: None,
             rec_branch: None,
+            webrtc_preview: None,
             last_adapt: None,
             audio_peaks: [-90.0; 8],
             encode_bitrate: BitrateMeter::new(),
@@ -916,6 +919,7 @@ impl ChannelPipeline {
         let rec_path = self.recording_path.clone();
         // Keep self.srt / self.srt_url — launch_locked bakes SRT into the graph.
 
+        self.stop_webrtc_preview();
         let _ = self.detach_recording(false);
         if let Some(p) = self.pipeline.take() {
             let _ = p.set_state(gstreamer::State::Null);
@@ -1004,7 +1008,7 @@ impl ChannelPipeline {
                     || n.ends_with(".ts")
                     || n.starts_with("listen_")
                     || n.starts_with("pv")
-                    || n == "thumb.jpg"
+                    || n.starts_with("thumb")
                 {
                     let _ = std::fs::remove_file(ent.path());
                 }
@@ -1066,6 +1070,7 @@ impl ChannelPipeline {
     }
 
     pub fn stop(&mut self) -> Result<()> {
+        self.stop_webrtc_preview();
         let _ = self.detach_recording(false);
         if let Some(p) = self.pipeline.take() {
             let _ = p.send_event(gstreamer::event::Eos::new());
@@ -1149,6 +1154,53 @@ impl ChannelPipeline {
         self.srt_bitrate = None;
         tracing::info!(channel = self.id, "SRT publish detached (REC undisturbed)");
         Ok(())
+    }
+
+    /// Start (or replace) on-demand WebRTC preview for `pair` (0..=3).
+    pub fn start_webrtc_preview(
+        &mut self,
+        pair: u8,
+        signal_tx: crate::PreviewSignalTx,
+    ) -> Result<String> {
+        self.stop_webrtc_preview();
+        let pipeline = self
+            .pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow!("capture not running"))?
+            .clone();
+        let preview = crate::gst::preview_webrtc::WebRtcPreview::attach(
+            &pipeline,
+            self.id,
+            pair,
+            signal_tx,
+        )?;
+        let sid = preview.session_id.clone();
+        self.webrtc_preview = Some(preview);
+        Ok(sid)
+    }
+
+    pub fn set_webrtc_answer(&self, sdp: &str) -> Result<()> {
+        let Some(p) = self.webrtc_preview.as_ref() else {
+            bail!("no webrtc preview session");
+        };
+        p.set_remote_answer(sdp)
+    }
+
+    pub fn add_webrtc_ice(&self, sdp_mline_index: u32, candidate: &str) -> Result<()> {
+        let Some(p) = self.webrtc_preview.as_ref() else {
+            bail!("no webrtc preview session");
+        };
+        p.add_ice_candidate(sdp_mline_index, candidate);
+        Ok(())
+    }
+
+    pub fn stop_webrtc_preview(&mut self) {
+        let Some(preview) = self.webrtc_preview.take() else {
+            return;
+        };
+        if let Some(pipeline) = self.pipeline.as_ref() {
+            preview.detach(pipeline);
+        }
     }
 
     fn encoded_tee(&self) -> Result<gstreamer::Element> {

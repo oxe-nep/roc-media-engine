@@ -252,6 +252,27 @@ impl Orchestrator {
         self.backend.channel_snapshot(id)
     }
 
+    pub fn start_webrtc_preview(
+        &self,
+        id: u32,
+        pair: u8,
+        signal_tx: roc_pipelines::PreviewSignalTx,
+    ) -> Result<String> {
+        self.backend.start_webrtc_preview(id, pair, signal_tx)
+    }
+
+    pub fn set_webrtc_answer(&self, id: u32, sdp: &str) -> Result<()> {
+        self.backend.set_webrtc_answer(id, sdp)
+    }
+
+    pub fn add_webrtc_ice(&self, id: u32, sdp_mline_index: u32, candidate: &str) -> Result<()> {
+        self.backend.add_webrtc_ice(id, sdp_mline_index, candidate)
+    }
+
+    pub fn stop_webrtc_preview(&self, id: u32) -> Result<()> {
+        self.backend.stop_webrtc_preview(id)
+    }
+
     pub fn set_encode_preset(&self, id: u32, preset_id: &str) -> Result<ChannelSnapshot> {
         let preset = self
             .presets

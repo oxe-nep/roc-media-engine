@@ -842,16 +842,36 @@ async fn thumb(
     State(st): State<AppState>,
     Path(id): Path<u32>,
 ) -> Result<Response, UiError> {
-    let path = st.hls_dir.join(id.to_string()).join("thumb.jpg");
-    if !path.is_file() {
-        return Err(UiError::not_found("thumb not found"));
-    }
+    let dir = st.hls_dir.join(id.to_string());
+    let path = newest_thumb(&dir).ok_or_else(|| UiError::not_found("thumb not found"))?;
     let bytes = tokio::fs::read(&path).await.map_err(UiError::from)?;
     Ok((
         [(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "no-store")],
         bytes,
     )
         .into_response())
+}
+
+fn newest_thumb(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let fixed = dir.join("thumb.jpg");
+    if fixed.is_file() {
+        return Some(fixed);
+    }
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    let rd = std::fs::read_dir(dir).ok()?;
+    for ent in rd.flatten() {
+        let name = ent.file_name();
+        let n = name.to_string_lossy();
+        if !(n.starts_with("thumb") && n.ends_with(".jpg")) {
+            continue;
+        }
+        let meta = ent.metadata().ok()?;
+        let modified = meta.modified().ok()?;
+        if best.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
+            best = Some((modified, ent.path()));
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 pub struct UiError {

@@ -17,7 +17,8 @@ import { showEncodeCard } from "@/lib/workflow";
 import { sortByChannelId } from "@/lib/sortChannels";
 import { useWorkflows } from "@/hooks/useWorkflows";
 import { useDashboard } from "@/hooks/useDashboard";
-import HlsPreview from "@/components/HlsPreview";
+import Thumbnail from "@/components/Thumbnail";
+import PreviewModal from "@/components/PreviewModal";
 import AudioMeters from "@/components/AudioMeters";
 import ListenButton from "@/components/ListenButton";
 import ChannelSettingsModal from "@/components/ChannelSettingsModal";
@@ -63,7 +64,7 @@ export default function StreamGrid() {
   const [error, setError] = useState<string | null>(null);
   const [recBusy, setRecBusy] = useState<Record<number, boolean>>({});
   const [srtBusy, setSrtBusy] = useState<Record<number, boolean>>({});
-  const [listenPair, setListenPair] = useState<Record<number, number | null>>({});
+  const [preview, setPreview] = useState<{ id: number; pair: number } | null>(null);
   const [settingsId, setSettingsId] = useState<number | null>(null);
   const { workflows } = useWorkflows();
 
@@ -151,7 +152,6 @@ export default function StreamGrid() {
           const rec = recordings[s.id];
           const isRecording = rec?.status === "recording";
           const isEncoding = isRecording && !!rec?.encoding;
-          const isListeningPair = listenPair[s.id] ?? null;
           const srtOn = srtById[s.id]?.status === "streaming";
           const activePreset = presets.find((p) => p.id === s.encode_preset);
           const activeRecPreset = presets.find(
@@ -169,13 +169,21 @@ export default function StreamGrid() {
             <div key={s.id} className={`card-panel ${s.status}`}>
               <div className="card-stage">
                 <AudioMeters channelId={s.id} bus="encode">
-                <div className="card-thumb">
-                  <HlsPreview
-                    active={captureOn}
-                    listenPair={isListeningPair}
-                    playlistPath={`/hls/${s.id}/preview.m3u8`}
-                    sessionKey={s.preview_epoch ?? 0}
-                  />
+                <div
+                  className="card-thumb"
+                  role="button"
+                  tabIndex={captureOn ? 0 : -1}
+                  onClick={() => captureOn && setPreview({ id: s.id, pair: 0 })}
+                  onKeyDown={(e) => {
+                    if (!captureOn) return;
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setPreview({ id: s.id, pair: 0 });
+                    }
+                  }}
+                  title={captureOn ? "Open preview" : undefined}
+                >
+                  <Thumbnail id={s.id} active={captureOn} />
                   {rec?.schedule && (
                     <div className="thumb-sched" title={`Scheduled ${formatSchedBadge(rec.schedule)}`}>
                       <div className={`sched-badge${rec.schedule.phase === "waiting" ? " waiting" : ""}`}>
@@ -296,8 +304,14 @@ export default function StreamGrid() {
                     </>
                     {captureOn && (
                       <ListenButton
-                        pair={isListeningPair}
-                        onChange={(p) => setListenPair((prev) => ({ ...prev, [s.id]: p }))}
+                        pair={preview?.id === s.id ? preview.pair : null}
+                        onChange={(p) => {
+                          if (p == null) {
+                            setPreview(null);
+                            return;
+                          }
+                          setPreview({ id: s.id, pair: p });
+                        }}
                       />
                     )}
                     <button
@@ -318,6 +332,18 @@ export default function StreamGrid() {
       </div>
       )}
       </section>
+
+      <PreviewModal
+        open={preview != null}
+        channelId={preview?.id ?? 0}
+        channelName={
+          preview != null
+            ? recordings[preview.id]?.name || streams.find((x) => x.id === preview.id)?.name || `ch${preview.id}`
+            : ""
+        }
+        initialPair={preview?.pair ?? 0}
+        onClose={() => setPreview(null)}
+      />
 
       <ChannelSettingsModal
         open={settingsId != null}

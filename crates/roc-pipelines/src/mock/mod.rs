@@ -244,6 +244,32 @@ impl PipelineBackend for MockBackend {
         Ok(())
     }
 
+    fn start_webrtc_preview(
+        &self,
+        _channel_id: u32,
+        _pair: u8,
+        _signal_tx: crate::PreviewSignalTx,
+    ) -> Result<String> {
+        bail!("WebRTC preview requires the gst backend")
+    }
+
+    fn set_webrtc_answer(&self, _channel_id: u32, _sdp: &str) -> Result<()> {
+        bail!("WebRTC preview requires the gst backend")
+    }
+
+    fn add_webrtc_ice(
+        &self,
+        _channel_id: u32,
+        _sdp_mline_index: u32,
+        _candidate: &str,
+    ) -> Result<()> {
+        bail!("WebRTC preview requires the gst backend")
+    }
+
+    fn stop_webrtc_preview(&self, _channel_id: u32) -> Result<()> {
+        Ok(())
+    }
+
     fn channel_snapshot(&self, channel_id: u32) -> Result<ChannelSnapshot> {
         let mut map = self.channels.lock();
         let ch = map

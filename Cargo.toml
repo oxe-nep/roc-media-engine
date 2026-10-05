@@ -42,6 +42,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 gstreamer = "0.23"
 gstreamer-app = "0.23"
 gstreamer-video = "0.23"
+gstreamer-webrtc = "0.23"
+gstreamer-sdp = "0.23"
+gstreamer-rtp = "0.23"
 
 roc-config = { path = "crates/roc-config" }
 roc-devices = { path = "crates/roc-devices" }

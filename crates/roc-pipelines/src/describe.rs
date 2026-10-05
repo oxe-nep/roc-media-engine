@@ -179,47 +179,25 @@ fn mpegts_program_aac(
 }
 
 /// Bus-message peak meters for the 8ch audio tee (`level` → Element "level").
+/// ~30 Hz for snappy LED meters without flooding the UI WebSocket.
 fn meter_branch() -> &'static str {
     "a. ! queue max-size-buffers=8 leaky=downstream ! \
-     level name=ameter interval=80000000 post-messages=true ! \
+     level name=ameter interval=33000000 post-messages=true ! \
      fakesink sync=false async=false"
 }
 
-/// Four listen HLS playlists (`listen_0.m3u8` … `listen_3.m3u8`) with the
-/// **same** preview H.264 muxed in. Separate audio-only playlists cannot stay
-/// lipsynced with `preview.m3u8` in hls.js (two independent live timelines).
-///
-/// Expects encoded preview tee `pv`. When `audio_from_program` is true, AAC is
-/// linked later from `prog_aacN` (shared with SRT/UDP). Otherwise encode from `a`.
-fn listen_hls_branches(hls_dir: &str, gen: u64, audio_from_program: bool) -> String {
-    let mut parts = Vec::with_capacity(4);
-    let q = "queue max-size-buffers=0 max-size-bytes=0 max-size-time=200000000";
-    for pair in 0..4 {
-        let playlist = format!("{hls_dir}/listen_{pair}.m3u8");
-        // Generation stamp matches FFmpeg preview.go — avoids stale segment reuse in hls.js.
-        let seg = format!("{hls_dir}/l{gen}_{pair}_%05d.ts");
-        let audio = if audio_from_program {
-            String::new()
-        } else {
-            let matrix = stereo_pair_matrix(pair);
-            format!(
-                " a. ! {q} ! \
-                 audioconvert mix-matrix=\"{matrix}\" ! \
-                 audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved ! \
-                 voaacenc bitrate=128000 ! aacparse ! hls_l{pair}.audio"
-            )
-        };
-        // Deeper time-based queue: tiny buffer=3 leaked unevenly under SRT load
-        // and skewed channel-to-channel preview by hundreds of ms.
-        parts.push(format!(
-            "pv. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=500000000 \
-             leaky=downstream ! \
-             h264parse config-interval=-1 ! \
-             hlssink2 name=hls_l{pair} location=\"{seg}\" playlist-location=\"{playlist}\" \
-             target-duration=1 max-files=6 playlist-length=6{audio}"
-        ));
-    }
-    parts.join(" ")
+/// 1 fps JPEG thumbnail for the encode grid (`/thumb/{id}`).
+fn thumb_jpeg_branch(hls_dir: &str) -> String {
+    // max-files=1 + %05d keeps a single rolling frame; API serves newest match.
+    let loc = format!("{hls_dir}/thumb%05d.jpg");
+    format!(
+        "t. ! queue max-size-buffers=2 leaky=downstream ! \
+         videoconvert ! videoscale ! videorate skip-to-first=true ! \
+         video/x-raw,width=640,height=360,framerate=1/1 ! \
+         jpegenc quality=80 idct-method=float ! \
+         multifilesink location=\"{loc}\" max-files=1 next-file=buffer \
+         post-messages=false sync=false async=false"
+    )
 }
 
 fn hls_dir_from_playlist(playlist: &str) -> String {
@@ -516,12 +494,19 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
     }
     out_branches.push("e. ! queue leaky=downstream ! fakesink sync=false".into());
 
-    let preview_gen = if opts.with_tee_preview || opts.preview_path.is_some() {
-        Some(hls_generation())
+    // Grid preview is 1 fps JPEG only (no always-on HLS). Listen A/V attaches
+    // on demand when the preview modal opens.
+    let thumb = if opts.with_tee_preview || opts.preview_path.is_some() {
+        let playlist = opts
+            .preview_path
+            .clone()
+            .unwrap_or_else(|| "/tmp/roc-preview/preview.m3u8".into());
+        let dir = hls_dir_from_playlist(&playlist);
+        thumb_jpeg_branch(&dir)
     } else {
-        None
+        String::new()
     };
-    let feed_listen = pairs >= 4 && preview_gen.is_some() && has_udp;
+
     let mut aac_parts = Vec::new();
     if has_ts_egress {
         // One program AAC into the single tsmux (Hydra: MediaLane::Program).
@@ -533,66 +518,28 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
                 mux_name: "tsmux",
                 valve_prefix: None,
             }],
-            feed_listen,
+            false, // no always-on listen HLS pads
         ));
     }
     let shared_aac = aac_parts.join(" ");
-
-    let preview = if let Some(gen) = preview_gen {
-        let playlist = opts
-            .preview_path
-            .clone()
-            .unwrap_or_else(|| "/tmp/roc-preview/preview.m3u8".into());
-        let dir = hls_dir_from_playlist(&playlist);
-        let seg = format!("{dir}/pv{gen}_%05d.ts");
-        // Encode once → tee `pv`: muted video-only preview + A+V listen_* muxes.
-        // Match Go/FFmpeg preview: fps=10, g=10, ~800k (see roc-recording preview.go).
-        format!(
-            "t. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=500000000 \
-             leaky=downstream ! \
-             videoconvert ! videoscale ! videorate ! \
-             video/x-raw,width=640,height=360,framerate=10/1 ! \
-             x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=10 bframes=0 threads=1 ! \
-             video/x-h264,profile=baseline ! h264parse config-interval=-1 ! \
-             tee name=pv \
-             pv. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=500000000 \
-             leaky=downstream ! \
-             hlssink2 location=\"{seg}\" playlist-location=\"{playlist}\" \
-             target-duration=1 max-files=6 playlist-length=6"
-        )
-    } else {
-        String::new()
-    };
 
     let need_audio = opts.with_tee_preview
         || opts.preview_path.is_some()
         || opts.udp_egress.is_some()
         || opts.srt_url.is_some();
-    let (audio_src, listen, meter) = if need_audio {
-        let playlist = opts
-            .preview_path
-            .clone()
-            .unwrap_or_else(|| "/tmp/roc-preview/preview.m3u8".into());
-        let dir = hls_dir_from_playlist(&playlist);
+    let (audio_src, meter) = if need_audio {
         let num = decklink_device_number(&opts.device);
-        let listen = if let Some(gen) = preview_gen {
-            listen_hls_branches(&dir, gen, feed_listen)
-        } else {
-            String::new()
-        };
         (
             format!(
                 "decklinkaudiosrc device-number={num} channels=8 ! \
                  audioconvert ! audio/x-raw,channels=8,rate=48000,layout=interleaved ! tee name=a"
             ),
-            listen,
             meter_branch().to_string(),
         )
     } else {
-        (String::new(), String::new(), String::new())
+        (String::new(), String::new())
     };
 
-    // listen (hls_lN) must appear before shared_aac links `.audio` pads.
     format!(
         "{src} ! \
          deinterlace mode=auto ! tee name=t \
@@ -600,8 +547,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
          t. ! queue ! {enc} ! \
          tee name=e \
          {out_branches} \
-         {preview} \
-         {listen} \
+         {thumb} \
          {shared_aac} \
          {meter}",
         enc = nvenc_chain(live_codec, preset, bitrate_kbit, gop),
@@ -715,7 +661,7 @@ mod tests {
         assert_eq!(launch.matches("tsmux.").count(), 4);
         assert!(launch.contains("voaacenc"));
 
-        let with_listen = build_capture_encode_once_launch(&CaptureLaunchOpts {
+        let with_thumb = build_capture_encode_once_launch(&CaptureLaunchOpts {
             device: "DeckLink IP 100G (1)".into(),
             mode: "auto".into(),
             preset: {
@@ -739,11 +685,14 @@ mod tests {
             udp_egress: Some("udp://239.255.28.1:21001".into()),
             with_tee_preview: true,
         });
-        // 4 program AAC + 4 listen AAC (shared from prog when feed_listen).
-        assert!(with_listen.matches("voaacenc").count() >= 4);
-        assert!(with_listen.contains("hls_l0.audio"));
-        assert!(with_listen.contains("prog_aac0"));
-        assert!(with_listen.contains("appsink name=srt_in"));
+        // Program AAC only (no always-on listen HLS); JPEG thumb for grid.
+        assert!(with_thumb.matches("voaacenc").count() >= 4);
+        assert!(with_thumb.contains("jpegenc"));
+        assert!(with_thumb.contains("thumb%05d.jpg"));
+        assert!(!with_thumb.contains("hls_l0"));
+        assert!(!with_thumb.contains("hlssink2"));
+        assert!(with_thumb.contains("appsink name=srt_in"));
+        assert!(with_thumb.contains("interval=33000000"));
         // UDP-only graphs still expose srt_in so SRT can hot-attach without relaunch.
         let udp_only = build_capture_encode_once_launch(&CaptureLaunchOpts {
             device: "DeckLink IP 100G (1)".into(),

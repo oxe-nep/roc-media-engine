@@ -7,7 +7,7 @@ description = "GStreamer (and mock) pipeline builders for capture/REC/SRT/playou
 
 [features]
 default = []
-gst = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+gst = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:gstreamer-webrtc", "dep:gstreamer-sdp", "dep:gstreamer-rtp"]
 
 [dependencies]
 anyhow.workspace = true
@@ -22,3 +22,6 @@ uuid.workspace = true
 gstreamer = { workspace = true, optional = true }
 gstreamer-app = { workspace = true, optional = true }
 gstreamer-video = { workspace = true, optional = true }
+gstreamer-webrtc = { workspace = true, optional = true }
+gstreamer-sdp = { workspace = true, optional = true }
+gstreamer-rtp = { workspace = true, optional = true }
