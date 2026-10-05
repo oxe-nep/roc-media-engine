@@ -58,6 +58,30 @@ encode_presets:
     video_gop: 50
     audio_bitrate: "256k"
     audio_channels: 2
+  dnxhd_145:
+    label: "DNxHD 145"
+    video_codec: avenc_dnxhd
+    video_bitrate: "145M"
+    video_preset: dnxhd
+    video_gop: 1
+    audio_bitrate: "384k"
+    audio_channels: 2
+  dnxhd_185:
+    label: "DNxHD 185"
+    video_codec: avenc_dnxhd
+    video_bitrate: "185M"
+    video_preset: dnxhd
+    video_gop: 1
+    audio_bitrate: "384k"
+    audio_channels: 2
+  xavc_intra_hd:
+    label: "XAVC Intra HD"
+    video_codec: xavc_intra
+    video_bitrate: "111M"
+    video_preset: intra
+    video_gop: 1
+    audio_bitrate: "384k"
+    audio_channels: 2
 
 channels:
   - id: 1

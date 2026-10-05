@@ -1,38 +1,42 @@
 # Codecs roadmap
 
-## Supported now (NVENC)
+## Supported now (NVENC live + REC)
 
 | Preset | Element | Notes |
 |--------|---------|--------|
 | `proxy` / `hq` / `mezz` | `nvh264enc` | Proven on capture host (1080i50 → NV12 → cudaupload) |
 | `hq_hevc` / `mezz_hevc` | `nvh265enc` | Same upload path; spike: `--codec hevc` |
 
-Spike:
+Live/SRT always uses NVENC (encode-once tee `e`).
 
-```bash
-./target/release/spike-decklink-nvenc --codec h264 --preview --duration-secs 30
-./target/release/spike-decklink-nvenc --codec hevc --preview --duration-secs 30 \
-  --output /tmp/roc-spike-hevc.mp4
-```
+## Mezz REC (raw tee + NTP timecode)
 
-## Next implementation targets
+| Preset | Codec | Container | Notes |
+|--------|-------|-----------|--------|
+| `dnxhd_145` / `dnxhd_185` | `avenc_dnxhd` | `.mov` (`qtmux`) | Y42B from raw tee `t` |
+| `xavc_intra_hd` | `x264enc` High 4:2:2 Intra | `.mxf` (`mxfmux`) | Open-source XAVC Intra HD approximation |
 
-H.264/HEVC capture+REC+SRT is solid. Next mezz codecs (priority order):
+Timecode: GStreamer `timecodestamper source=rtc set=always` — uses the host
+real-time clock. Capture host has **no PTP**; chrony syncs RTC from LAN NTP:
 
-| Codec | Host status | Plan |
-|-------|-------------|------|
-| **DNxHD / VC-3** | `avenc_dnxhd` / `avdec_dnxhd` present via libav | Dedicated mezz preset (fixed bitrate profiles), MOV/MXF mux on REC branch |
-| **XAVC** | not wired yet | Probe host encoders (`avenc_*` / Sony XAVC profiles); mezz preset + compatible mux (MXF preferred) |
-| ProRes | not probed | Later if needed for Apple mezz |
-| AV1 NVENC | depends on GPU (P2000: unlikely) | Skip unless hardware supports |
+- `10.199.6.10` (`one.time.nepsweden.local`)
+- `10.199.6.14` (`two.time.nepsweden.local`)
 
-### Suggested land order
+Install/refresh: [`deploy/remote-ntp-roc.sh`](../deploy/remote-ntp-roc.sh) +
+[`deploy/chrony-roc-ntp.sources`](../deploy/chrony-roc-ntp.sources).
 
-1. Probe capture host: `gst-inspect-1.0 avenc_dnxhd`, list any XAVC-capable elements / ffmpeg wrappers
-2. Add encode presets (DNxHD profiles first) without breaking NVENC tee path — mezz may be a second encode branch or alternate REC branch
-3. Wire REC mux (MOV for DNxHD, MXF for XAVC/DNxHD as needed)
-4. UI preset picker already uses `/api/encode/presets` — register new ids there
+When a mezz preset is selected, SRT/UDP/preview keep a fixed H.264 NVENC proxy;
+only the REC branch switches to DNxHD/XAVC.
+
+## Later
+
+| Codec | Status | Plan |
+|-------|--------|------|
+| ProRes | `avenc_prores` present | Optional Apple mezz |
+| True Sony XAVC | needs vendor tooling | Replace x264 Intra approx if required |
+| AV1 NVENC | P2000 unlikely | Skip |
 
 ## Deferred audio
 
-Full 8ch AAC (4× pairs) on SRT/REC remains deferred until mezz codec path is chosen; stereo default stays.
+Full 8ch AAC (4× pairs) on SRT/REC remains deferred; stereo default stays.
+Mezz MXF uses stereo PCM; DNxHD MOV uses stereo AAC.

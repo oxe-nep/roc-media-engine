@@ -22,6 +22,16 @@ Status as of 2026-10-05.
 | Commentator k3s resources `roc-recording-commentator*` | Separate app until WebRTC lands on engine |
 | Browser event name `roc-recording-state` | Cosmetic only |
 
+## NTP (timecode)
+
+Capture host chrony uses facility NTP (not public Ubuntu pools):
+
+- `10.199.6.10` / `10.199.6.14`
+- Helper: [`deploy/remote-ntp-roc.sh`](../deploy/remote-ntp-roc.sh)
+
+Mezz REC stamps frames via `timecodestamper source=rtc` (see [CODECS.md](CODECS.md)).
+
+
 ## Host layout
 
 ```text

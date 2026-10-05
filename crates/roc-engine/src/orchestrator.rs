@@ -53,6 +53,29 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
+    /// File extension for the channel's current encode preset (.mp4 / .mov / .mxf).
+    pub fn recording_ext(&self, id: u32) -> &'static str {
+        let preset_id = self
+            .backend
+            .channel_snapshot(id)
+            .ok()
+            .map(|c| c.encode_preset)
+            .or_else(|| {
+                self.cfg
+                    .channel(id)
+                    .ok()
+                    .and_then(|c| c.encode_preset.clone())
+            })
+            .unwrap_or_else(|| self.cfg.default_encode_preset.clone());
+        let codec = self
+            .presets
+            .lock()
+            .get(&preset_id)
+            .map(|p| p.video_codec.clone())
+            .unwrap_or_else(|| "nvh264enc".into());
+        roc_config::recording_extension(&codec)
+    }
+
     pub fn new(cfg: Config, backend: Arc<dyn PipelineBackend>) -> Result<Self> {
         for ch in &cfg.channels {
             let preset = cfg.preset_for_channel(ch)?;
@@ -185,7 +208,8 @@ impl Orchestrator {
             let cat = sanitize_category(category.as_deref().unwrap_or("_unsorted"));
             let dir = self.cfg.recordings_dir.join(&cat);
             std::fs::create_dir_all(&dir)?;
-            dir.join(format!("{name}_ch{id}_{stamp}.mp4"))
+            let ext = self.recording_ext(id);
+            dir.join(format!("{name}_ch{id}_{stamp}.{ext}"))
                 .to_string_lossy()
                 .into_owned()
         };

@@ -92,19 +92,48 @@ impl EncodePreset {
     }
 }
 
-/// FFmpeg `h264_nvenc` / `hevc_nvenc` → GST encoder element names.
+/// FFmpeg / UI codec ids → GST encoder ids used in capture + REC.
 pub fn map_video_codec(raw: &str) -> String {
     let c = raw.trim().to_ascii_lowercase();
     if c.is_empty() {
         return default_video_codec();
     }
+    // Mezz codecs first — "xavc" contains "avc".
+    if c.contains("dnx") {
+        return "avenc_dnxhd".into();
+    }
+    if c.contains("xavc") {
+        return "xavc_intra".into();
+    }
     if c.contains("265") || c.contains("hevc") {
         "nvh265enc".into()
-    } else if c == "nvh264enc" || c.contains("264") || c.contains("avc") {
+    } else if c == "nvh264enc"
+        || c.contains("264")
+        || c == "h264_nvenc"
+        || (c.contains("avc") && !c.contains("xavc"))
+    {
         "nvh264enc".into()
     } else {
         // Unknown (e.g. av1_nvenc): fall back to H.264 NVENC until supported.
         "nvh264enc".into()
+    }
+}
+
+/// Mezz codecs encode from the raw tee on REC only; live/SRT stays NVENC.
+pub fn is_mezz_codec(video_codec: &str) -> bool {
+    let c = video_codec.to_ascii_lowercase();
+    c.contains("dnx") || c.contains("xavc")
+}
+
+/// File extension for recordings produced with this codec.
+pub fn recording_extension(video_codec: &str) -> &'static str {
+    let c = video_codec.to_ascii_lowercase();
+    if c.contains("dnx") {
+        "mov"
+    } else if c.contains("xavc") {
+        "mxf"
+    } else {
+        "mp4"
     }
 }
 
@@ -188,6 +217,14 @@ impl Config {
             .with_context(|| format!("parse config {}", path.display()))?;
         if cfg.encode_presets.is_empty() {
             cfg.encode_presets = default_presets();
+        } else {
+            // Merge built-in mezz/NVENC presets without clobbering custom ids.
+            for (id, preset) in default_presets() {
+                cfg.encode_presets.entry(id).or_insert(preset);
+            }
+        }
+        for p in cfg.encode_presets.values_mut() {
+            p.normalize_for_gst();
         }
         Ok(cfg)
     }
@@ -318,6 +355,50 @@ fn default_presets() -> std::collections::HashMap<String, EncodePreset> {
             audio_channels: 2,
         },
     );
+    // Mezz REC (raw tee + NTP/RTC timecode). Live/SRT still uses NVENC proxy.
+    m.insert(
+        "dnxhd_145".into(),
+        EncodePreset {
+            label: "DNxHD 145".into(),
+            video_codec: "avenc_dnxhd".into(),
+            video_bitrate: "145M".into(),
+            video_maxrate: None,
+            video_bufsize: None,
+            video_preset: "dnxhd".into(),
+            video_gop: 1,
+            audio_bitrate: "384k".into(),
+            audio_channels: 2,
+        },
+    );
+    m.insert(
+        "dnxhd_185".into(),
+        EncodePreset {
+            label: "DNxHD 185".into(),
+            video_codec: "avenc_dnxhd".into(),
+            video_bitrate: "185M".into(),
+            video_maxrate: None,
+            video_bufsize: None,
+            video_preset: "dnxhd".into(),
+            video_gop: 1,
+            audio_bitrate: "384k".into(),
+            audio_channels: 2,
+        },
+    );
+    m.insert(
+        "xavc_intra_hd".into(),
+        EncodePreset {
+            label: "XAVC Intra HD".into(),
+            video_codec: "xavc_intra".into(),
+            // ~Class 100 HD target; x264 high-4:2:2-intra approximation.
+            video_bitrate: "111M".into(),
+            video_maxrate: None,
+            video_bufsize: None,
+            video_preset: "intra".into(),
+            video_gop: 1,
+            audio_bitrate: "384k".into(),
+            audio_channels: 2,
+        },
+    );
     m
 }
 
@@ -336,6 +417,15 @@ mod tests {
     fn maps_ffmpeg_codec_and_preset() {
         assert_eq!(map_video_codec("h264_nvenc"), "nvh264enc");
         assert_eq!(map_video_codec("hevc_nvenc"), "nvh265enc");
+        assert_eq!(map_video_codec("dnxhd"), "avenc_dnxhd");
+        assert_eq!(map_video_codec("avenc_dnxhd"), "avenc_dnxhd");
+        assert_eq!(map_video_codec("xavc_intra"), "xavc_intra");
+        assert!(is_mezz_codec("avenc_dnxhd"));
+        assert!(is_mezz_codec("xavc_intra"));
+        assert!(!is_mezz_codec("nvh264enc"));
+        assert_eq!(recording_extension("avenc_dnxhd"), "mov");
+        assert_eq!(recording_extension("xavc_intra"), "mxf");
+        assert_eq!(recording_extension("nvh264enc"), "mp4");
         assert_eq!(map_nvenc_preset("p4"), "hq");
         assert_eq!(map_nvenc_preset("p1"), "hp");
         assert_eq!(map_nvenc_preset("llhq"), "low-latency-hq");

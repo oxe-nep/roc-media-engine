@@ -245,6 +245,42 @@ fn encode_family(video_codec: &str) -> EncodeFamily {
     }
 }
 
+/// Live/SRT always stays on NVENC. Mezz presets only affect the REC branch.
+fn live_nvenc_codec(preset: &EncodePreset) -> &str {
+    if roc_config::is_mezz_codec(&preset.video_codec) {
+        "nvh264enc"
+    } else {
+        &preset.video_codec
+    }
+}
+
+fn live_nvenc_bitrate_kbit(preset: &EncodePreset) -> u64 {
+    if roc_config::is_mezz_codec(&preset.video_codec) {
+        // Fixed proxy for SRT/UDP while mezz encodes on the raw tee.
+        12_000
+    } else {
+        parse_bitrate(&preset.video_bitrate)
+            .map(|b| b / 1000)
+            .unwrap_or(12_000)
+    }
+}
+
+fn live_nvenc_preset(preset: &EncodePreset) -> &str {
+    if roc_config::is_mezz_codec(&preset.video_codec) {
+        "low-latency-hq"
+    } else {
+        &preset.video_preset
+    }
+}
+
+fn live_nvenc_gop(preset: &EncodePreset) -> u32 {
+    if roc_config::is_mezz_codec(&preset.video_codec) {
+        50
+    } else {
+        preset.video_gop
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EncodeFamily {
     H264,
@@ -422,14 +458,14 @@ pub fn build_capture_launch(opts: &CaptureLaunchOpts) -> String {
     )
 }
 
-/// Optimized capture: encode once, then tee the bitstream to REC / SRT / UDP.
+/// Optimized capture: encode once (NVENC), then tee the bitstream to SRT / UDP.
+/// Mezz REC (DNxHD / XAVC) attaches later from the raw tee `t` with NTP/RTC TC.
 pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
-    let bitrate_kbit = parse_bitrate(&opts.preset.video_bitrate)
-        .map(|b| b / 1000)
-        .unwrap_or(12_000);
-    let gop = opts.preset.video_gop;
-    let preset = &opts.preset.video_preset;
-    let family = encode_family(&opts.preset.video_codec);
+    let live_codec = live_nvenc_codec(&opts.preset);
+    let bitrate_kbit = live_nvenc_bitrate_kbit(&opts.preset);
+    let gop = live_nvenc_gop(&opts.preset);
+    let preset = live_nvenc_preset(&opts.preset);
+    let family = encode_family(live_codec);
     let parse = family.parse_element();
     let src = decklink_src(&opts.device, &opts.mode);
 
@@ -566,7 +602,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
          {listen} \
          {shared_aac} \
          {meter}",
-        enc = nvenc_chain(&opts.preset.video_codec, preset, bitrate_kbit, gop),
+        enc = nvenc_chain(live_codec, preset, bitrate_kbit, gop),
         out_branches = out_branches.join(" "),
     )
 }

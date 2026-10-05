@@ -91,8 +91,9 @@ pub fn spawn_schedule_ticker(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
                             .clone()
                             .unwrap_or_else(|| format!("ch{id}"))
                             .replace(' ', "_");
+                        let ext = orch.recording_ext(id);
                         root.join(&cat)
-                            .join(format!("{label}_ch{id}_{stamp}.mp4"))
+                            .join(format!("{label}_ch{id}_{stamp}.{ext}"))
                             .to_string_lossy()
                             .into_owned()
                     };

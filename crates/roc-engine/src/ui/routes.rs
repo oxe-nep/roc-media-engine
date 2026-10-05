@@ -147,8 +147,9 @@ async fn start_recording(
     std::fs::create_dir_all(&dir).map_err(UiError::from)?;
     let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
     let safe = name.replace(' ', "_");
+    let ext = st.orch.recording_ext(id);
     let path = dir
-        .join(format!("{safe}_ch{id}_{stamp}.mp4"))
+        .join(format!("{safe}_ch{id}_{stamp}.{ext}"))
         .to_string_lossy()
         .into_owned();
     st.orch
@@ -454,6 +455,20 @@ async fn encode_options() -> Json<Value> {
                 "presets": [
                     {"id": "p4", "label": "P4 HQ"},
                     {"id": "llhq", "label": "Low-latency HQ"}
+                ]
+            },
+            {
+                "id": "avenc_dnxhd",
+                "label": "DNxHD (mezz REC)",
+                "presets": [
+                    {"id": "dnxhd", "label": "DNxHD"}
+                ]
+            },
+            {
+                "id": "xavc_intra",
+                "label": "XAVC Intra HD (mezz REC)",
+                "presets": [
+                    {"id": "intra", "label": "Intra"}
                 ]
             }
         ]

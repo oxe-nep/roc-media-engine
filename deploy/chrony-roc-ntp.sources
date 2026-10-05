@@ -1,0 +1,5 @@
+# ROC local NTP (capture host) — no PTP available; RTC/NTP drives timecode.
+# Install: sudo cp deploy/chrony-roc-ntp.sources /etc/chrony/sources.d/roc-ntp.sources
+# Prefer these over public Ubuntu pools on the media LAN.
+server 10.199.6.10 iburst prefer
+server 10.199.6.14 iburst prefer
