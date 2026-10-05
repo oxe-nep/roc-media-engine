@@ -119,6 +119,71 @@ pub fn is_auto_mode(mode: &str) -> bool {
     m.is_empty() || m == "auto"
 }
 
+/// Map GST DeckLink mode name → BMD playout code used by the UI / `format_code`.
+pub fn bmd_code_from_gst_mode(mode: &str) -> &'static str {
+    match mode.trim() {
+        "1080p50" | "1080i50" => "Hp50",
+        "1080p25" => "Hp25",
+        "1080p5994" | "1080i5994" => "Hp59.94",
+        "1080p60" | "1080i60" => "Hp59.94",
+        "720p50" => "Hp50",
+        other if other.eq_ignore_ascii_case("Hp50") => "Hp50",
+        other if other.eq_ignore_ascii_case("Hi50") => "Hp50",
+        other if other.eq_ignore_ascii_case("Hp25") => "Hp25",
+        other if other.eq_ignore_ascii_case("Hp59.94") || other.eq_ignore_ascii_case("Hp5994") => {
+            "Hp59.94"
+        }
+        _ => "Hp50",
+    }
+}
+
+/// Progressive sink mode for playout (interlaced sources → progressive OUT).
+pub fn playout_sink_mode_from_input(fmt: &InputFormat) -> String {
+    let mode = if fmt.mode.is_empty() {
+        mode_from_geometry(fmt.width, fmt.height, fmt.fps_num, fmt.fps_den, fmt.interlaced)
+            .unwrap_or("1080p50")
+            .to_string()
+    } else {
+        fmt.mode.clone()
+    };
+    match mode.as_str() {
+        "1080i50" => "1080p50".into(),
+        "1080i5994" => "1080p5994".into(),
+        "1080i60" => "1080p60".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Resolve format_code for playout: explicit override, else probe, else Hp50.
+pub fn resolve_playout_format_code(configured: Option<&str>, source: &str) -> String {
+    let cfg = configured.unwrap_or("auto").trim();
+    if !is_auto_mode(cfg) {
+        return if let Some(fc) = roc_devices::FormatCode::parse(cfg) {
+            fc.as_bmd_str().to_string()
+        } else {
+            cfg.to_string()
+        };
+    }
+    #[cfg(feature = "gst")]
+    {
+        match probe_playout_source(source, 4000) {
+            Ok(fmt) => {
+                let sink = playout_sink_mode_from_input(&fmt);
+                bmd_code_from_gst_mode(&sink).to_string()
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, %source, "playout format probe failed — falling back to Hp50");
+                "Hp50".into()
+            }
+        }
+    }
+    #[cfg(not(feature = "gst"))]
+    {
+        let _ = source;
+        "Hp50".into()
+    }
+}
+
 #[cfg(feature = "gst")]
 mod gst_probe {
     use super::*;
@@ -210,10 +275,65 @@ mod gst_probe {
         let _ = pipeline.set_state(gstreamer::State::Null);
         best.ok_or_else(|| anyhow!("no input caps on {device} within {timeout_ms}ms"))
     }
+
+    /// Probe file or SRT source video geometry (decode to raw caps, no DeckLink).
+    pub fn probe_playout_source(source: &str, timeout_ms: u64) -> Result<InputFormat> {
+        let src = if source.starts_with("srt://") {
+            format!("srtsrc uri=\"{source}\" ! tsdemux name=d")
+        } else if source.ends_with(".ts") {
+            format!("filesrc location=\"{source}\" ! tsdemux name=d")
+        } else {
+            format!("filesrc location=\"{source}\" ! qtdemux name=d")
+        };
+        let launch = format!(
+            "{src} \
+             d. ! queue ! video/x-h264 ! h264parse ! avdec_h264 ! videoconvert ! \
+             video/x-raw ! fakesink name=vsink sync=false"
+        );
+        let pipeline = gstreamer::parse::launch(&launch)
+            .context("parse playout probe pipeline")?
+            .downcast::<gstreamer::Pipeline>()
+            .map_err(|_| anyhow!("playout probe launch not a Pipeline"))?;
+
+        let sink = pipeline
+            .by_name("vsink")
+            .ok_or_else(|| anyhow!("vsink missing in playout probe"))?;
+        let pad = sink
+            .static_pad("sink")
+            .ok_or_else(|| anyhow!("no sink pad on vsink"))?;
+
+        pipeline
+            .set_state(gstreamer::State::Playing)
+            .context("playout probe PLAYING")?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let mut best: Option<InputFormat> = None;
+        while std::time::Instant::now() < deadline {
+            if let Some(caps) = pad.current_caps() {
+                if let Some(fmt) = format_from_caps(&caps) {
+                    best = Some(fmt);
+                    break;
+                }
+            }
+            // Also try peer caps if sink has not negotiated yet.
+            if let Some(peer) = pad.peer() {
+                if let Some(caps) = peer.current_caps() {
+                    if let Some(fmt) = format_from_caps(&caps) {
+                        best = Some(fmt);
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let _ = pipeline.set_state(gstreamer::State::Null);
+        best.ok_or_else(|| anyhow!("no video caps from playout source within {timeout_ms}ms"))
+    }
 }
 
 #[cfg(feature = "gst")]
-pub use gst_probe::{format_from_caps, probe_input_format};
+pub use gst_probe::{format_from_caps, probe_input_format, probe_playout_source};
 
 #[cfg(test)]
 mod tests {
@@ -240,5 +360,24 @@ mod tests {
         assert!(is_auto_mode("auto"));
         assert!(is_auto_mode(""));
         assert!(!is_auto_mode("1080p50"));
+    }
+
+    #[test]
+    fn bmd_from_gst_maps_interlace_to_hp50() {
+        assert_eq!(bmd_code_from_gst_mode("1080i50"), "Hp50");
+        assert_eq!(bmd_code_from_gst_mode("1080p50"), "Hp50");
+    }
+
+    #[test]
+    fn playout_sink_forces_progressive() {
+        let fmt = InputFormat {
+            mode: "1080i50".into(),
+            width: 1920,
+            height: 1080,
+            fps_num: 25,
+            fps_den: 1,
+            interlaced: true,
+        };
+        assert_eq!(playout_sink_mode_from_input(&fmt), "1080p50");
     }
 }

@@ -73,7 +73,7 @@ export default function DecodeSettingsModal({ open, client, onClose, onSaved }: 
     hydratedRef.current = channelId;
 
     setName(client.name || `Decode ${channelId}`);
-    setFormatCode(client.format_code || "");
+    setFormatCode(client.format_code || "auto");
     setSource(client.source === "file" ? "file" : "srt");
     setFileId(client.file_id || "");
     setFileLabel(displayFileLabel(client.file_id || "", client.file_name));
@@ -171,7 +171,7 @@ export default function DecodeSettingsModal({ open, client, onClose, onSaved }: 
   const buildSaveBody = (): Parameters<typeof updatePlayoutClient>[1] => {
     const body: Parameters<typeof updatePlayoutClient>[1] = {
       name: name.trim() || `Decode ${client!.id}`,
-      format_code: formatCode,
+      format_code: formatCode || "auto",
       decklink_out: true,
       source,
       file_id: fileId,
@@ -186,7 +186,6 @@ export default function DecodeSettingsModal({ open, client, onClose, onSaved }: 
   };
 
   const validate = (): string | null => {
-    if (!formatCode) return "Select an output format";
     if (source === "file" && !fileId) return "Select a recording or media file";
     if (source === "srt" && mode === "caller" && !target.trim()) return "Caller mode requires a target";
     return null;
@@ -282,13 +281,25 @@ export default function DecodeSettingsModal({ open, client, onClose, onSaved }: 
               <span>Output format</span>
               <div className="channel-settings-actions" style={{ marginTop: 0, marginBottom: 4 }}>
                 <select
-                  value={formats.some((f) => f.code === formatCode) ? formatCode : formatCode || ""}
+                  value={formatCode || "auto"}
                   onChange={(e) => setFormatCode(e.target.value)}
-                  disabled={busy || active || formats.length === 0}
+                  disabled={busy || active}
                   style={{ flex: 1 }}
+                  title="Auto locks DeckLink OUT from the source on start"
                 >
-                  <option value="">{formats.length ? "Format…" : "—"}</option>
-                  {formats.map((f) => (
+                  {(formats.length
+                    ? formats
+                    : [
+                        {
+                          code: "auto",
+                          label: "Auto (from source)",
+                          width: 1920,
+                          height: 1080,
+                          fps: 50,
+                          interlaced: false,
+                        },
+                      ]
+                  ).map((f) => (
                     <option key={f.code} value={f.code}>
                       {f.label}
                     </option>
@@ -298,6 +309,9 @@ export default function DecodeSettingsModal({ open, client, onClose, onSaved }: 
                   Re-probe
                 </button>
               </div>
+              <span className="workflow-option-hint">
+                Auto probes the source on start and locks the DeckLink output mode.
+              </span>
               {formats.length === 0 && probeLog && (
                 <pre className="channel-settings-logbox" style={{ marginTop: 8, maxHeight: 120 }}>
                   {probeLog}

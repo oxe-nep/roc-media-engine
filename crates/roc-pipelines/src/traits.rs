@@ -71,6 +71,8 @@ pub trait PipelineBackend: Send + Sync {
 
     fn start_playout(&self, client: &PlayoutClientConfig, source: &str) -> Result<()>;
     fn stop_playout(&self, client_id: &str) -> Result<()>;
+    fn pause_playout(&self, client_id: &str) -> Result<()>;
+    fn resume_playout(&self, client_id: &str) -> Result<()>;
     fn list_playout(&self) -> Vec<PlayoutSnapshot>;
 
     /// Fas 4 stub: apply exclusive workflow (TC / commentator).
@@ -95,6 +97,7 @@ pub fn status_label(s: ChannelStatus) -> &'static str {
         ChannelStatus::Stopped => "stopped",
         ChannelStatus::Waiting => "waiting",
         ChannelStatus::Running => "running",
+        ChannelStatus::Paused => "paused",
         ChannelStatus::Error => "error",
         ChannelStatus::Restarting => "restarting",
     }

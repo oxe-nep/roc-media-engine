@@ -412,6 +412,7 @@ impl Orchestrator {
                     status: roc_pipelines::ChannelStatus::Stopped,
                     device: c.device.clone(),
                     source: None,
+                    format_code: c.format_code.clone(),
                     last_error: None,
                 });
             }
@@ -449,5 +450,21 @@ impl Orchestrator {
             .into_iter()
             .find(|p| p.id == client_id)
             .context("playout snapshot missing after stop")
+    }
+
+    pub fn pause_playout(&self, client_id: &str) -> Result<PlayoutSnapshot> {
+        self.backend.pause_playout(client_id)?;
+        self.list_playout()
+            .into_iter()
+            .find(|p| p.id == client_id)
+            .context("playout snapshot missing after pause")
+    }
+
+    pub fn resume_playout(&self, client_id: &str) -> Result<PlayoutSnapshot> {
+        self.backend.resume_playout(client_id)?;
+        self.list_playout()
+            .into_iter()
+            .find(|p| p.id == client_id)
+            .context("playout snapshot missing after resume")
     }
 }

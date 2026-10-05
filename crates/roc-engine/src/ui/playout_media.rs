@@ -171,6 +171,14 @@ impl MediaStore {
         self.save_locked(&map)?;
         Ok(())
     }
+
+    pub fn get(&self, id: &str) -> Option<MediaItem> {
+        self.items.lock().unwrap().get(id).cloned()
+    }
+
+    pub fn path_for(&self, id: &str) -> Option<PathBuf> {
+        self.get(id).map(|it| it.path)
+    }
 }
 
 fn sanitize_filename(name: &str) -> String {

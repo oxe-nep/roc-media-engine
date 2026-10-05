@@ -18,6 +18,7 @@ fn status_str(s: ChannelStatus) -> &'static str {
         ChannelStatus::Stopped => "stopped",
         ChannelStatus::Waiting => "waiting",
         ChannelStatus::Running => "running",
+        ChannelStatus::Paused => "paused",
         ChannelStatus::Error => "error",
         ChannelStatus::Restarting => "restarting",
     }
@@ -47,6 +48,7 @@ pub fn stream_json(orch: &Orchestrator, _ui: &UiState, id: u32) -> Option<Value>
         ChannelStatus::Stopped => "stopped",
         ChannelStatus::Waiting => "waiting",
         ChannelStatus::Running => "running",
+        ChannelStatus::Paused => "paused",
         ChannelStatus::Error => "error",
         ChannelStatus::Restarting => "waiting",
     };
@@ -189,7 +191,7 @@ pub fn srt_json(orch: &Orchestrator, ui: &UiState, id: u32) -> Value {
     })
 }
 
-pub fn playout_json(orch: &Orchestrator) -> Vec<Value> {
+pub fn playout_json(orch: &Orchestrator, ui: &UiState) -> Vec<Value> {
     let mut out = Vec::new();
     for p in orch.list_playout() {
         let num_id = p
@@ -197,40 +199,108 @@ pub fn playout_json(orch: &Orchestrator) -> Vec<Value> {
             .strip_prefix("decode-")
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(0);
-        let running = matches!(
+        if num_id == 0 {
+            continue;
+        }
+        ui.ensure_playout(num_id, &p.name);
+        let meta = ui.playout(num_id);
+        let live = matches!(
             p.status,
-            ChannelStatus::Running | ChannelStatus::Waiting
+            ChannelStatus::Running | ChannelStatus::Waiting | ChannelStatus::Paused
         );
-        let source = if p.source.as_deref().unwrap_or("").starts_with("srt://") {
-            "srt"
-        } else if p.source.is_some() {
+        let status = if live {
+            status_str(p.status)
+        } else {
+            "stopped"
+        };
+        let source_kind = if meta.source == "file" {
             "file"
         } else {
             "srt"
         };
+        let format_code = p
+            .format_code
+            .clone()
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"))
+            .unwrap_or_else(|| {
+                if meta.format_code.is_empty() {
+                    "auto".into()
+                } else {
+                    meta.format_code.clone()
+                }
+            });
+        let file_name = if meta.file_id.starts_with("lib:") {
+            meta.file_id
+                .strip_prefix("lib:")
+                .map(|s| {
+                    percent_decode(s)
+                        .split('/')
+                        .next_back()
+                        .unwrap_or(s)
+                        .to_string()
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let port = if meta.port == 0 {
+            9200 + num_id as u16
+        } else {
+            meta.port
+        };
         out.push(json!({
             "id": num_id,
-            "name": p.name,
-            "status": if running { status_str(p.status) } else { "stopped" },
+            "name": if meta.name.is_empty() { p.name.clone() } else { meta.name.clone() },
+            "status": status,
             "device": p.device,
             "device_label": p.device,
-            "format_code": "Hp50",
+            "format_code": format_code,
             "decklink_out": true,
             "fixed": true,
-            "source": source,
-            "loop": false,
-            "mode": "caller",
-            "port": 0,
-            "target": p.source.clone().unwrap_or_default(),
-            "has_passphrase": false,
-            "latency_ms": 120,
-            "sending": running,
+            "source": source_kind,
+            "file_id": meta.file_id,
+            "file_name": file_name,
+            "loop": meta.loop_file,
+            "mode": if meta.mode == "listener" { "listener" } else { "caller" },
+            "port": port,
+            "target": meta.target,
+            "has_passphrase": !meta.passphrase.is_empty(),
+            "latency_ms": if meta.latency_ms == 0 { 120 } else { meta.latency_ms },
+            "sending": matches!(p.status, ChannelStatus::Running),
             "reconnects": 0,
             "error": p.last_error.unwrap_or_default(),
+            "listen_url": ui.playout_listen_url(num_id),
         }));
     }
     out.sort_by_key(|v| v.get("id").and_then(|x| x.as_u64()).unwrap_or(0));
     out
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (from_hex(bytes[i + 1]), from_hex(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn from_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub fn meters_maps(orch: &Orchestrator) -> (serde_json::Map<String, Value>, serde_json::Map<String, Value>) {
@@ -239,8 +309,22 @@ pub fn meters_maps(orch: &Orchestrator) -> (serde_json::Map<String, Value>, serd
     for ch in orch.list_channels() {
         let m = from_peaks(ch.audio_peaks.as_deref());
         let v = serde_json::to_value(m).unwrap_or(json!({}));
-        enc.insert(ch.id.to_string(), v.clone());
-        play.insert(ch.id.to_string(), json!({"l": -90.0, "r": -90.0, "channels": silence_peaks()}));
+        enc.insert(ch.id.to_string(), v);
+    }
+    for p in orch.list_playout() {
+        let num_id = p
+            .id
+            .strip_prefix("decode-")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        if num_id == 0 {
+            continue;
+        }
+        // Real peaks land with the playout GST meter tee; silence until then.
+        play.insert(
+            num_id.to_string(),
+            json!({"l": -90.0, "r": -90.0, "channels": silence_peaks()}),
+        );
     }
     (enc, play)
 }
@@ -274,7 +358,7 @@ pub fn dashboard_snapshot(orch: &Orchestrator, ui: &UiState) -> Value {
     json!({
         "type": "snapshot",
         "streams": streams,
-        "playout": playout_json(orch),
+        "playout": playout_json(orch, ui),
         "tc": [],
         "commentator": [],
         "recordings": recordings,

@@ -267,13 +267,15 @@ impl Config {
                     srt_url: Some(format!("srt://0.0.0.0:{}?mode=listener", 9100 + id)),
                 })
                 .collect(),
-            playout: vec![PlayoutClientConfig {
-                id: "decode-1".into(),
-                name: "Decode 1".into(),
-                device: "DeckLink IP 100G (1)".into(),
-                format_code: Some("Hp50".into()),
-                srt_url: None,
-            }],
+            playout: (1..=8)
+                .map(|id| PlayoutClientConfig {
+                    id: format!("decode-{id}"),
+                    name: format!("Decode {id}"),
+                    device: format!("DeckLink IP 100G ({id})"),
+                    format_code: Some("auto".into()),
+                    srt_url: None,
+                })
+                .collect(),
         }
     }
 

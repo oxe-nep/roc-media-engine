@@ -48,8 +48,15 @@ pub fn router() -> Router<AppState> {
         .route("/api/playout", get(list_playout_ui))
         .route("/api/playout/media", get(list_playout_media).post(upload_playout_media))
         .route("/api/playout/media/{id}", axum::routing::delete(delete_playout_media))
+        .route(
+            "/api/playout/{id}",
+            get(get_playout_ui).put(put_playout_ui),
+        )
         .route("/api/playout/{id}/start", post(start_playout_ui))
         .route("/api/playout/{id}/stop", post(stop_playout_ui))
+        .route("/api/playout/{id}/pause", post(pause_playout_ui))
+        .route("/api/playout/{id}/resume", post(resume_playout_ui))
+        .route("/api/playout/{id}/logs", get(playout_logs_ui))
         .route("/api/playout/devices", get(playout_devices))
         .route("/api/library/categories", get(lib_categories).post(lib_create_cat))
         .route(
@@ -566,7 +573,100 @@ async fn encode_options() -> Json<Value> {
 }
 
 async fn list_playout_ui(State(st): State<AppState>) -> Json<Value> {
-    Json(Value::Array(snapshot::playout_json(st.orch.as_ref())))
+    Json(Value::Array(snapshot::playout_json(
+        st.orch.as_ref(),
+        st.ui.as_ref(),
+    )))
+}
+
+fn playout_client_json(st: &AppState, id: u32) -> Result<Value, UiError> {
+    snapshot::playout_json(st.orch.as_ref(), st.ui.as_ref())
+        .into_iter()
+        .find(|v| v.get("id").and_then(|x| x.as_u64()) == Some(id as u64))
+        .ok_or_else(|| UiError::not_found("playout not found"))
+}
+
+async fn get_playout_ui(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+) -> Result<Json<Value>, UiError> {
+    Ok(Json(playout_client_json(&st, id)?))
+}
+
+#[derive(Deserialize)]
+struct PlayoutUpdateBody {
+    name: Option<String>,
+    format_code: Option<String>,
+    source: Option<String>,
+    file_id: Option<String>,
+    #[serde(rename = "loop")]
+    loop_file: Option<bool>,
+    mode: Option<String>,
+    port: Option<u16>,
+    target: Option<String>,
+    passphrase: Option<String>,
+    latency_ms: Option<u32>,
+}
+
+async fn put_playout_ui(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+    Json(body): Json<PlayoutUpdateBody>,
+) -> Result<Json<Value>, UiError> {
+    let client_id = format!("decode-{id}");
+    if !st.orch.cfg.playout.iter().any(|c| c.id == client_id) {
+        return Err(UiError::not_found("playout not found"));
+    }
+    let cfg_name = st
+        .orch
+        .cfg
+        .playout
+        .iter()
+        .find(|c| c.id == client_id)
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| format!("Decode {id}"));
+    st.ui.ensure_playout(id, &cfg_name);
+    let mut meta = st.ui.playout(id);
+    if let Some(n) = body.name {
+        meta.name = n;
+    }
+    if let Some(fc) = body.format_code {
+        meta.format_code = if fc.trim().is_empty() {
+            "auto".into()
+        } else {
+            fc
+        };
+    }
+    if let Some(s) = body.source {
+        meta.source = if s == "file" { "file".into() } else { "srt".into() };
+    }
+    if let Some(f) = body.file_id {
+        meta.file_id = f;
+    }
+    if let Some(l) = body.loop_file {
+        meta.loop_file = l;
+    }
+    if let Some(m) = body.mode {
+        meta.mode = if m == "listener" {
+            "listener".into()
+        } else {
+            "caller".into()
+        };
+    }
+    if let Some(p) = body.port {
+        meta.port = p;
+    }
+    if let Some(t) = body.target {
+        meta.target = t;
+    }
+    if let Some(p) = body.passphrase {
+        meta.passphrase = p;
+    }
+    if let Some(l) = body.latency_ms {
+        meta.latency_ms = l;
+    }
+    st.ui.set_playout(id, meta);
+    Ok(Json(playout_client_json(&st, id)?))
 }
 
 #[derive(Deserialize)]
@@ -577,6 +677,105 @@ struct PlayoutStartBody {
     target: Option<String>,
     #[serde(default)]
     format_code: Option<String>,
+}
+
+fn resolve_playout_file_path(st: &AppState, file_id: &str) -> Result<String, UiError> {
+    let file_id = file_id.trim();
+    if file_id.is_empty() {
+        return Err(UiError::bad("file_id required for file source"));
+    }
+    if let Some(rest) = file_id.strip_prefix("lib:") {
+        let decoded = percent_decode_simple(rest);
+        let (cat, name) = decoded
+            .split_once('/')
+            .ok_or_else(|| UiError::bad("invalid library file ref"))?;
+        let path = library::file_path(&st.ui.recordings_dir(), cat, name).map_err(UiError::from)?;
+        return Ok(path.to_string_lossy().into_owned());
+    }
+    if let Some(path) = st.playout_media.path_for(file_id) {
+        return Ok(path.to_string_lossy().into_owned());
+    }
+    // Absolute path passthrough for advanced use.
+    if PathBuf::from(file_id).is_file() {
+        return Ok(file_id.to_string());
+    }
+    Err(UiError::bad(format!("media `{file_id}` not found")))
+}
+
+fn percent_decode_simple(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let h = match bytes[i + 1] {
+                b'0'..=b'9' => bytes[i + 1] - b'0',
+                b'a'..=b'f' => bytes[i + 1] - b'a' + 10,
+                b'A'..=b'F' => bytes[i + 1] - b'A' + 10,
+                _ => {
+                    out.push(bytes[i]);
+                    i += 1;
+                    continue;
+                }
+            };
+            let l = match bytes[i + 2] {
+                b'0'..=b'9' => bytes[i + 2] - b'0',
+                b'a'..=b'f' => bytes[i + 2] - b'a' + 10,
+                b'A'..=b'F' => bytes[i + 2] - b'A' + 10,
+                _ => {
+                    out.push(bytes[i]);
+                    i += 1;
+                    continue;
+                }
+            };
+            out.push((h << 4) | l);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn resolve_playout_source(st: &AppState, id: u32, body: &PlayoutStartBody) -> Result<(String, Option<String>), UiError> {
+    if let Some(s) = body
+        .source
+        .as_ref()
+        .or(body.target.as_ref())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Ok((s, body.format_code.clone()));
+    }
+    let client_id = format!("decode-{id}");
+    let cfg_name = st
+        .orch
+        .cfg
+        .playout
+        .iter()
+        .find(|c| c.id == client_id)
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| format!("Decode {id}"));
+    st.ui.ensure_playout(id, &cfg_name);
+    let meta = st.ui.playout(id);
+    let format_code = body
+        .format_code
+        .clone()
+        .or_else(|| {
+            if meta.format_code.is_empty() {
+                Some("auto".into())
+            } else {
+                Some(meta.format_code.clone())
+            }
+        });
+    if meta.source == "file" {
+        let path = resolve_playout_file_path(st, &meta.file_id)?;
+        Ok((path, format_code))
+    } else {
+        let url = st.ui.playout_srt_url(id).map_err(UiError::from)?;
+        Ok((url, format_code))
+    }
 }
 
 async fn start_playout_ui(
@@ -590,19 +789,11 @@ async fn start_playout_ui(
         format_code: None,
     });
     let client_id = format!("decode-{id}");
-    let source = body
-        .source
-        .or(body.target)
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| UiError::bad("source/target required"))?;
+    let (source, format_code) = resolve_playout_source(&st, id, &body)?;
     st.orch
-        .start_playout(&client_id, source, body.format_code)
+        .start_playout(&client_id, source, format_code)
         .map_err(UiError::from)?;
-    let list = snapshot::playout_json(st.orch.as_ref());
-    list.into_iter()
-        .find(|v| v.get("id").and_then(|x| x.as_u64()) == Some(id as u64))
-        .map(Json)
-        .ok_or_else(|| UiError::not_found("playout not found"))
+    Ok(Json(playout_client_json(&st, id)?))
 }
 
 async fn stop_playout_ui(
@@ -611,38 +802,80 @@ async fn stop_playout_ui(
 ) -> Result<Json<Value>, UiError> {
     let client_id = format!("decode-{id}");
     st.orch.stop_playout(&client_id).map_err(UiError::from)?;
-    let list = snapshot::playout_json(st.orch.as_ref());
-    list.into_iter()
-        .find(|v| v.get("id").and_then(|x| x.as_u64()) == Some(id as u64))
-        .map(Json)
-        .ok_or_else(|| UiError::not_found("playout not found"))
+    Ok(Json(playout_client_json(&st, id)?))
+}
+
+async fn pause_playout_ui(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+) -> Result<Json<Value>, UiError> {
+    let client_id = format!("decode-{id}");
+    st.orch.pause_playout(&client_id).map_err(UiError::from)?;
+    Ok(Json(playout_client_json(&st, id)?))
+}
+
+async fn resume_playout_ui(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+) -> Result<Json<Value>, UiError> {
+    let client_id = format!("decode-{id}");
+    st.orch.resume_playout(&client_id).map_err(UiError::from)?;
+    Ok(Json(playout_client_json(&st, id)?))
+}
+
+async fn playout_logs_ui(Path(id): Path<u32>) -> Json<Value> {
+    Json(json!({
+        "id": id,
+        "lines": [
+            format!("playout decode-{id}: logs not yet wired to GST bus"),
+        ],
+    }))
+}
+
+fn playout_format_list() -> Vec<Value> {
+    vec![
+        json!({"code": "auto", "label": "Auto (from source)", "width": 1920, "height": 1080, "fps": 50, "interlaced": false}),
+        json!({"code": "Hp50", "label": "1080p50", "width": 1920, "height": 1080, "fps": 50, "interlaced": false}),
+        json!({"code": "Hi50", "label": "1080i50 → 1080p50 OUT", "width": 1920, "height": 1080, "fps": 25, "interlaced": true}),
+        json!({"code": "Hp25", "label": "1080p25", "width": 1920, "height": 1080, "fps": 25, "interlaced": false}),
+        json!({"code": "Hp59.94", "label": "1080p59.94", "width": 1920, "height": 1080, "fps": 59.94, "interlaced": false}),
+        json!({"code": "Hi59.94", "label": "1080i59.94 → 1080p59.94 OUT", "width": 1920, "height": 1080, "fps": 29.97, "interlaced": true}),
+    ]
 }
 
 async fn playout_devices(State(st): State<AppState>) -> Json<Value> {
+    let formats = playout_format_list();
     let mut devices = Vec::new();
     if let Ok(report) = st.orch.probe() {
-        // Best-effort: serialize whatever probe returns.
-        if let Ok(v) = serde_json::to_value(&report) {
-            if let Some(arr) = v.get("decklink").and_then(|d| d.as_array()) {
-                for (i, d) in arr.iter().enumerate() {
-                    let name = d
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("DeckLink");
-                    devices.push(json!({
-                        "id": name,
-                        "label": name,
-                        "index": i,
-                    }));
-                }
+        for d in report.devices {
+            if matches!(
+                d.direction,
+                roc_devices::DeviceDirection::Output | roc_devices::DeviceDirection::Unknown
+            ) {
+                devices.push(json!({
+                    "name": d.name,
+                    "label": d.name,
+                    "open_name": d.name,
+                    "formats": formats.clone(),
+                    "probe_log": report.notes.join("\n"),
+                }));
             }
         }
+        // Deduplicate by name (probe may list in+out with same label).
+        let mut seen = std::collections::HashSet::new();
+        devices.retain(|d| {
+            let name = d.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            seen.insert(name.to_string())
+        });
     }
     if devices.is_empty() {
         for p in &st.orch.cfg.playout {
             devices.push(json!({
-                "id": p.device,
+                "name": p.device,
                 "label": p.device,
+                "open_name": p.device,
+                "formats": formats.clone(),
+                "probe_log": "",
             }));
         }
     }

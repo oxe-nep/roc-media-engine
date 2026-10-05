@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use parking_lot::Mutex;
 use roc_config::{ChannelConfig, EncodePreset, PlayoutClientConfig};
 use roc_devices::DeviceProbeReport;
@@ -35,6 +35,7 @@ struct Play {
     device: String,
     status: ChannelStatus,
     source: Option<String>,
+    format_code: Option<String>,
     last_error: Option<String>,
 }
 
@@ -394,6 +395,7 @@ impl PipelineBackend for MockBackend {
     }
 
     fn start_playout(&self, client: &PlayoutClientConfig, source: &str) -> Result<()> {
+        let format_code = crate::resolve_playout_format_code(client.format_code.as_deref(), source);
         let mut map = self.playout.lock();
         map.insert(
             client.id.clone(),
@@ -402,6 +404,7 @@ impl PipelineBackend for MockBackend {
                 device: client.device.clone(),
                 status: ChannelStatus::Running,
                 source: Some(source.to_string()),
+                format_code: Some(format_code),
                 last_error: None,
             },
         );
@@ -413,7 +416,32 @@ impl PipelineBackend for MockBackend {
         if let Some(p) = map.get_mut(client_id) {
             p.status = ChannelStatus::Stopped;
             p.source = None;
+            p.format_code = None;
         }
+        Ok(())
+    }
+
+    fn pause_playout(&self, client_id: &str) -> Result<()> {
+        let mut map = self.playout.lock();
+        let p = map
+            .get_mut(client_id)
+            .with_context(|| format!("playout {client_id} not running"))?;
+        if !matches!(p.status, ChannelStatus::Running | ChannelStatus::Waiting) {
+            bail!("playout {client_id} is not running");
+        }
+        p.status = ChannelStatus::Paused;
+        Ok(())
+    }
+
+    fn resume_playout(&self, client_id: &str) -> Result<()> {
+        let mut map = self.playout.lock();
+        let p = map
+            .get_mut(client_id)
+            .with_context(|| format!("playout {client_id} not running"))?;
+        if p.status != ChannelStatus::Paused {
+            bail!("playout {client_id} is not paused");
+        }
+        p.status = ChannelStatus::Running;
         Ok(())
     }
 
@@ -427,6 +455,7 @@ impl PipelineBackend for MockBackend {
                 status: p.status,
                 device: p.device.clone(),
                 source: p.source.clone(),
+                format_code: p.format_code.clone(),
                 last_error: p.last_error.clone(),
             })
             .collect();

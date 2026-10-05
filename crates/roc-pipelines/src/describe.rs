@@ -568,6 +568,7 @@ pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
     // Encode path deinterlaces to progressive; prefer progressive sink modes so
     // DeckLink OUT actually shows frames (Hi50 + progressive decode → black video).
     let mode = match opts.format_code.as_str() {
+        "auto" | "" => "1080p50",
         "Hp50" | "hp50" | "1080p50" => "1080p50",
         // Map interlaced UI codes to progressive equivalents for our progressive encode.
         "Hi50" | "hi50" | "1080i50" => "1080p50",

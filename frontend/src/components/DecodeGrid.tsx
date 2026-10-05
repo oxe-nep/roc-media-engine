@@ -34,11 +34,16 @@ function formatClock(sec?: number): string {
 
 function formatDisplay(code?: string): string {
   if (!code) return "—";
+  if (code === "auto") return "Auto";
   const map: Record<string, string> = {
     Hi50: "1080i50",
     Hp50: "1080p50",
     Hi25: "1080i25",
     Hp25: "1080p25",
+    "Hp59.94": "1080p59.94",
+    Hp5994: "1080p59.94",
+    "Hi59.94": "1080i59.94",
+    Hi5994: "1080i59.94",
     Hp60: "1080p60",
     Hp30: "1080p30",
     Hp24: "1080p24",

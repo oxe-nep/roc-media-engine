@@ -147,9 +147,32 @@ playout:
   - id: decode-1
     name: "Decode 1"
     device: "DeckLink IP 100G (1)"
-    format_code: Hp50
+    format_code: auto
   - id: decode-2
     name: "Decode 2"
     device: "DeckLink IP 100G (2)"
-    format_code: Hp50
-  # … decode-3..8 as needed; Go maps client N → decode-N via MEDIA_ENGINE_PLAYOUT
+    format_code: auto
+  - id: decode-3
+    name: "Decode 3"
+    device: "DeckLink IP 100G (3)"
+    format_code: auto
+  - id: decode-4
+    name: "Decode 4"
+    device: "DeckLink IP 100G (4)"
+    format_code: auto
+  - id: decode-5
+    name: "Decode 5"
+    device: "DeckLink IP 100G (5)"
+    format_code: auto
+  - id: decode-6
+    name: "Decode 6"
+    device: "DeckLink IP 100G (6)"
+    format_code: auto
+  - id: decode-7
+    name: "Decode 7"
+    device: "DeckLink IP 100G (7)"
+    format_code: auto
+  - id: decode-8
+    name: "Decode 8"
+    device: "DeckLink IP 100G (8)"
+    format_code: auto

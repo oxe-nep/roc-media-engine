@@ -1,4 +1,4 @@
-//! Persistent UI-facing state (SRT settings, recording labels/schedules).
+//! Persistent UI-facing state (SRT settings, recording labels/schedules, playout).
 
 use std::collections::HashMap;
 use std::fs;
@@ -32,6 +32,15 @@ fn default_port_zero() -> u16 {
 fn default_latency() -> u32 {
     120
 }
+fn default_playout_source() -> String {
+    "srt".into()
+}
+fn default_caller() -> String {
+    "caller".into()
+}
+fn default_auto_format() -> String {
+    "auto".into()
+}
 
 impl Default for SrtSettings {
     fn default() -> Self {
@@ -41,6 +50,49 @@ impl Default for SrtSettings {
             target: String::new(),
             passphrase: String::new(),
             latency_ms: default_latency(),
+        }
+    }
+}
+
+/// Persisted decode/playout client settings (UI).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayoutMeta {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_playout_source")]
+    pub source: String,
+    #[serde(default)]
+    pub file_id: String,
+    #[serde(default, rename = "loop")]
+    pub loop_file: bool,
+    #[serde(default = "default_caller")]
+    pub mode: String,
+    #[serde(default = "default_port_zero")]
+    pub port: u16,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub passphrase: String,
+    #[serde(default = "default_latency")]
+    pub latency_ms: u32,
+    /// `auto` = probe source on start; otherwise BMD code override (e.g. `Hp50`).
+    #[serde(default = "default_auto_format")]
+    pub format_code: String,
+}
+
+impl Default for PlayoutMeta {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            source: default_playout_source(),
+            file_id: String::new(),
+            loop_file: false,
+            mode: default_caller(),
+            port: 0,
+            target: String::new(),
+            passphrase: String::new(),
+            latency_ms: default_latency(),
+            format_code: default_auto_format(),
         }
     }
 }
@@ -112,6 +164,8 @@ struct PersistFile {
     #[serde(default)]
     recordings: HashMap<String, RecMetaPersist>,
     #[serde(default)]
+    playout: HashMap<String, PlayoutMeta>,
+    #[serde(default)]
     recordings_dir: Option<PathBuf>,
 }
 
@@ -134,6 +188,7 @@ pub struct UiState {
 struct Inner {
     srt: HashMap<u32, SrtSettings>,
     recordings: HashMap<u32, RecMeta>,
+    playout: HashMap<u32, PlayoutMeta>,
     recordings_dir: PathBuf,
 }
 
@@ -143,6 +198,7 @@ impl UiState {
         let path = data_dir.join("ui-state.json");
         let mut srt = HashMap::new();
         let mut recordings = HashMap::new();
+        let mut playout = HashMap::new();
         let mut recordings_dir = default_recordings;
         if let Ok(raw) = fs::read_to_string(&path) {
             if let Ok(f) = serde_json::from_str::<PersistFile>(&raw) {
@@ -169,6 +225,11 @@ impl UiState {
                         );
                     }
                 }
+                for (k, v) in f.playout {
+                    if let Ok(id) = k.parse::<u32>() {
+                        playout.insert(id, v);
+                    }
+                }
                 if let Some(p) = f.recordings_dir {
                     if !p.as_os_str().is_empty() {
                         recordings_dir = p;
@@ -182,6 +243,7 @@ impl UiState {
             inner: Mutex::new(Inner {
                 srt,
                 recordings,
+                playout,
                 recordings_dir,
             }),
         }
@@ -202,6 +264,9 @@ impl UiState {
                     schedule: r.schedule.clone(),
                 },
             );
+        }
+        for (id, p) in &guard.playout {
+            f.playout.insert(id.to_string(), p.clone());
         }
         f.recordings_dir = Some(guard.recordings_dir.clone());
         drop(guard);
@@ -233,6 +298,15 @@ impl UiState {
         });
     }
 
+    pub fn ensure_playout(&self, id: u32, default_name: &str) {
+        let mut g = self.inner.lock();
+        g.playout.entry(id).or_insert_with(|| PlayoutMeta {
+            name: default_name.to_string(),
+            port: 9200 + id as u16,
+            ..PlayoutMeta::default()
+        });
+    }
+
     pub fn srt(&self, id: u32) -> SrtSettings {
         self.inner
             .lock()
@@ -247,6 +321,24 @@ impl UiState {
 
     pub fn set_srt(&self, id: u32, settings: SrtSettings) {
         self.inner.lock().srt.insert(id, settings);
+        self.persist();
+    }
+
+    pub fn playout(&self, id: u32) -> PlayoutMeta {
+        self.inner
+            .lock()
+            .playout
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| PlayoutMeta {
+                name: format!("Decode {id}"),
+                port: 9200 + id as u16,
+                ..PlayoutMeta::default()
+            })
+    }
+
+    pub fn set_playout(&self, id: u32, meta: PlayoutMeta) {
+        self.inner.lock().playout.insert(id, meta);
         self.persist();
     }
 
@@ -341,15 +433,49 @@ impl UiState {
     /// Build engine publish URI (latency in microseconds for GST/FFmpeg compat).
     pub fn srt_output_url(&self, id: u32) -> anyhow::Result<String> {
         let s = self.srt(id);
-        let latency_ms = if s.latency_ms == 0 { 120 } else { s.latency_ms };
+        Self::build_srt_url(
+            &s.mode,
+            s.port,
+            &s.target,
+            &s.passphrase,
+            s.latency_ms,
+            9100 + id as u16,
+            true,
+        )
+    }
+
+    /// SRT URI for decode/playout (listener or caller).
+    pub fn playout_srt_url(&self, id: u32) -> anyhow::Result<String> {
+        let p = self.playout(id);
+        Self::build_srt_url(
+            &p.mode,
+            p.port,
+            &p.target,
+            &p.passphrase,
+            p.latency_ms,
+            9200 + id as u16,
+            true,
+        )
+    }
+
+    fn build_srt_url(
+        mode: &str,
+        port: u16,
+        target: &str,
+        passphrase: &str,
+        latency_ms: u32,
+        default_port: u16,
+        include_passphrase: bool,
+    ) -> anyhow::Result<String> {
+        let latency_ms = if latency_ms == 0 { 120 } else { latency_ms };
         let latency_us = if latency_ms > 8000 {
             latency_ms
         } else {
             latency_ms * 1000
         };
-        match s.mode.as_str() {
+        match mode {
             "caller" => {
-                let target = s.target.trim();
+                let target = target.trim();
                 if target.is_empty() {
                     anyhow::bail!("caller mode requires a target");
                 }
@@ -365,12 +491,12 @@ impl UiState {
                 }
             }
             _ => {
-                let port = if s.port == 0 { 9100 + id as u16 } else { s.port };
+                let port = if port == 0 { default_port } else { port };
                 let mut url = format!(
                     "srt://0.0.0.0:{port}?mode=listener&latency={latency_us}"
                 );
-                if !s.passphrase.is_empty() {
-                    url.push_str(&format!("&passphrase={}", urlencoding_lite(&s.passphrase)));
+                if include_passphrase && !passphrase.is_empty() {
+                    url.push_str(&format!("&passphrase={}", urlencoding_lite(passphrase)));
                 }
                 Ok(url)
             }
@@ -393,6 +519,30 @@ impl UiState {
             }
             _ => {
                 let port = if s.port == 0 { 9100 + id as u16 } else { s.port };
+                format!(
+                    "srt://{}:{port}?mode=caller&latency={latency}",
+                    self.public_host
+                )
+            }
+        }
+    }
+
+    pub fn playout_listen_url(&self, id: u32) -> String {
+        let p = self.playout(id);
+        let latency = if p.latency_ms == 0 { 120 } else { p.latency_ms };
+        match p.mode.as_str() {
+            "caller" => {
+                let t = p.target.trim();
+                if t.is_empty() {
+                    String::new()
+                } else if t.starts_with("srt://") {
+                    t.to_string()
+                } else {
+                    format!("srt://{t}?mode=caller&latency={latency}")
+                }
+            }
+            _ => {
+                let port = if p.port == 0 { 9200 + id as u16 } else { p.port };
                 format!(
                     "srt://{}:{port}?mode=caller&latency={latency}",
                     self.public_host

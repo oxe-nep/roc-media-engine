@@ -45,6 +45,7 @@ struct PlayoutRuntime {
     device: String,
     status: ChannelStatus,
     source: Option<String>,
+    format_code: Option<String>,
     last_error: Option<String>,
     pipeline: Option<gstreamer::Pipeline>,
 }
@@ -319,13 +320,15 @@ impl PipelineBackend for GstBackend {
 
     fn start_playout(&self, client: &PlayoutClientConfig, source: &str) -> Result<()> {
         use gstreamer::prelude::*;
+        use crate::resolve_playout_format_code;
 
+        let format_code = resolve_playout_format_code(client.format_code.as_deref(), source);
         let launch = build_playout_launch(&PlayoutLaunchOpts {
             source: source.to_string(),
             device: client.device.clone(),
-            format_code: client.format_code.clone().unwrap_or_else(|| "Hp50".into()),
+            format_code: format_code.clone(),
         });
-        tracing::info!(%launch, client_id = %client.id, "starting playout pipeline");
+        tracing::info!(%launch, client_id = %client.id, %format_code, "starting playout pipeline");
         let pipeline = gstreamer::parse::launch(&launch)
             .with_context(|| format!("parse playout launch for {}", client.id))?
             .downcast::<gstreamer::Pipeline>()
@@ -347,6 +350,7 @@ impl PipelineBackend for GstBackend {
                 device: client.device.clone(),
                 status: ChannelStatus::Running,
                 source: Some(source.to_string()),
+                format_code: Some(format_code),
                 last_error: None,
                 pipeline: Some(pipeline),
             },
@@ -363,7 +367,40 @@ impl PipelineBackend for GstBackend {
             }
             p.status = ChannelStatus::Stopped;
             p.source = None;
+            p.format_code = None;
         }
+        Ok(())
+    }
+
+    fn pause_playout(&self, client_id: &str) -> Result<()> {
+        use gstreamer::prelude::*;
+        let mut map = self.playout.lock();
+        let p = map
+            .get_mut(client_id)
+            .with_context(|| format!("playout {client_id} not running"))?;
+        let pipe = p
+            .pipeline
+            .as_ref()
+            .with_context(|| format!("playout {client_id} has no pipeline"))?;
+        pipe.set_state(gstreamer::State::Paused)
+            .context("playout PAUSED")?;
+        p.status = ChannelStatus::Paused;
+        Ok(())
+    }
+
+    fn resume_playout(&self, client_id: &str) -> Result<()> {
+        use gstreamer::prelude::*;
+        let mut map = self.playout.lock();
+        let p = map
+            .get_mut(client_id)
+            .with_context(|| format!("playout {client_id} not running"))?;
+        let pipe = p
+            .pipeline
+            .as_ref()
+            .with_context(|| format!("playout {client_id} has no pipeline"))?;
+        pipe.set_state(gstreamer::State::Playing)
+            .context("playout PLAYING")?;
+        p.status = ChannelStatus::Running;
         Ok(())
     }
 
@@ -377,6 +414,7 @@ impl PipelineBackend for GstBackend {
                 status: p.status,
                 device: p.device.clone(),
                 source: p.source.clone(),
+                format_code: p.format_code.clone(),
                 last_error: p.last_error.clone(),
             })
             .collect();

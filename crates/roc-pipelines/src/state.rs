@@ -6,6 +6,8 @@ pub enum ChannelStatus {
     Stopped,
     Waiting,
     Running,
+    /// File playout paused (GST PAUSED).
+    Paused,
     Error,
     Restarting,
 }
@@ -94,6 +96,9 @@ pub struct PlayoutSnapshot {
     pub status: ChannelStatus,
     pub device: String,
     pub source: Option<String>,
+    /// Locked BMD/GST format code after probe (e.g. `Hp50`), when known.
+    #[serde(default)]
+    pub format_code: Option<String>,
     pub last_error: Option<String>,
 }
 
