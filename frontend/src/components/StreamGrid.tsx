@@ -291,14 +291,14 @@ export default function StreamGrid() {
                       </div>
                       <div
                         className="card-presets"
-                        title={`Proxy ${proxyLabel || "—"} · REC ${recLabel || "—"}`}
+                        title={`Proxy ${proxyLabel || "—"} · HQ ${recLabel || "—"}`}
                       >
                         <span className="card-preset-line">
                           <span className="card-preset-role">Proxy</span>
                           <span className="card-preset-value">{proxyLabel || "—"}</span>
                         </span>
                         <span className="card-preset-line">
-                          <span className="card-preset-role">REC</span>
+                          <span className="card-preset-role">HQ</span>
                           <span className="card-preset-value">{recLabel || "—"}</span>
                         </span>
                       </div>
