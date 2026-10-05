@@ -156,11 +156,12 @@ export default function DecodeGrid() {
                 </div>
 
                 <div className="card-footer">
+                  <span className={`card-channel-num ${c.status}`} title={`Output ${c.id}`}>
+                    {c.id}
+                  </span>
+                  <div className="card-footer-body">
                   <div className="card-top">
-                    <div className="card-identity">
-                      <span className={`card-channel-num ${c.status}`} title={`Output ${c.id}`}>
-                        {c.id}
-                      </span>
+                    <div className="card-main">
                       <div className="card-identity-text">
                         <span className="card-name" title={title}>
                           {title}
@@ -252,6 +253,7 @@ export default function DecodeGrid() {
                         ⚙
                       </button>
                     </div>
+                  </div>
                   </div>
                 </div>
               </div>

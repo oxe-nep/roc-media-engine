@@ -682,10 +682,21 @@ html {
 
 .card-footer {
   display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  border-top: 1px solid var(--border-subtle);
+  min-height: 0;
+}
+
+.card-footer-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
   flex-direction: column;
   gap: 5px;
   padding: 6px 8px 7px;
-  border-top: 1px solid var(--border-subtle);
 }
 
 .card-main {
@@ -709,7 +720,7 @@ html {
   flex: 1;
   display: flex;
   align-items: stretch;
-  gap: 8px;
+  gap: 0;
 }
 
 .card-identity-text {
@@ -721,59 +732,58 @@ html {
   gap: 1px;
 }
 
-/* Match left 8ch meter rail width; square fills the footer rail. */
+/* Flush left rail — same width as 8ch meters, full footer height (not a badge). */
 .card-channel-num {
-  --card-rail: 46px;
-  flex: 0 0 var(--card-rail);
-  align-self: center;
+  flex: 0 0 46px;
+  align-self: stretch;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  width: var(--card-rail);
-  height: var(--card-rail);
-  min-width: var(--card-rail);
+  width: 46px;
+  min-width: 46px;
+  min-height: 100%;
   padding: 0;
-  border-radius: 6px;
-  border: 1.5px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.05);
+  border-radius: 0;
+  border: 0;
+  border-right: 1px solid var(--border-subtle);
+  background: rgba(255, 255, 255, 0.04);
   font-size: 1.35rem;
   font-weight: 900;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
   color: var(--text-secondary);
   line-height: 1;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.2);
+  box-shadow: none;
 }
 
 .card-channel-num.running {
   color: #b7e0b7;
-  border-color: rgba(92, 184, 92, 0.45);
-  background: rgba(92, 184, 92, 0.12);
-  box-shadow: 0 0 0 1px rgba(92, 184, 92, 0.12);
+  background: rgba(92, 184, 92, 0.14);
+  border-right-color: rgba(92, 184, 92, 0.35);
 }
 
 .card-channel-num.waiting {
   color: #e6d29a;
-  border-color: rgba(200, 160, 60, 0.45);
-  background: rgba(200, 160, 60, 0.12);
-  box-shadow: 0 0 0 1px rgba(200, 160, 60, 0.12);
+  background: rgba(200, 160, 60, 0.14);
+  border-right-color: rgba(200, 160, 60, 0.35);
 }
 
 .card-channel-num.error {
   color: #f0a39a;
-  border-color: rgba(231, 76, 60, 0.45);
-  background: rgba(231, 76, 60, 0.12);
+  background: rgba(231, 76, 60, 0.14);
+  border-right-color: rgba(231, 76, 60, 0.35);
 }
 
 .card-channel-num.stopped {
   color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .card-channel-num.paused {
   color: #e6d29a;
-  border-color: rgba(200, 160, 60, 0.45);
-  background: rgba(200, 160, 60, 0.12);
+  background: rgba(200, 160, 60, 0.14);
+  border-right-color: rgba(200, 160, 60, 0.35);
 }
 
 .card-title {

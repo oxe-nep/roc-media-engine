@@ -294,171 +294,173 @@ export default function StreamGrid() {
               </div>
 
               <div className="card-footer">
-                <div className="card-top">
-                  <div className="card-main">
-                    <span
-                      className={`card-channel-num ${s.status}`}
-                      title={s.name || `Input ${s.id}`}
-                    >
-                      {s.id}
-                    </span>
-                    <div className="card-identity-text">
-                      <div className="card-name-row">
-                        {editingNameId === s.id ? (
-                          <input
-                            ref={nameInputRef}
-                            className="card-name-input"
-                            value={nameDraft}
-                            disabled={metaBusy[s.id]}
-                            onChange={(e) => setNameDraft(e.target.value)}
-                            onBlur={() => commitName(s.id)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") {
-                                e.preventDefault();
-                                (e.target as HTMLInputElement).blur();
-                              } else if (e.key === "Escape") {
-                                e.preventDefault();
-                                setEditingNameId(null);
-                              }
-                            }}
-                            aria-label="Channel name"
-                          />
-                        ) : (
-                          <button
-                            type="button"
-                            className="card-name card-name-edit"
-                            title="Click to rename"
-                            disabled={metaBusy[s.id]}
-                            onClick={() => beginEditName(s.id, rec?.name || `ch${s.id}`)}
-                          >
-                            {rec?.name || `ch${s.id}`}
-                          </button>
-                        )}
-                        <select
-                          className="card-category card-category-select"
-                          value={cat}
-                          disabled={metaBusy[s.id] || categories.length === 0}
-                          title="Change folder"
-                          aria-label="Category"
-                          onChange={(e) => changeCategory(s.id, e.target.value)}
-                        >
-                          {!categories.some((c) => c.name === cat) && (
-                            <option value={cat}>
-                              {cat === "_unsorted" ? "Unsorted" : cat}
-                            </option>
+                <span
+                  className={`card-channel-num ${s.status}`}
+                  title={s.name || `Input ${s.id}`}
+                >
+                  {s.id}
+                </span>
+                <div className="card-footer-body">
+                  <div className="card-top">
+                    <div className="card-main">
+                      <div className="card-identity-text">
+                        <div className="card-name-row">
+                          {editingNameId === s.id ? (
+                            <input
+                              ref={nameInputRef}
+                              className="card-name-input"
+                              value={nameDraft}
+                              disabled={metaBusy[s.id]}
+                              onChange={(e) => setNameDraft(e.target.value)}
+                              onBlur={() => commitName(s.id)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  (e.target as HTMLInputElement).blur();
+                                } else if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  setEditingNameId(null);
+                                }
+                              }}
+                              aria-label="Channel name"
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              className="card-name card-name-edit"
+                              title="Click to rename"
+                              disabled={metaBusy[s.id]}
+                              onClick={() => beginEditName(s.id, rec?.name || `ch${s.id}`)}
+                            >
+                              {rec?.name || `ch${s.id}`}
+                            </button>
                           )}
-                          {categories.map((c) => (
-                            <option key={c.name} value={c.name}>
-                              {c.name === "_unsorted" ? "Unsorted" : c.name}
-                            </option>
-                          ))}
-                        </select>
+                          <select
+                            className="card-category card-category-select"
+                            value={cat}
+                            disabled={metaBusy[s.id] || categories.length === 0}
+                            title="Change folder"
+                            aria-label="Category"
+                            onChange={(e) => changeCategory(s.id, e.target.value)}
+                          >
+                            {!categories.some((c) => c.name === cat) && (
+                              <option value={cat}>
+                                {cat === "_unsorted" ? "Unsorted" : cat}
+                              </option>
+                            )}
+                            {categories.map((c) => (
+                              <option key={c.name} value={c.name}>
+                                {c.name === "_unsorted" ? "Unsorted" : c.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="card-meta-row">
+                          <span
+                            className="card-meta"
+                            title={
+                              s.status === "waiting"
+                                ? signalLabel
+                                  ? `No signal (last: ${signalLabel})`
+                                  : "No signal"
+                                : s.format || undefined
+                            }
+                          >
+                            {s.status === "waiting" ? (
+                              <span className="card-meta-item card-meta-waiting">No signal</span>
+                            ) : signalLabel ? (
+                              <span className="card-meta-item card-meta-format">{signalLabel}</span>
+                            ) : (
+                              <span className="card-meta-item">—</span>
+                            )}
+                          </span>
+                        </div>
+                        <div
+                          className="card-presets"
+                          title={`Proxy ${proxyLabel || "—"} · HQ ${recLabel || "—"}`}
+                        >
+                          <span className="card-preset-line">
+                            <span className="card-preset-role">Proxy</span>
+                            <span className="card-preset-value">{proxyLabel || "—"}</span>
+                          </span>
+                          <span className="card-preset-line">
+                            <span className="card-preset-role">HQ</span>
+                            <span className="card-preset-value">{recLabel || "—"}</span>
+                          </span>
+                        </div>
                       </div>
-                      <div className="card-meta-row">
-                        <span
-                          className="card-meta"
+                    </div>
+                    <div className="card-actions">
+                      <div className="card-actions-primary">
+                        <button
+                          type="button"
+                          className={`rec-btn ${proxyRecOn ? "recording" : "idle"}`}
+                          onClick={() => toggleProxyRecording(s.id)}
+                          disabled={proxyRecBusy[s.id] || (!hasSignal && !proxyRecOn)}
                           title={
-                            s.status === "waiting"
-                              ? signalLabel
-                                ? `No signal (last: ${signalLabel})`
-                                : "No signal"
-                              : s.format || undefined
+                            proxyRecOn
+                              ? "Stop proxy recording"
+                              : !hasSignal
+                                ? "No signal"
+                                : `Start proxy recording (${proxyLabel || "proxy"})`
                           }
                         >
-                          {s.status === "waiting" ? (
-                            <span className="card-meta-item card-meta-waiting">No signal</span>
-                          ) : signalLabel ? (
-                            <span className="card-meta-item card-meta-format">{signalLabel}</span>
-                          ) : (
-                            <span className="card-meta-item">—</span>
-                          )}
-                        </span>
+                          {proxyRecBusy[s.id] ? "…" : "REC PROXY"}
+                        </button>
+                        <button
+                          type="button"
+                          className={`rec-btn ${hqRecOn ? "recording" : "idle"}`}
+                          onClick={() => toggleHqRecording(s.id)}
+                          disabled={hqRecBusy[s.id] || (!hasSignal && !hqRecOn)}
+                          title={
+                            hqRecOn
+                              ? "Stop HQ recording"
+                              : !hasSignal
+                                ? "No signal"
+                                : `Start HQ recording (${recLabel || "HQ"})`
+                          }
+                        >
+                          {hqRecBusy[s.id] ? "…" : "REC HQ"}
+                        </button>
+                        <button
+                          type="button"
+                          className={`stream-btn ${srtOn ? "streaming" : "idle"}`}
+                          onClick={() => toggleSrt(s.id)}
+                          disabled={srtBusy[s.id] || (!hasSignal && !srtOn)}
+                          title={
+                            srtOn
+                              ? srtById[s.id]?.publish_url || "Stop SRT"
+                              : !hasSignal
+                                ? "No signal"
+                                : "Start SRT"
+                          }
+                        >
+                          {srtBusy[s.id] ? "…" : "SRT"}
+                        </button>
                       </div>
-                      <div
-                        className="card-presets"
-                        title={`Proxy ${proxyLabel || "—"} · HQ ${recLabel || "—"}`}
-                      >
-                        <span className="card-preset-line">
-                          <span className="card-preset-role">Proxy</span>
-                          <span className="card-preset-value">{proxyLabel || "—"}</span>
-                        </span>
-                        <span className="card-preset-line">
-                          <span className="card-preset-role">HQ</span>
-                          <span className="card-preset-value">{recLabel || "—"}</span>
-                        </span>
+                      <div className="card-actions-tools">
+                        {captureOn && (
+                          <ListenButton
+                            pair={preview?.id === s.id ? preview.pair : null}
+                            onChange={(p) => {
+                              if (p == null) {
+                                setPreview(null);
+                                return;
+                              }
+                              setPreview({ id: s.id, pair: p });
+                            }}
+                          />
+                        )}
+                        <button
+                          type="button"
+                          className="badge settings-btn"
+                          onClick={() => setSettingsId(s.id)}
+                          title="Channel settings"
+                          aria-label="Settings"
+                        >
+                          ⚙
+                        </button>
                       </div>
-                    </div>
-                  </div>
-                  <div className="card-actions">
-                    <div className="card-actions-primary">
-                      <button
-                        type="button"
-                        className={`rec-btn ${proxyRecOn ? "recording" : "idle"}`}
-                        onClick={() => toggleProxyRecording(s.id)}
-                        disabled={proxyRecBusy[s.id] || (!hasSignal && !proxyRecOn)}
-                        title={
-                          proxyRecOn
-                            ? "Stop proxy recording"
-                            : !hasSignal
-                              ? "No signal"
-                              : `Start proxy recording (${proxyLabel || "proxy"})`
-                        }
-                      >
-                        {proxyRecBusy[s.id] ? "…" : "REC PROXY"}
-                      </button>
-                      <button
-                        type="button"
-                        className={`rec-btn ${hqRecOn ? "recording" : "idle"}`}
-                        onClick={() => toggleHqRecording(s.id)}
-                        disabled={hqRecBusy[s.id] || (!hasSignal && !hqRecOn)}
-                        title={
-                          hqRecOn
-                            ? "Stop HQ recording"
-                            : !hasSignal
-                              ? "No signal"
-                              : `Start HQ recording (${recLabel || "HQ"})`
-                        }
-                      >
-                        {hqRecBusy[s.id] ? "…" : "REC HQ"}
-                      </button>
-                      <button
-                        type="button"
-                        className={`stream-btn ${srtOn ? "streaming" : "idle"}`}
-                        onClick={() => toggleSrt(s.id)}
-                        disabled={srtBusy[s.id] || (!hasSignal && !srtOn)}
-                        title={
-                          srtOn
-                            ? srtById[s.id]?.publish_url || "Stop SRT"
-                            : !hasSignal
-                              ? "No signal"
-                              : "Start SRT"
-                        }
-                      >
-                        {srtBusy[s.id] ? "…" : "SRT"}
-                      </button>
-                    </div>
-                    <div className="card-actions-tools">
-                      {captureOn && (
-                        <ListenButton
-                          pair={preview?.id === s.id ? preview.pair : null}
-                          onChange={(p) => {
-                            if (p == null) {
-                              setPreview(null);
-                              return;
-                            }
-                            setPreview({ id: s.id, pair: p });
-                          }}
-                        />
-                      )}
-                      <button
-                        type="button"
-                        className="badge settings-btn"
-                        onClick={() => setSettingsId(s.id)}
-                        title="Channel settings"
-                        aria-label="Settings"
-                      >
-                        ⚙
-                      </button>
                     </div>
                   </div>
                 </div>

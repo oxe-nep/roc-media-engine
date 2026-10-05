@@ -112,9 +112,10 @@ export default function TcGrid() {
                   </div>
 
                   <div className="card-footer">
+                    <span className={`card-channel-num ${numClass}`}>{s.id}</span>
+                    <div className="card-footer-body">
                     <div className="card-top">
-                      <div className="card-identity">
-                        <span className={`card-channel-num ${numClass}`}>{s.id}</span>
+                      <div className="card-main">
                         <div className="card-identity-text">
                           <span className="card-name">TC</span>
                           <div
@@ -160,6 +161,7 @@ export default function TcGrid() {
                           ⚙
                         </button>
                       </div>
+                    </div>
                     </div>
                   </div>
                 </div>

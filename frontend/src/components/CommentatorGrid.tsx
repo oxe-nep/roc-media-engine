@@ -93,9 +93,10 @@ export default function CommentatorGrid() {
                 </div>
 
                 <div className="card-footer">
+                  <span className={`card-channel-num ${numClass}`}>{s.id}</span>
+                  <div className="card-footer-body">
                   <div className="card-top">
-                    <div className="card-identity">
-                      <span className={`card-channel-num ${numClass}`}>{s.id}</span>
+                    <div className="card-main">
                       <div className="card-identity-text">
                         <span className="card-name" title={info?.display_name?.trim() || s.name || `Channel ${s.id}`}>
                           {info?.display_name?.trim() || s.name || `Channel ${s.id}`}
@@ -142,6 +143,7 @@ export default function CommentatorGrid() {
                         ⚙
                       </button>
                     </div>
+                  </div>
                   </div>
                 </div>
               </div>
