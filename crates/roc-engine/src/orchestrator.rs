@@ -415,6 +415,8 @@ impl Orchestrator {
                     format_code: c.format_code.clone(),
                     last_error: None,
                     audio_peaks: None,
+                    position_sec: None,
+                    duration_sec: None,
                 });
             }
         }
@@ -467,5 +469,21 @@ impl Orchestrator {
             .into_iter()
             .find(|p| p.id == client_id)
             .context("playout snapshot missing after resume")
+    }
+
+    pub fn seek_playout(&self, client_id: &str, position_sec: f64) -> Result<PlayoutSnapshot> {
+        self.backend.seek_playout(client_id, position_sec)?;
+        self.list_playout()
+            .into_iter()
+            .find(|p| p.id == client_id)
+            .context("playout snapshot missing after seek")
+    }
+
+    pub fn set_playout_file_control(
+        &self,
+        client_id: &str,
+        control: roc_pipelines::PlayoutFileControl,
+    ) -> Result<()> {
+        self.backend.set_playout_file_control(client_id, &control)
     }
 }

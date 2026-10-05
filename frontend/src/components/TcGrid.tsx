@@ -11,11 +11,10 @@ import HlsPreview from "@/components/HlsPreview";
 import AudioMeters from "@/components/AudioMeters";
 import ListenButton from "@/components/ListenButton";
 import TcSettingsModal from "@/components/TcSettingsModal";
-import type { TcLoopInfo } from "@/lib/api";
 
 export default function TcGrid() {
   const { loading, streams, tcById } = useDashboard();
-  const [error, setError] = useState<string | null>(null);
+  const [cardError, setCardError] = useState<Record<number, string>>({});
   const [busy, setBusy] = useState<Record<number, boolean>>({});
   const [listenPair, setListenPair] = useState<Record<number, number | null>>({});
   const [settingsId, setSettingsId] = useState<number | null>(null);
@@ -24,13 +23,22 @@ export default function TcGrid() {
   const tcStreams = sortByChannelId(streams.filter((s) => showTcCard(workflows, s.id)));
   const channelIds = tcStreams.map((s) => s.id);
 
+  const clearCardError = (id: number) => {
+    setCardError((prev) => {
+      if (!prev[id]) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  };
+
   const stopTc = async (id: number) => {
     setBusy((b) => ({ ...b, [id]: true }));
-    setError(null);
+    clearCardError(id);
     try {
       await updateTcLoop(id, { enabled: false });
     } catch (e) {
-      setError(String(e));
+      setCardError((prev) => ({ ...prev, [id]: String(e) }));
     } finally {
       setBusy((b) => ({ ...b, [id]: false }));
     }
@@ -38,11 +46,11 @@ export default function TcGrid() {
 
   const startTc = async (id: number) => {
     setBusy((b) => ({ ...b, [id]: true }));
-    setError(null);
+    clearCardError(id);
     try {
       await updateTcLoop(id, { enabled: true });
     } catch (e) {
-      setError(String(e));
+      setCardError((prev) => ({ ...prev, [id]: String(e) }));
     } finally {
       setBusy((b) => ({ ...b, [id]: false }));
     }
@@ -58,15 +66,6 @@ export default function TcGrid() {
         <h2 className="io-section-title">TC</h2>
       </div>
 
-      {error && (
-        <div className="error-message">
-          {error}
-          <button type="button" className="error-dismiss" onClick={() => setError(null)} aria-label="Dismiss">
-            ×
-          </button>
-        </div>
-      )}
-
       {loading && channelIds.length === 0 ? (
         <div className="loading">
           <span>…</span>
@@ -79,6 +78,9 @@ export default function TcGrid() {
               const tcLive = tcPreviewHasSignal(tc);
               const listenAt = listenPair[s.id] ?? null;
               const tslText = s.tsl_text?.trim();
+              const actionError = cardError[s.id];
+              const engineError = tc?.error?.trim() || "";
+              const showError = actionError || engineError;
               const numClass = tcLive
                 ? "running"
                 : tc?.status === "error"
@@ -162,6 +164,19 @@ export default function TcGrid() {
                         </button>
                       </div>
                     </div>
+                    {showError && (
+                      <div className="card-error" title={showError}>
+                        <button
+                          type="button"
+                          className="card-error-dismiss"
+                          onClick={() => clearCardError(s.id)}
+                          aria-label="Dismiss"
+                        >
+                          ×
+                        </button>
+                        {actionError || engineError}
+                      </div>
+                    )}
                     </div>
                   </div>
                 </div>

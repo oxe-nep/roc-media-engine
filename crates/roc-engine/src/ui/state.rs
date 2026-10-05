@@ -78,6 +78,15 @@ pub struct PlayoutMeta {
     /// `auto` = probe source on start; otherwise BMD code override (e.g. `Hp50`).
     #[serde(default = "default_auto_format")]
     pub format_code: String,
+    /// Cached media duration in seconds (file source).
+    #[serde(default)]
+    pub duration_sec: Option<f64>,
+    /// Inclusive playhead start (seconds).
+    #[serde(default)]
+    pub mark_in_sec: f64,
+    /// Exclusive playhead end (seconds). `None` = natural EOF.
+    #[serde(default)]
+    pub mark_out_sec: Option<f64>,
 }
 
 impl Default for PlayoutMeta {
@@ -93,6 +102,9 @@ impl Default for PlayoutMeta {
             passphrase: String::new(),
             latency_ms: default_latency(),
             format_code: default_auto_format(),
+            duration_sec: None,
+            mark_in_sec: 0.0,
+            mark_out_sec: None,
         }
     }
 }

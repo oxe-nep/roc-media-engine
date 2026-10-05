@@ -10,8 +10,8 @@ use roc_config::{ChannelConfig, EncodePreset, PlayoutClientConfig};
 use roc_devices::DeviceProbeReport;
 
 use crate::{
-    ChannelSnapshot, ChannelStatus, PipelineBackend, PlayoutSnapshot, RecordingRole,
-    WorkflowKind, WorkflowSnapshot,
+    ChannelSnapshot, ChannelStatus, PipelineBackend, PlayoutFileControl, PlayoutSnapshot,
+    RecordingRole, WorkflowKind, WorkflowSnapshot,
 };
 
 struct Chan {
@@ -37,6 +37,15 @@ struct Play {
     source: Option<String>,
     format_code: Option<String>,
     last_error: Option<String>,
+    is_file: bool,
+    loop_file: bool,
+    mark_in_sec: f64,
+    mark_out_sec: Option<f64>,
+    position_sec: Option<f64>,
+    /// Position at last seek/resume (Running clock origin).
+    play_origin_sec: f64,
+    duration_sec: Option<f64>,
+    started_at: Option<Instant>,
 }
 
 pub struct MockBackend {
@@ -396,6 +405,7 @@ impl PipelineBackend for MockBackend {
 
     fn start_playout(&self, client: &PlayoutClientConfig, source: &str) -> Result<()> {
         let format_code = crate::resolve_playout_format_code(client.format_code.as_deref(), source);
+        let is_file = !source.starts_with("srt://");
         let mut map = self.playout.lock();
         map.insert(
             client.id.clone(),
@@ -406,6 +416,14 @@ impl PipelineBackend for MockBackend {
                 source: Some(source.to_string()),
                 format_code: Some(format_code),
                 last_error: None,
+                is_file,
+                loop_file: false,
+                mark_in_sec: 0.0,
+                mark_out_sec: None,
+                position_sec: if is_file { Some(0.0) } else { None },
+                play_origin_sec: 0.0,
+                duration_sec: if is_file { Some(120.0) } else { None },
+                started_at: Some(Instant::now()),
             },
         );
         Ok(())
@@ -417,6 +435,8 @@ impl PipelineBackend for MockBackend {
             p.status = ChannelStatus::Stopped;
             p.source = None;
             p.format_code = None;
+            p.position_sec = None;
+            p.started_at = None;
         }
         Ok(())
     }
@@ -428,6 +448,11 @@ impl PipelineBackend for MockBackend {
             .with_context(|| format!("playout {client_id} not running"))?;
         if !matches!(p.status, ChannelStatus::Running | ChannelStatus::Waiting) {
             bail!("playout {client_id} is not running");
+        }
+        if let Some(started) = p.started_at.take() {
+            let pos = p.play_origin_sec + started.elapsed().as_secs_f64();
+            p.play_origin_sec = pos;
+            p.position_sec = Some(pos);
         }
         p.status = ChannelStatus::Paused;
         Ok(())
@@ -442,11 +467,70 @@ impl PipelineBackend for MockBackend {
             bail!("playout {client_id} is not paused");
         }
         p.status = ChannelStatus::Running;
+        p.started_at = Some(Instant::now());
+        Ok(())
+    }
+
+    fn seek_playout(&self, client_id: &str, position_sec: f64) -> Result<()> {
+        let mut map = self.playout.lock();
+        let p = map
+            .get_mut(client_id)
+            .with_context(|| format!("playout {client_id} not running"))?;
+        if !p.is_file {
+            bail!("seek is only supported for file playout");
+        }
+        let lo = p.mark_in_sec.max(0.0);
+        let hi = p
+            .mark_out_sec
+            .or(p.duration_sec)
+            .unwrap_or(f64::MAX)
+            .max(lo);
+        let target = position_sec.clamp(lo, hi);
+        p.play_origin_sec = target;
+        p.position_sec = Some(target);
+        p.started_at = Some(Instant::now());
+        Ok(())
+    }
+
+    fn set_playout_file_control(&self, client_id: &str, control: &PlayoutFileControl) -> Result<()> {
+        let mut map = self.playout.lock();
+        let Some(p) = map.get_mut(client_id) else {
+            return Ok(());
+        };
+        if !p.is_file {
+            return Ok(());
+        }
+        p.loop_file = control.loop_file;
+        p.mark_in_sec = control.mark_in_sec.max(0.0);
+        p.mark_out_sec = control
+            .mark_out_sec
+            .filter(|o| o.is_finite() && *o > p.mark_in_sec);
         Ok(())
     }
 
     fn list_playout(&self) -> Vec<PlayoutSnapshot> {
-        let map = self.playout.lock();
+        let mut map = self.playout.lock();
+        for p in map.values_mut() {
+            if p.is_file && matches!(p.status, ChannelStatus::Running) {
+                if let Some(started) = p.started_at {
+                    let mut pos = p.play_origin_sec + started.elapsed().as_secs_f64();
+                    let end = p.mark_out_sec.or(p.duration_sec).unwrap_or(pos);
+                    if pos >= end {
+                        if p.loop_file {
+                            pos = p.mark_in_sec.max(0.0);
+                            p.play_origin_sec = pos;
+                            p.started_at = Some(Instant::now());
+                        } else {
+                            pos = end;
+                            p.play_origin_sec = pos;
+                            p.started_at = None;
+                            p.status = ChannelStatus::Paused;
+                        }
+                    }
+                    p.position_sec = Some(pos);
+                }
+            }
+        }
         let mut out: Vec<_> = map
             .iter()
             .map(|(id, p)| PlayoutSnapshot {
@@ -458,6 +542,8 @@ impl PipelineBackend for MockBackend {
                 format_code: p.format_code.clone(),
                 last_error: p.last_error.clone(),
                 audio_peaks: None,
+                position_sec: p.position_sec,
+                duration_sec: p.duration_sec,
             })
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));

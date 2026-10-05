@@ -335,10 +335,46 @@ mod gst_probe {
         let _ = pipeline.set_state(gstreamer::State::Null);
         best.ok_or_else(|| anyhow!("no video caps from playout source within {timeout_ms}ms"))
     }
+
+    /// Best-effort media duration for a local file (seconds).
+    pub fn probe_file_duration(path: &str, timeout_ms: u64) -> Option<f64> {
+        let src = if path.ends_with(".ts") {
+            format!("filesrc location=\"{path}\" ! tsdemux name=d")
+        } else {
+            format!("filesrc location=\"{path}\" ! qtdemux name=d")
+        };
+        let launch = format!(
+            "{src} \
+             d. ! queue ! video/x-h264 ! h264parse ! fakesink name=vsink sync=false"
+        );
+        let pipeline = gstreamer::parse::launch(&launch).ok()?
+            .downcast::<gstreamer::Pipeline>()
+            .ok()?;
+        pipeline.set_state(gstreamer::State::Paused).ok()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let mut duration = None;
+        while std::time::Instant::now() < deadline {
+            if let Some(t) = pipeline.query_duration::<gstreamer::ClockTime>() {
+                let sec = t.nseconds() as f64 / 1_000_000_000.0;
+                if sec.is_finite() && sec > 0.0 {
+                    duration = Some(sec);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        let _ = pipeline.set_state(gstreamer::State::Null);
+        duration
+    }
 }
 
 #[cfg(feature = "gst")]
-pub use gst_probe::{format_from_caps, probe_input_format, probe_playout_source};
+pub use gst_probe::{format_from_caps, probe_file_duration, probe_input_format, probe_playout_source};
+
+#[cfg(not(feature = "gst"))]
+pub fn probe_file_duration(_path: &str, _timeout_ms: u64) -> Option<f64> {
+    None
+}
 
 #[cfg(test)]
 mod tests {

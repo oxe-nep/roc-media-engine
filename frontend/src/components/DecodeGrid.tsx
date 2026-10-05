@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   isPlayoutOn,
   isPlayoutPaused,
   pausePlayout,
   resumePlayout,
+  seekPlayout,
   startPlayout,
   stopPlayout,
   updatePlayoutClient,
@@ -15,9 +16,7 @@ import { showDecodeCard } from "@/lib/workflow";
 import { sortByChannelId } from "@/lib/sortChannels";
 import { useWorkflows } from "@/hooks/useWorkflows";
 import { useDashboard } from "@/hooks/useDashboard";
-import HlsPreview from "@/components/HlsPreview";
 import AudioMeters from "@/components/AudioMeters";
-import ListenButton from "@/components/ListenButton";
 import DecodeSettingsModal from "@/components/DecodeSettingsModal";
 
 function formatClock(sec?: number): string {
@@ -72,21 +71,172 @@ function cardMeta(c: PlayoutClient): string {
   return bits.join(" · ");
 }
 
+function statusLabel(c: PlayoutClient, on: boolean, paused: boolean): string {
+  if (paused) return "Paused";
+  if (c.status === "waiting") return "Waiting";
+  if (c.status === "error") return "Error";
+  if (on) return "Playing";
+  return "Idle";
+}
+
+function stageLines(c: PlayoutClient): string[] {
+  const lines: string[] = [];
+  if (c.source === "file") {
+    const name = c.file_name ? basename(c.file_name) : c.file_id || "No file";
+    lines.push(name);
+    if (c.loop) lines.push("Loop on");
+  } else if (c.mode === "listener") {
+    lines.push(`SRT listener :${c.port || "—"}`);
+  } else {
+    lines.push(c.target?.trim() || "SRT caller (no target)");
+  }
+  lines.push(formatDisplay(c.format_code));
+  if (c.device_label || c.device) {
+    lines.push(c.device_label || c.device);
+  }
+  return lines;
+}
+
+function FileTimeline({
+  client: c,
+  disabled,
+  onError,
+}: {
+  client: PlayoutClient;
+  disabled?: boolean;
+  onError: (msg: string) => void;
+}) {
+  const duration = Math.max(0, c.duration_sec ?? 0);
+  const livePos = Math.max(0, c.elapsed_sec ?? 0);
+  const markIn = Math.max(0, c.mark_in_sec ?? 0);
+  const markOut =
+    c.mark_out_sec != null && Number.isFinite(c.mark_out_sec) ? Math.max(0, c.mark_out_sec) : null;
+  const [scrub, setScrub] = useState<number | null>(null);
+  const scrubbing = scrub != null;
+  const displayPos = scrubbing ? scrub : livePos;
+  const seekTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const on = isPlayoutOn(c.status);
+
+  useEffect(() => {
+    if (!scrubbing) return;
+    // Drop local scrub once dashboard catches up (±0.35s).
+    if (Math.abs(livePos - scrub) < 0.35) setScrub(null);
+  }, [livePos, scrub, scrubbing]);
+
+  useEffect(() => {
+    return () => {
+      if (seekTimer.current) clearTimeout(seekTimer.current);
+    };
+  }, []);
+
+  if (duration <= 0 && !c.file_id) return null;
+
+  const pct = duration > 0 ? Math.min(100, (displayPos / duration) * 100) : 0;
+  const inPct = duration > 0 ? Math.min(100, (markIn / duration) * 100) : 0;
+  const outPct = markOut != null && duration > 0 ? Math.min(100, (markOut / duration) * 100) : 100;
+
+  const queueSeek = (sec: number) => {
+    setScrub(sec);
+    if (!on) return;
+    if (seekTimer.current) clearTimeout(seekTimer.current);
+    seekTimer.current = setTimeout(() => {
+      seekPlayout(c.id, sec).catch((e) => onError(String(e)));
+    }, 90);
+  };
+
+  const setMarkIn = async () => {
+    try {
+      await updatePlayoutClient(c.id, { mark_in_sec: displayPos });
+    } catch (e) {
+      onError(String(e));
+    }
+  };
+
+  const setMarkOut = async () => {
+    try {
+      await updatePlayoutClient(c.id, { mark_out_sec: displayPos });
+    } catch (e) {
+      onError(String(e));
+    }
+  };
+
+  const clearMarks = async () => {
+    try {
+      await updatePlayoutClient(c.id, { mark_in_sec: 0, mark_out_sec: null });
+    } catch (e) {
+      onError(String(e));
+    }
+  };
+
+  return (
+    <div className="file-timeline">
+      <div className="file-timeline-track">
+        <div className="file-timeline-range" style={{ left: `${inPct}%`, width: `${Math.max(0, outPct - inPct)}%` }} />
+        <input
+          type="range"
+          className="file-timeline-scrub"
+          min={0}
+          max={duration || 1}
+          step={0.04}
+          value={Math.min(displayPos, duration || 1)}
+          disabled={disabled || duration <= 0}
+          aria-label="Scrub timeline"
+          onChange={(e) => queueSeek(Number(e.target.value))}
+        />
+        <div className="file-timeline-playhead" style={{ left: `${pct}%` }} />
+      </div>
+      <div className="file-timeline-row">
+        <span className="file-timeline-clock">
+          {formatClock(displayPos)}
+          <span className="file-timeline-clock-sep">/</span>
+          {formatClock(duration)}
+        </span>
+        <div className="file-timeline-marks">
+          <button type="button" className="ctrl-btn tiny" disabled={disabled || duration <= 0} onClick={() => void setMarkIn()} title="Mark in at playhead">
+            IN
+          </button>
+          <button type="button" className="ctrl-btn tiny" disabled={disabled || duration <= 0} onClick={() => void setMarkOut()} title="Mark out at playhead">
+            OUT
+          </button>
+          <button
+            type="button"
+            className="ctrl-btn tiny"
+            disabled={disabled || (markIn <= 0 && markOut == null)}
+            onClick={() => void clearMarks()}
+            title="Clear in/out"
+          >
+            CLR
+          </button>
+        </div>
+      </div>
+      {(markIn > 0 || markOut != null) && (
+        <div className="file-timeline-mark-meta">
+          In {formatClock(markIn)}
+          {markOut != null ? ` · Out ${formatClock(markOut)}` : ""}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DecodeGrid() {
   const { loading, playout: clients } = useDashboard();
-  const [error, setError] = useState<string | null>(null);
+  const [cardError, setCardError] = useState<Record<number, string>>({});
   const [busy, setBusy] = useState<Record<number, boolean>>({});
-  const [listenPair, setListenPair] = useState<Record<number, number | null>>({});
   const [settingsId, setSettingsId] = useState<number | null>(null);
   const { workflows } = useWorkflows();
 
   const withBusy = async (id: number, fn: () => Promise<unknown>) => {
     setBusy((b) => ({ ...b, [id]: true }));
-    setError(null);
+    setCardError((e) => {
+      const next = { ...e };
+      delete next[id];
+      return next;
+    });
     try {
       await fn();
     } catch (e) {
-      setError(String(e));
+      setCardError((prev) => ({ ...prev, [id]: String(e) }));
     } finally {
       setBusy((b) => ({ ...b, [id]: false }));
     }
@@ -97,7 +247,7 @@ export default function DecodeGrid() {
     try {
       await updatePlayoutClient(c.id, { loop: next });
     } catch (e) {
-      setError(String(e));
+      setCardError((prev) => ({ ...prev, [c.id]: String(e) }));
     }
   };
 
@@ -114,15 +264,6 @@ export default function DecodeGrid() {
         <h2 className="io-section-title">Decode</h2>
       </div>
 
-      {error && (
-        <div className="error-message">
-          {error}
-          <button type="button" className="error-dismiss" onClick={() => setError(null)} aria-label="Dismiss">
-            ×
-          </button>
-        </div>
-      )}
-
       {loading && clients.length === 0 ? (
         <div className="loading">
           <span>…</span>
@@ -132,31 +273,27 @@ export default function DecodeGrid() {
           {visibleClients.map((c) => {
             const on = isPlayoutOn(c.status);
             const paused = isPlayoutPaused(c.status);
-            const listenAt = listenPair[c.id] ?? null;
             const isFile = c.source === "file";
             const title = cardTitle(c);
-            const previewOn = isFile ? on && !!c.sending : on;
-            const previewKey = `${c.id}-${c.file_id ?? ""}-${c.sending ? "live" : "idle"}`;
+            const actionError = cardError[c.id];
+            const engineError = c.error?.trim() || "";
+            const showError = actionError || engineError;
             return (
               <div key={c.id} className={`card-panel ${c.status}`}>
                 <div className="card-stage">
-                  <AudioMeters channelId={c.id} bus="playout" channels={2}>
-                  <div className="card-thumb">
-                    <HlsPreview
-                      active={previewOn}
-                      listenPair={listenAt}
-                      playlistPath={`/hls/playout/${c.id}/preview.m3u8?s=${encodeURIComponent(previewKey)}`}
-                      sessionKey={previewKey}
-                      meterPairs={1}
-                    />
-                    {on && isFile && (c.duration_sec ?? 0) > 0 && (
-                      <div className="thumb-badges">
-                        <div className="stream-badge waiting" title="Elapsed / remaining">
-                          {formatClock(c.elapsed_sec)} / −{formatClock(c.remain_sec)}
-                        </div>
+                  <AudioMeters channelId={c.id} bus="playout" channels={2} silent={!on}>
+                    <div className={`card-thumb card-thumb-meta${on ? " on" : ""}`}>
+                      <div className="decode-meta">
+                        <span className={`decode-meta-status ${c.status}`}>
+                          {statusLabel(c, on, paused)}
+                        </span>
+                        {stageLines(c).map((line, i) => (
+                          <span key={`${i}-${line}`} className="decode-meta-line" title={line}>
+                            {line}
+                          </span>
+                        ))}
                       </div>
-                    )}
-                  </div>
+                    </div>
                   </AudioMeters>
                 </div>
 
@@ -165,100 +302,119 @@ export default function DecodeGrid() {
                     {c.id}
                   </span>
                   <div className="card-footer-body">
-                  <div className="card-top">
-                    <div className="card-main">
-                      <div className="card-identity-text">
-                        <span className="card-name" title={title}>
-                          {title}
-                        </span>
-                        <div className="card-meta" title={cardMeta(c)}>
-                          <span className="card-meta-item">{formatDisplay(c.format_code)}</span>
-                          <span className="card-meta-sep">·</span>
-                          <span className="card-meta-item">{(c.source || "srt").toUpperCase()}</span>
+                    <div className="card-top">
+                      <div className="card-main">
+                        <div className="card-identity-text">
+                          <span className="card-name" title={title}>
+                            {title}
+                          </span>
+                          <div className="card-meta" title={cardMeta(c)}>
+                            <span className="card-meta-item">{formatDisplay(c.format_code)}</span>
+                            <span className="card-meta-sep">·</span>
+                            <span className="card-meta-item">{(c.source || "srt").toUpperCase()}</span>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    <div className="card-actions">
-                      {isFile ? (
-                        <div className="transport">
-                          {!on || paused ? (
+                      <div className="card-actions">
+                        {isFile ? (
+                          <div className="transport">
+                            {!on || paused ? (
+                              <button
+                                type="button"
+                                className="ctrl-btn"
+                                disabled={busy[c.id] || (!c.file_id && !paused)}
+                                onClick={() =>
+                                  withBusy(c.id, async () => {
+                                    if (paused) await resumePlayout(c.id);
+                                    else await startPlayout(c.id);
+                                  })
+                                }
+                                title={paused ? "Resume" : "Play"}
+                              >
+                                {busy[c.id] ? "…" : "PLAY"}
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                className="ctrl-btn primary"
+                                disabled={busy[c.id]}
+                                onClick={() => withBusy(c.id, async () => pausePlayout(c.id))}
+                                title="Pause"
+                              >
+                                {busy[c.id] ? "…" : "PAUSE"}
+                              </button>
+                            )}
                             <button
                               type="button"
                               className="ctrl-btn"
-                              disabled={busy[c.id] || (!c.file_id && !paused)}
-                              onClick={() =>
-                                withBusy(c.id, async () => {
-                                  if (paused) await resumePlayout(c.id);
-                                  else await startPlayout(c.id);
-                                })
-                              }
-                              title={paused ? "Resume" : "Play"}
+                              disabled={busy[c.id] || !on}
+                              onClick={() => withBusy(c.id, async () => stopPlayout(c.id))}
+                              title="Stop"
                             >
-                              {busy[c.id] ? "…" : "PLAY"}
+                              STOP
                             </button>
-                          ) : (
                             <button
                               type="button"
-                              className="ctrl-btn primary"
+                              className={`ctrl-btn${c.loop ? " on" : ""}`}
                               disabled={busy[c.id]}
-                              onClick={() => withBusy(c.id, async () => pausePlayout(c.id))}
-                              title="Pause"
+                              onClick={() => toggleLoop(c)}
+                              title={c.loop ? "Loop on" : "Loop off"}
                             >
-                              {busy[c.id] ? "…" : "PAUSE"}
+                              LOOP
                             </button>
-                          )}
+                          </div>
+                        ) : (
                           <button
                             type="button"
-                            className="ctrl-btn"
-                            disabled={busy[c.id] || !on}
-                            onClick={() => withBusy(c.id, async () => stopPlayout(c.id))}
-                            title="Stop"
-                          >
-                            STOP
-                          </button>
-                          <button
-                            type="button"
-                            className={`ctrl-btn${c.loop ? " on" : ""}`}
+                            className={`stream-btn ${on ? "streaming" : "idle"}`}
+                            onClick={() =>
+                              withBusy(c.id, async () => {
+                                if (on) await stopPlayout(c.id);
+                                else await startPlayout(c.id);
+                              })
+                            }
                             disabled={busy[c.id]}
-                            onClick={() => toggleLoop(c)}
-                            title={c.loop ? "Loop on" : "Loop off"}
+                            title={on ? "Stop" : "Start"}
                           >
-                            LOOP
+                            {busy[c.id] ? "…" : on ? "STOP" : "START"}
                           </button>
-                        </div>
-                      ) : (
+                        )}
                         <button
                           type="button"
-                          className={`stream-btn ${on ? "streaming" : "idle"}`}
+                          className="badge settings-btn"
+                          onClick={() => setSettingsId(c.id)}
+                          aria-label="Settings"
+                        >
+                          ⚙
+                        </button>
+                      </div>
+                    </div>
+                    {isFile && (
+                      <FileTimeline
+                        client={c}
+                        disabled={!!busy[c.id]}
+                        onError={(msg) => setCardError((prev) => ({ ...prev, [c.id]: msg }))}
+                      />
+                    )}
+                    {showError && (
+                      <div className="card-error" title={showError}>
+                        <button
+                          type="button"
+                          className="card-error-dismiss"
                           onClick={() =>
-                            withBusy(c.id, async () => {
-                              if (on) await stopPlayout(c.id);
-                              else await startPlayout(c.id);
+                            setCardError((prev) => {
+                              const next = { ...prev };
+                              delete next[c.id];
+                              return next;
                             })
                           }
-                          disabled={busy[c.id]}
-                          title={on ? "Stop" : "Start"}
+                          aria-label="Dismiss"
                         >
-                          {busy[c.id] ? "…" : on ? "STOP" : "START"}
+                          ×
                         </button>
-                      )}
-                      {on && (
-                        <ListenButton
-                          pair={listenAt}
-                          stereoOnly
-                          onChange={(p) => setListenPair((prev) => ({ ...prev, [c.id]: p }))}
-                        />
-                      )}
-                      <button
-                        type="button"
-                        className="badge settings-btn"
-                        onClick={() => setSettingsId(c.id)}
-                        aria-label="Settings"
-                      >
-                        ⚙
-                      </button>
-                    </div>
-                  </div>
+                        {actionError || engineError}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

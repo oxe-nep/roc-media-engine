@@ -69,7 +69,7 @@ export default function StreamGrid() {
   const { loading, streams, recordings, srtById } = useDashboard();
   const [presets, setPresets] = useState<EncodePreset[]>([]);
   const [categories, setCategories] = useState<LibraryCategory[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [cardError, setCardError] = useState<Record<number, string>>({});
   const [proxyRecBusy, setProxyRecBusy] = useState<Record<number, boolean>>({});
   const [hqRecBusy, setHqRecBusy] = useState<Record<number, boolean>>({});
   const [srtBusy, setSrtBusy] = useState<Record<number, boolean>>({});
@@ -100,7 +100,7 @@ export default function StreamGrid() {
     };
     fetchEncodePresets()
       .then(setPresets)
-      .catch((e) => setError(String(e)));
+      .catch(() => {});
     refreshCategories();
     window.addEventListener("roc-presets-changed", refreshPresets);
     window.addEventListener("roc-library-changed", refreshCategories);
@@ -110,13 +110,23 @@ export default function StreamGrid() {
     };
   }, []);
 
+  const clearCardError = (id: number) => {
+    setCardError((prev) => {
+      if (!prev[id]) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  };
+
   const toggleProxyRecording = async (id: number) => {
     setProxyRecBusy((b) => ({ ...b, [id]: true }));
+    clearCardError(id);
     try {
       if (recordings[id]?.proxy?.status === "recording") await stopProxyRecording(id);
       else await startProxyRecording(id);
     } catch (e) {
-      setError(String(e));
+      setCardError((prev) => ({ ...prev, [id]: String(e) }));
     } finally {
       setProxyRecBusy((b) => ({ ...b, [id]: false }));
     }
@@ -124,11 +134,12 @@ export default function StreamGrid() {
 
   const toggleHqRecording = async (id: number) => {
     setHqRecBusy((b) => ({ ...b, [id]: true }));
+    clearCardError(id);
     try {
       if (recordings[id]?.hq?.status === "recording") await stopHqRecording(id);
       else await startHqRecording(id);
     } catch (e) {
-      setError(String(e));
+      setCardError((prev) => ({ ...prev, [id]: String(e) }));
     } finally {
       setHqRecBusy((b) => ({ ...b, [id]: false }));
     }
@@ -136,11 +147,12 @@ export default function StreamGrid() {
 
   const toggleSrt = async (id: number) => {
     setSrtBusy((b) => ({ ...b, [id]: true }));
+    clearCardError(id);
     try {
       if (srtById[id]?.status === "streaming") await stopSrt(id);
       else await startSrt(id);
     } catch (e) {
-      setError(String(e));
+      setCardError((prev) => ({ ...prev, [id]: String(e) }));
     } finally {
       setSrtBusy((b) => ({ ...b, [id]: false }));
     }
@@ -157,10 +169,11 @@ export default function StreamGrid() {
     setEditingNameId(null);
     if (clean === prev) return;
     setMetaBusy((b) => ({ ...b, [id]: true }));
+    clearCardError(id);
     try {
       await setRecordingName(id, clean);
     } catch (e) {
-      setError(String(e));
+      setCardError((prev) => ({ ...prev, [id]: String(e) }));
     } finally {
       setMetaBusy((b) => ({ ...b, [id]: false }));
     }
@@ -170,10 +183,11 @@ export default function StreamGrid() {
     const prev = recordings[id]?.category || "_unsorted";
     if (!next || next === prev) return;
     setMetaBusy((b) => ({ ...b, [id]: true }));
+    clearCardError(id);
     try {
       await setRecordingCategory(id, next);
     } catch (e) {
-      setError(String(e));
+      setCardError((prev) => ({ ...prev, [id]: String(e) }));
     } finally {
       setMetaBusy((b) => ({ ...b, [id]: false }));
     }
@@ -192,15 +206,6 @@ export default function StreamGrid() {
 
   return (
     <>
-      {error && (
-        <div className="error-message">
-          {error}
-          <button type="button" className="error-dismiss" onClick={() => setError(null)} aria-label="Dismiss">
-            ×
-          </button>
-        </div>
-      )}
-
       <section className="io-section">
         <div className="io-section-head">
           <h2 className="io-section-title">Encode</h2>
@@ -232,6 +237,7 @@ export default function StreamGrid() {
           const recLabel =
             activeRecPreset?.label || s.record_preset || s.encode_preset || null;
           const signalLabel = shortSignalFormat(s.format);
+          const actionError = cardError[s.id];
           return (
             <div key={s.id} className={`card-panel ${s.status}`}>
               <div className="card-stage">
@@ -463,6 +469,19 @@ export default function StreamGrid() {
                       </div>
                     </div>
                   </div>
+                  {actionError && (
+                    <div className="card-error" title={actionError}>
+                      <button
+                        type="button"
+                        className="card-error-dismiss"
+                        onClick={() => clearCardError(s.id)}
+                        aria-label="Dismiss"
+                      >
+                        ×
+                      </button>
+                      {actionError}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

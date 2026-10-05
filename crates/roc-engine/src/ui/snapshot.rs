@@ -203,7 +203,13 @@ pub fn playout_json(orch: &Orchestrator, ui: &UiState) -> Vec<Value> {
             continue;
         }
         ui.ensure_playout(num_id, &p.name);
-        let meta = ui.playout(num_id);
+        let mut meta = ui.playout(num_id);
+        if meta.source == "file" && meta.duration_sec.is_none() {
+            if let Some(d) = p.duration_sec {
+                meta.duration_sec = Some(d);
+                ui.set_playout(num_id, meta.clone());
+            }
+        }
         let live = matches!(
             p.status,
             ChannelStatus::Running | ChannelStatus::Waiting | ChannelStatus::Paused
@@ -266,6 +272,15 @@ pub fn playout_json(orch: &Orchestrator, ui: &UiState) -> Vec<Value> {
             "file_id": meta.file_id,
             "file_name": file_name,
             "loop": meta.loop_file,
+            "mark_in_sec": meta.mark_in_sec,
+            "mark_out_sec": meta.mark_out_sec,
+            "duration_sec": p.duration_sec.or(meta.duration_sec),
+            "elapsed_sec": p.position_sec.unwrap_or(0.0),
+            "remain_sec": {
+                let dur = p.duration_sec.or(meta.duration_sec).unwrap_or(0.0);
+                let pos = p.position_sec.unwrap_or(0.0);
+                (dur - pos).max(0.0)
+            },
             "mode": if meta.mode == "listener" { "listener" } else { "caller" },
             "port": port,
             "target": meta.target,

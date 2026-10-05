@@ -21,19 +21,28 @@ import CommentatorSettingsModal from "@/components/CommentatorSettingsModal";
 export default function CommentatorGrid() {
   const { loading, streams, commentatorById } = useDashboard();
   const { workflows } = useWorkflows();
-  const [error, setError] = useState<string | null>(null);
+  const [cardError, setCardError] = useState<Record<number, string>>({});
   const [busy, setBusy] = useState<Record<number, boolean>>({});
   const [settingsId, setSettingsId] = useState<number | null>(null);
 
   const visible = sortByChannelId(streams.filter((s) => showCommentatorCard(workflows, s.id)));
 
+  const clearCardError = (id: number) => {
+    setCardError((prev) => {
+      if (!prev[id]) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  };
+
   const run = async (id: number, fn: () => Promise<void>) => {
     setBusy((b) => ({ ...b, [id]: true }));
-    setError(null);
+    clearCardError(id);
     try {
       await fn();
     } catch (e) {
-      setError(String(e));
+      setCardError((prev) => ({ ...prev, [id]: String(e) }));
     } finally {
       setBusy((b) => ({ ...b, [id]: false }));
     }
@@ -49,15 +58,6 @@ export default function CommentatorGrid() {
         <h2 className="io-section-title">Remote Commentator</h2>
       </div>
 
-      {error && (
-        <div className="error-message">
-          {error}
-          <button type="button" className="error-dismiss" onClick={() => setError(null)} aria-label="Dismiss">
-            ×
-          </button>
-        </div>
-      )}
-
       {loading && visible.length === 0 ? (
         <div className="loading">
           <span>…</span>
@@ -72,6 +72,9 @@ export default function CommentatorGrid() {
             const numClass = commentatorNumClass(info);
             const isBusy = !!busy[s.id];
             const intercomCount = info?.intercom?.filter((slot) => slot.enabled).length ?? 0;
+            const actionError = cardError[s.id];
+            const engineError = info?.error?.trim() || "";
+            const showError = actionError || engineError;
 
             return (
               <div
@@ -144,6 +147,19 @@ export default function CommentatorGrid() {
                       </button>
                     </div>
                   </div>
+                  {showError && (
+                    <div className="card-error" title={showError}>
+                      <button
+                        type="button"
+                        className="card-error-dismiss"
+                        onClick={() => clearCardError(s.id)}
+                        aria-label="Dismiss"
+                      >
+                        ×
+                      </button>
+                      {actionError || engineError}
+                    </div>
+                  )}
                   </div>
                 </div>
               </div>

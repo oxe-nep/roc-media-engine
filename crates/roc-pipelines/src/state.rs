@@ -103,6 +103,21 @@ pub struct PlayoutSnapshot {
     /// Peak levels in dBFS for playout stereo (−90 = silence).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_peaks: Option<Vec<f64>>,
+    /// File playhead position in seconds (when known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_sec: Option<f64>,
+    /// File duration in seconds (when known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_sec: Option<f64>,
+}
+
+/// File transport controls applied to a running playout client.
+#[derive(Debug, Clone, Default)]
+pub struct PlayoutFileControl {
+    pub loop_file: bool,
+    pub mark_in_sec: f64,
+    /// `None` = play to natural EOF.
+    pub mark_out_sec: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -56,6 +56,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/playout/{id}/stop", post(stop_playout_ui))
         .route("/api/playout/{id}/pause", post(pause_playout_ui))
         .route("/api/playout/{id}/resume", post(resume_playout_ui))
+        .route("/api/playout/{id}/seek", post(seek_playout_ui))
         .route("/api/playout/{id}/logs", get(playout_logs_ui))
         .route("/api/playout/devices", get(playout_devices))
         .route("/api/library/categories", get(lib_categories).post(lib_create_cat))
@@ -601,11 +602,67 @@ struct PlayoutUpdateBody {
     file_id: Option<String>,
     #[serde(rename = "loop")]
     loop_file: Option<bool>,
+    mark_in_sec: Option<f64>,
+    /// JSON `null` clears the out point; omit to leave unchanged.
+    #[serde(default, deserialize_with = "deserialize_optional_mark_out")]
+    mark_out_sec: Option<Option<f64>>,
     mode: Option<String>,
     port: Option<u16>,
     target: Option<String>,
     passphrase: Option<String>,
     latency_ms: Option<u32>,
+}
+
+fn deserialize_optional_mark_out<'de, D>(deserializer: D) -> Result<Option<Option<f64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<f64>::deserialize(deserializer)?))
+}
+
+fn normalize_marks(meta: &mut crate::ui::state::PlayoutMeta) {
+    if !meta.mark_in_sec.is_finite() || meta.mark_in_sec < 0.0 {
+        meta.mark_in_sec = 0.0;
+    }
+    if let Some(dur) = meta.duration_sec {
+        if dur.is_finite() && dur > 0.0 {
+            meta.mark_in_sec = meta.mark_in_sec.min(dur);
+        }
+    }
+    if let Some(out) = meta.mark_out_sec {
+        if !out.is_finite() || out <= meta.mark_in_sec {
+            meta.mark_out_sec = None;
+        } else if let Some(dur) = meta.duration_sec {
+            if dur.is_finite() && out > dur {
+                meta.mark_out_sec = Some(dur);
+            }
+        }
+    }
+}
+
+fn refresh_file_duration(st: &AppState, meta: &mut crate::ui::state::PlayoutMeta) {
+    if meta.source != "file" || meta.file_id.trim().is_empty() {
+        return;
+    }
+    let Ok(path) = resolve_playout_file_path(st, &meta.file_id) else {
+        return;
+    };
+    if let Some(dur) = roc_pipelines::probe_file_duration(&path, 2500) {
+        meta.duration_sec = Some(dur);
+        normalize_marks(meta);
+    }
+}
+
+fn apply_playout_file_control(st: &AppState, id: u32, meta: &crate::ui::state::PlayoutMeta) {
+    let client_id = format!("decode-{id}");
+    let _ = st.orch.set_playout_file_control(
+        &client_id,
+        roc_pipelines::PlayoutFileControl {
+            loop_file: meta.loop_file,
+            mark_in_sec: meta.mark_in_sec,
+            mark_out_sec: meta.mark_out_sec,
+        },
+    );
 }
 
 async fn put_playout_ui(
@@ -627,6 +684,7 @@ async fn put_playout_ui(
         .unwrap_or_else(|| format!("Decode {id}"));
     st.ui.ensure_playout(id, &cfg_name);
     let mut meta = st.ui.playout(id);
+    let mut file_changed = false;
     if let Some(n) = body.name {
         meta.name = n;
     }
@@ -641,10 +699,22 @@ async fn put_playout_ui(
         meta.source = if s == "file" { "file".into() } else { "srt".into() };
     }
     if let Some(f) = body.file_id {
+        if f != meta.file_id {
+            file_changed = true;
+            meta.duration_sec = None;
+            meta.mark_in_sec = 0.0;
+            meta.mark_out_sec = None;
+        }
         meta.file_id = f;
     }
     if let Some(l) = body.loop_file {
         meta.loop_file = l;
+    }
+    if let Some(v) = body.mark_in_sec {
+        meta.mark_in_sec = v;
+    }
+    if let Some(out) = body.mark_out_sec {
+        meta.mark_out_sec = out;
     }
     if let Some(m) = body.mode {
         meta.mode = if m == "listener" {
@@ -665,7 +735,13 @@ async fn put_playout_ui(
     if let Some(l) = body.latency_ms {
         meta.latency_ms = l;
     }
-    st.ui.set_playout(id, meta);
+    if file_changed || (meta.source == "file" && meta.duration_sec.is_none()) {
+        refresh_file_duration(&st, &mut meta);
+    } else {
+        normalize_marks(&mut meta);
+    }
+    st.ui.set_playout(id, meta.clone());
+    apply_playout_file_control(&st, id, &meta);
     Ok(Json(playout_client_json(&st, id)?))
 }
 
@@ -793,6 +869,17 @@ async fn start_playout_ui(
     st.orch
         .start_playout(&client_id, source, format_code)
         .map_err(UiError::from)?;
+    let mut meta = st.ui.playout(id);
+    if meta.source == "file" {
+        if meta.duration_sec.is_none() {
+            refresh_file_duration(&st, &mut meta);
+            st.ui.set_playout(id, meta.clone());
+        }
+        apply_playout_file_control(&st, id, &meta);
+        if meta.mark_in_sec > 0.05 {
+            let _ = st.orch.seek_playout(&client_id, meta.mark_in_sec);
+        }
+    }
     Ok(Json(playout_client_json(&st, id)?))
 }
 
@@ -820,6 +907,23 @@ async fn resume_playout_ui(
 ) -> Result<Json<Value>, UiError> {
     let client_id = format!("decode-{id}");
     st.orch.resume_playout(&client_id).map_err(UiError::from)?;
+    Ok(Json(playout_client_json(&st, id)?))
+}
+
+#[derive(Deserialize)]
+struct PlayoutSeekBody {
+    position_sec: f64,
+}
+
+async fn seek_playout_ui(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+    Json(body): Json<PlayoutSeekBody>,
+) -> Result<Json<Value>, UiError> {
+    let client_id = format!("decode-{id}");
+    st.orch
+        .seek_playout(&client_id, body.position_sec)
+        .map_err(UiError::from)?;
     Ok(Json(playout_client_json(&st, id)?))
 }
 

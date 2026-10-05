@@ -2,7 +2,10 @@ use anyhow::Result;
 use roc_config::{ChannelConfig, EncodePreset, PlayoutClientConfig};
 use roc_devices::DeviceProbeReport;
 
-use crate::{ChannelSnapshot, ChannelStatus, PlayoutSnapshot, WorkflowKind, WorkflowSnapshot};
+use crate::{
+    ChannelSnapshot, ChannelStatus, PlayoutFileControl, PlayoutSnapshot, WorkflowKind,
+    WorkflowSnapshot,
+};
 
 /// Backend that owns media graphs for all channels.
 pub trait PipelineBackend: Send + Sync {
@@ -73,6 +76,10 @@ pub trait PipelineBackend: Send + Sync {
     fn stop_playout(&self, client_id: &str) -> Result<()>;
     fn pause_playout(&self, client_id: &str) -> Result<()>;
     fn resume_playout(&self, client_id: &str) -> Result<()>;
+    /// Seek file playout to `position_sec` (clamped to marks when set).
+    fn seek_playout(&self, client_id: &str, position_sec: f64) -> Result<()>;
+    /// Update loop / in-out marks on a running file playout (no-op if not running).
+    fn set_playout_file_control(&self, client_id: &str, control: &PlayoutFileControl) -> Result<()>;
     fn list_playout(&self) -> Vec<PlayoutSnapshot>;
 
     /// Fas 4 stub: apply exclusive workflow (TC / commentator).

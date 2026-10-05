@@ -560,6 +560,8 @@ export interface PlayoutClient {
   file_id?: string;
   file_name?: string;
   loop?: boolean;
+  mark_in_sec?: number;
+  mark_out_sec?: number | null;
   mode: "listener" | "caller";
   port: number;
   target: string;
@@ -600,6 +602,8 @@ export type PlayoutUpdateInput = {
   source?: "srt" | "file";
   file_id?: string;
   loop?: boolean;
+  mark_in_sec?: number;
+  mark_out_sec?: number | null;
   mode?: "listener" | "caller";
   port?: number;
   target?: string;
@@ -745,6 +749,18 @@ export async function resumePlayout(id: number): Promise<PlayoutClient> {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || `resumePlayout: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function seekPlayout(id: number, positionSec: number): Promise<PlayoutClient> {
+  const res = await apiFetch(`/api/playout/${id}/seek`, {
+    method: "POST",
+    body: JSON.stringify({ position_sec: positionSec }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `seekPlayout: ${res.status}`);
   }
   return res.json();
 }

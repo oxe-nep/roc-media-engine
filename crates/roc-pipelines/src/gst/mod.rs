@@ -21,8 +21,8 @@ use roc_config::{ChannelConfig, EncodePreset, PlayoutClientConfig};
 use roc_devices::DeviceProbeReport;
 
 use crate::{
-    ChannelSnapshot, ChannelStatus, PipelineBackend, PlayoutSnapshot, WorkflowKind,
-    WorkflowSnapshot,
+    ChannelSnapshot, ChannelStatus, PipelineBackend, PlayoutFileControl, PlayoutSnapshot,
+    WorkflowKind, WorkflowSnapshot,
 };
 
 use self::capture::ChannelPipeline;
@@ -56,6 +56,35 @@ fn apply_playout_level(peaks: &mut [f64; 2], s: &gstreamer::StructureRef) {
     }
 }
 
+fn playout_seek_pipeline(pipeline: &gstreamer::Pipeline, position_sec: f64) -> Result<()> {
+    use gstreamer::prelude::*;
+    let ns = if position_sec.is_finite() && position_sec > 0.0 {
+        (position_sec * 1_000_000_000.0).round() as u64
+    } else {
+        0
+    };
+    let ok = pipeline.seek_simple(
+        gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
+        gstreamer::ClockTime::from_nseconds(ns),
+    );
+    if !ok {
+        bail!("seek to {position_sec:.3}s failed");
+    }
+    Ok(())
+}
+
+fn query_playout_clock(pipeline: &gstreamer::Pipeline) -> (Option<f64>, Option<f64>) {
+    use gstreamer::prelude::*;
+    let position_sec = pipeline
+        .query_position::<gstreamer::ClockTime>()
+        .map(|t| t.nseconds() as f64 / 1_000_000_000.0);
+    let duration_sec = pipeline
+        .query_duration::<gstreamer::ClockTime>()
+        .map(|t| t.nseconds() as f64 / 1_000_000_000.0)
+        .filter(|d| d.is_finite() && *d > 0.0);
+    (position_sec, duration_sec)
+}
+
 fn poll_playout_runtime(p: &mut PlayoutRuntime) {
     use gstreamer::prelude::*;
     use gstreamer::MessageView;
@@ -65,6 +94,8 @@ fn poll_playout_runtime(p: &mut PlayoutRuntime) {
     let Some(bus) = pipeline.bus() else {
         return;
     };
+    let mut seek_to_in = false;
+    let mut hit_eos = false;
     while let Some(msg) = bus.timed_pop(gstreamer::ClockTime::ZERO) {
         match msg.view() {
             MessageView::Error(err) => {
@@ -79,7 +110,7 @@ fn poll_playout_runtime(p: &mut PlayoutRuntime) {
             }
             MessageView::Eos(_) => {
                 tracing::info!(client = %p.name, "playout EOS");
-                p.status = ChannelStatus::Stopped;
+                hit_eos = true;
             }
             MessageView::Element(el) => {
                 if let Some(s) = el.structure() {
@@ -102,6 +133,63 @@ fn poll_playout_runtime(p: &mut PlayoutRuntime) {
             _ => {}
         }
     }
+
+    if matches!(
+        p.status,
+        ChannelStatus::Running | ChannelStatus::Paused | ChannelStatus::Waiting
+    ) {
+        let (pos, dur) = query_playout_clock(pipeline);
+        if let Some(d) = dur {
+            p.duration_sec = Some(d);
+        }
+        if let Some(pos) = pos {
+            p.position_sec = Some(pos);
+            if p.is_file {
+                if let Some(out) = p.mark_out_sec {
+                    if out > p.mark_in_sec && pos >= out - 0.04 {
+                        if p.loop_file {
+                            seek_to_in = true;
+                        } else if matches!(p.status, ChannelStatus::Running) {
+                            if let Err(e) = pipeline.set_state(gstreamer::State::Paused) {
+                                tracing::warn!(client = %p.name, error = %e, "pause at mark-out failed");
+                            } else {
+                                p.status = ChannelStatus::Paused;
+                                p.position_sec = Some(out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if hit_eos {
+        if p.is_file && p.loop_file {
+            seek_to_in = true;
+        } else {
+            p.status = ChannelStatus::Stopped;
+            p.position_sec = p.duration_sec.or(p.position_sec);
+        }
+    }
+
+    if seek_to_in {
+        let target = p.mark_in_sec.max(0.0);
+        match playout_seek_pipeline(pipeline, target) {
+            Ok(()) => {
+                p.position_sec = Some(target);
+                if matches!(p.status, ChannelStatus::Stopped) {
+                    if pipeline.set_state(gstreamer::State::Playing).is_ok() {
+                        p.status = ChannelStatus::Running;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(client = %p.name, error = %e, "loop seek failed");
+                p.status = ChannelStatus::Stopped;
+            }
+        }
+    }
+
     if let Some(at) = p.last_level_at {
         if at.elapsed() > std::time::Duration::from_millis(500) {
             p.audio_peaks = [-90.0; 2];
@@ -132,6 +220,12 @@ struct PlayoutRuntime {
     audio_peaks: [f64; 2],
     last_level_at: Option<std::time::Instant>,
     pipeline: Option<gstreamer::Pipeline>,
+    is_file: bool,
+    loop_file: bool,
+    mark_in_sec: f64,
+    mark_out_sec: Option<f64>,
+    position_sec: Option<f64>,
+    duration_sec: Option<f64>,
 }
 
 impl GstBackend {
@@ -471,12 +565,14 @@ impl PipelineBackend for GstBackend {
             ChannelStatus::Running
         };
 
+        let is_file = !source.starts_with("srt://");
         let mut map = self.playout.lock();
         if let Some(old) = map.get_mut(&client.id) {
             if let Some(p) = old.pipeline.take() {
                 let _ = p.set_state(gstreamer::State::Null);
             }
         }
+        let (_, duration_sec) = query_playout_clock(&pipeline);
         map.insert(
             client.id.clone(),
             PlayoutRuntime {
@@ -489,6 +585,12 @@ impl PipelineBackend for GstBackend {
                 audio_peaks: [-90.0; 2],
                 last_level_at: None,
                 pipeline: Some(pipeline),
+                is_file,
+                loop_file: false,
+                mark_in_sec: 0.0,
+                mark_out_sec: None,
+                position_sec: if is_file { Some(0.0) } else { None },
+                duration_sec,
             },
         );
         Ok(())
@@ -504,6 +606,7 @@ impl PipelineBackend for GstBackend {
             p.status = ChannelStatus::Stopped;
             p.source = None;
             p.format_code = None;
+            p.position_sec = None;
         }
         Ok(())
     }
@@ -534,9 +637,69 @@ impl PipelineBackend for GstBackend {
             .pipeline
             .as_ref()
             .with_context(|| format!("playout {client_id} has no pipeline"))?;
+        // If parked at mark-out, restart from mark-in on resume.
+        if p.is_file {
+            if let (Some(pos), Some(out)) = (p.position_sec, p.mark_out_sec) {
+                if out > p.mark_in_sec && pos >= out - 0.05 {
+                    playout_seek_pipeline(pipe, p.mark_in_sec.max(0.0))?;
+                    p.position_sec = Some(p.mark_in_sec.max(0.0));
+                }
+            }
+        }
         pipe.set_state(gstreamer::State::Playing)
             .context("playout PLAYING")?;
         p.status = ChannelStatus::Running;
+        Ok(())
+    }
+
+    fn seek_playout(&self, client_id: &str, position_sec: f64) -> Result<()> {
+        let mut map = self.playout.lock();
+        let p = map
+            .get_mut(client_id)
+            .with_context(|| format!("playout {client_id} not running"))?;
+        if !p.is_file {
+            bail!("seek is only supported for file playout");
+        }
+        let pipe = p
+            .pipeline
+            .as_ref()
+            .with_context(|| format!("playout {client_id} has no pipeline"))?;
+        let target = {
+            let mut t = if position_sec.is_finite() { position_sec.max(0.0) } else { 0.0 };
+            if let Some(d) = p.duration_sec {
+                t = t.min(d.max(0.0));
+            }
+            t
+        };
+        playout_seek_pipeline(pipe, target)?;
+        p.position_sec = Some(target);
+        Ok(())
+    }
+
+    fn set_playout_file_control(&self, client_id: &str, control: &PlayoutFileControl) -> Result<()> {
+        let mut map = self.playout.lock();
+        let Some(p) = map.get_mut(client_id) else {
+            return Ok(());
+        };
+        if !p.is_file {
+            return Ok(());
+        }
+        p.loop_file = control.loop_file;
+        p.mark_in_sec = control.mark_in_sec.max(0.0);
+        p.mark_out_sec = control
+            .mark_out_sec
+            .filter(|o| o.is_finite() && *o > p.mark_in_sec);
+        // If already past new mark-out while running, park there.
+        if let (Some(pos), Some(out)) = (p.position_sec, p.mark_out_sec) {
+            if matches!(p.status, ChannelStatus::Running) && pos >= out {
+                if let Some(pipe) = p.pipeline.as_ref() {
+                    let _ = playout_seek_pipeline(pipe, out);
+                    let _ = pipe.set_state(gstreamer::State::Paused);
+                    p.status = ChannelStatus::Paused;
+                    p.position_sec = Some(out);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -556,6 +719,8 @@ impl PipelineBackend for GstBackend {
                 format_code: p.format_code.clone(),
                 last_error: p.last_error.clone(),
                 audio_peaks: Some(p.audio_peaks.to_vec()),
+                position_sec: p.position_sec,
+                duration_sec: p.duration_sec,
             })
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
