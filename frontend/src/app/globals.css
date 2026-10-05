@@ -683,15 +683,15 @@ html {
 .card-footer {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 9px 10px 10px;
+  gap: 5px;
+  padding: 6px 8px 7px;
   border-top: 1px solid var(--border-subtle);
 }
 
 .card-main {
   display: flex;
   align-items: stretch;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
   flex: 1;
 }
@@ -700,7 +700,7 @@ html {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -709,7 +709,7 @@ html {
   flex: 1;
   display: flex;
   align-items: stretch;
-  gap: 10px;
+  gap: 8px;
 }
 
 .card-identity-text {
@@ -718,21 +718,26 @@ html {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 3px;
+  gap: 1px;
 }
 
+/* Match left 8ch meter rail width; square fills the footer rail. */
 .card-channel-num {
-  flex-shrink: 0;
-  align-self: stretch;
+  --card-rail: 46px;
+  flex: 0 0 var(--card-rail);
+  align-self: center;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 2.85rem;
-  padding: 0 8px;
-  border-radius: 7px;
+  box-sizing: border-box;
+  width: var(--card-rail);
+  height: var(--card-rail);
+  min-width: var(--card-rail);
+  padding: 0;
+  border-radius: 6px;
   border: 1.5px solid rgba(255, 255, 255, 0.14);
   background: rgba(255, 255, 255, 0.05);
-  font-size: 1.55rem;
+  font-size: 1.35rem;
   font-weight: 900;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
@@ -779,7 +784,7 @@ html {
 }
 
 .card-name {
-  font-size: 0.84rem;
+  font-size: 0.8rem;
   font-weight: 600;
   letter-spacing: -0.01em;
   overflow: hidden;
@@ -787,7 +792,7 @@ html {
   white-space: nowrap;
   color: var(--text-primary);
   min-width: 0;
-  line-height: 1.2;
+  line-height: 1.15;
 }
 
 .card-name-edit {
@@ -1017,8 +1022,8 @@ html {
   align-items: center;
   gap: 6px;
   min-width: 0;
-  font-size: 0.68rem;
-  line-height: 1.2;
+  font-size: 0.64rem;
+  line-height: 1.15;
   color: var(--text-muted);
 }
 
@@ -1052,25 +1057,25 @@ html {
 .card-presets {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0;
   min-width: 0;
-  margin-top: 1px;
+  margin-top: 0;
 }
 
 .card-preset-line {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
-  font-size: 0.72rem;
-  line-height: 1.25;
+  font-size: 0.68rem;
+  line-height: 1.15;
   color: var(--text-muted);
 }
 
 .card-preset-role {
   flex-shrink: 0;
-  width: 2.6rem;
-  font-size: 0.65rem;
+  width: 2.4rem;
+  font-size: 0.6rem;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -1090,14 +1095,14 @@ html {
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(255, 255, 255, 0.04);
   color: var(--text-secondary);
-  width: 1.7rem;
-  height: 1.7rem;
-  min-width: 1.7rem;
+  width: 1.55rem;
+  height: 1.55rem;
+  min-width: 1.55rem;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   letter-spacing: 0;
   text-transform: none;
   border-radius: 5px;
@@ -1494,7 +1499,7 @@ html {
   flex-direction: column;
   align-items: flex-end;
   justify-content: center;
-  gap: 5px;
+  gap: 4px;
   flex-shrink: 0;
 }
 
@@ -1502,7 +1507,7 @@ html {
 .card-actions-tools {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   flex-shrink: 0;
 }
 
@@ -1521,15 +1526,15 @@ html {
 
 .card-actions .badge,
 .card-actions-tools .badge {
-  width: 1.7rem;
-  height: 1.7rem;
-  min-width: 1.7rem;
+  width: 1.55rem;
+  height: 1.55rem;
+  min-width: 1.55rem;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 5px;
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   letter-spacing: 0;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(255, 255, 255, 0.04);
@@ -1786,13 +1791,13 @@ html {
 
 .rec-btn {
   flex-shrink: 0;
-  height: 1.7rem;
-  min-width: 4.6rem;
-  padding: 0 7px;
+  height: 1.55rem;
+  min-width: 4.4rem;
+  padding: 0 6px;
   border-radius: 5px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(255, 255, 255, 0.04);
-  font-size: 0.58rem;
+  font-size: 0.56rem;
   font-weight: 800;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -1830,13 +1835,13 @@ html {
 
 .stream-btn {
   flex-shrink: 0;
-  height: 1.7rem;
-  min-width: 3.6rem;
-  padding: 0 10px;
+  height: 1.55rem;
+  min-width: 3.2rem;
+  padding: 0 8px;
   border-radius: 5px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(255, 255, 255, 0.04);
-  font-size: 0.68rem;
+  font-size: 0.62rem;
   font-weight: 800;
   letter-spacing: 0.06em;
   text-transform: uppercase;
