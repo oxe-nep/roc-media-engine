@@ -502,6 +502,22 @@ impl Orchestrator {
         self.backend.stop_tc_loop(channel_id)
     }
 
+    pub fn update_tc_overlay(
+        &self,
+        channel_id: u32,
+        fontsize: u32,
+        opacity: f64,
+        x: f64,
+        y: f64,
+        position: roc_pipelines::TcLoopPosition,
+    ) -> Result<roc_pipelines::TcLoopSnapshot> {
+        self.backend
+            .update_tc_overlay(channel_id, fontsize, opacity, x, y, position)?;
+        self.backend
+            .tc_loop_snapshot(channel_id)
+            .context("TC snapshot missing after overlay update")
+    }
+
     pub fn list_tc_loops(&self) -> Vec<roc_pipelines::TcLoopSnapshot> {
         self.backend.list_tc_loops()
     }

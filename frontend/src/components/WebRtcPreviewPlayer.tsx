@@ -39,10 +39,19 @@ export default function WebRtcPreviewPlayer({
   const frameRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
-  const { streams } = useDashboard();
+  const { streams, tcById } = useDashboard();
   const channelStatus = streams.find((s) => s.id === channelId)?.status;
-  const encodeOff = channelStatus === "stopped" || channelStatus === "error";
-  const noSignal = channelStatus === "waiting";
+  const tc = tcById[channelId];
+  // Exclusive TC stops encode capture but still has proxy tee `e` for WebRTC/SRT.
+  const tcPreviewReady =
+    tc?.status === "running" || tc?.status === "restarting" || !!tc?.enabled;
+  const encodeOff =
+    !tcPreviewReady && (channelStatus === "stopped" || channelStatus === "error");
+  const noSignal =
+    tcPreviewReady
+      ? tc?.status !== "running"
+      : channelStatus === "waiting";
+  const meterBus = tcPreviewReady ? "playout" : "encode";
   const [pair, setPair] = useState(initialPair);
   const [session, setSession] = useState(0);
   const [status, setStatus] = useState("Connecting…");
@@ -376,7 +385,7 @@ export default function WebRtcPreviewPlayer({
         </div>
       </div>
       <div className="preview-modal-stage">
-        <AudioMeters channelId={channelId} bus="encode" silent={noSignal || encodeOff}>
+        <AudioMeters channelId={channelId} bus={meterBus} silent={noSignal || encodeOff}>
           <div className="preview-modal-video-wrap">
             <div className="preview-modal-video-frame" ref={frameRef}>
               <video

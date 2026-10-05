@@ -13,19 +13,43 @@ export function tcSourceStatusLabel(source?: TcLoopSource): string {
   return source === "external" ? "UDP" : "TOD";
 }
 
-/** Card footer status: source prefix + timecode / state. */
+/** Prefer short mode labels: "1920x1080i50/1 (1080i50)" → "1080i50". */
+export function shortTcFormat(raw?: string): string | null {
+  if (!raw) return null;
+  const paren = raw.match(/\(([^)]+)\)\s*$/);
+  if (paren?.[1]) return paren[1].trim();
+  return raw.trim() || null;
+}
+
+/** True when mode/format looks interlaced (e.g. `1080i50`). */
+export function tcFormatLooksInterlaced(raw?: string): boolean {
+  const s = (raw || "").toLowerCase();
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== "i") continue;
+    const prev = s[i - 1];
+    const next = s[i + 1];
+    if (prev >= "0" && prev <= "9" && (next === undefined || (next >= "0" && next <= "9"))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Card footer status: source + format + timecode / state. */
 export function tcCardStatusMeta(tc?: TcLoopInfo, live?: boolean): string {
   const src = tcSourceStatusLabel(tc?.source);
+  const fmt = shortTcFormat(tc?.format || tc?.mode);
   const code = normalizeHms(tc?.timecode);
+  const head = fmt ? `${src} · ${fmt}` : src;
   const hasCode = !!code;
 
-  if (live && hasCode) return `${src} · ${code}`;
-  if (hasCode && tcIsActive(tc)) return `${src} · ${code}`;
+  if (live && hasCode) return `${head} · ${code}`;
+  if (hasCode && tcIsActive(tc)) return `${head} · ${code}`;
 
-  if (live) return `${src} · live`;
-  if (tc?.status === "restarting") return `${src} · …`;
-  if (tc?.status === "error") return `${src} · err`;
-  if (tcIsActive(tc)) return `${src} · …`;
+  if (live) return head;
+  if (tc?.status === "restarting") return `${head} · …`;
+  if (tc?.status === "error") return `${head} · err`;
+  if (tcIsActive(tc)) return `${head} · …`;
   return "Off";
 }
 

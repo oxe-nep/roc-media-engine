@@ -684,6 +684,10 @@ export interface TcLoopInfo {
   y?: number;
   error?: string;
   timecode?: string;
+  /** Live signal format, e.g. `1080i50`. */
+  format?: string;
+  /** Locked DeckLink mode (IN=OUT). */
+  mode?: string;
 }
 
 export type TcLoopUpdateInput = {

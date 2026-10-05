@@ -376,8 +376,28 @@ fn nvenc_chain_ex(
     )
 }
 
+/// True when a DeckLink/GST mode or format summary looks interlaced (e.g. `1080i50`).
+pub fn gst_mode_looks_interlaced(mode: &str) -> bool {
+    let m = mode.to_ascii_lowercase();
+    // Match scan letter after height digits: 1080i50, 1920x1080i50.
+    let bytes = m.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b != b'i' {
+            continue;
+        }
+        let prev = i.checked_sub(1).and_then(|j| bytes.get(j)).copied();
+        let next = bytes.get(i + 1).copied();
+        let prev_digit = prev.map(|c| c.is_ascii_digit()).unwrap_or(false);
+        let next_digit_or_end = next.map(|c| c.is_ascii_digit()).unwrap_or(true);
+        if prev_digit && next_digit_or_end {
+            return true;
+        }
+    }
+    false
+}
+
 fn gst_mode_is_interlaced(mode: &str) -> bool {
-    mode.to_ascii_lowercase().chars().any(|c| c == 'i')
+    gst_mode_looks_interlaced(mode)
 }
 
 fn decklink_video_sink(device: &str, mode: &str) -> String {
@@ -764,7 +784,7 @@ pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
     )
 }
 
-fn tc_overlay_color(opacity: f64) -> u32 {
+pub(crate) fn tc_overlay_color(opacity: f64) -> u32 {
     let a = ((opacity.clamp(0.15, 1.0) * 255.0).round() as u32).min(255);
     // AARRGGBB — white text
     (a << 24) | 0x00FF_FFFF
@@ -815,10 +835,11 @@ fn tc_sink_geometry(mode: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// Build TC burn-in: DeckLink IN → overlay → OUT + JPEG + NVENC proxy (SRT gate).
+/// Build TC burn-in: DeckLink IN → overlay → OUT + JPEG + NVENC proxy (SRT/WebRTC).
 ///
-/// **Format fidelity:** OUT (DeckLink) and SRT match IN mode (e.g. 1080i50→1080i50).
-/// No deinterlace on the main path — only the JPEG thumb branch deinterlaces.
+/// **OUT** keeps IN geometry/interlace (1080i → 1080i DeckLink).
+/// **Proxy encode** (SRT + WebRTC tee `e`) is always progressive — deinterlace
+/// before NVENC when the source is interlaced.
 pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
     let src = decklink_src(&opts.input_device, &opts.input_mode);
     let overlay = tc_overlay_element(opts);
@@ -847,7 +868,8 @@ pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
     let family = encode_family(live_codec);
     let parse = family.parse_element();
     let bs = family.byte_stream_caps();
-    let enc = nvenc_chain_ex(live_codec, nv_preset, bitrate_kbit, gop, interlaced);
+    // Encode path is progressive (deinterlace when needed).
+    let enc = nvenc_chain_ex(live_codec, nv_preset, bitrate_kbit, gop, false);
 
     let aac_bps = parse_bitrate(&opts.preset.audio_bitrate)
         .unwrap_or(192_000)
@@ -887,6 +909,13 @@ pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
         )
     };
 
+    // Proxy encode (+ WebRTC/SRT): deinterlace so NVENC/browsers get progressive.
+    let enc_prefix = if interlaced {
+        "v. ! queue ! deinterlace mode=auto ! "
+    } else {
+        "v. ! queue ! "
+    };
+
     let thumb = if let Some(dir) = &opts.hls_dir {
         let _ = std::fs::create_dir_all(dir);
         let loc = format!("{dir}/thumb%05d.jpg");
@@ -907,7 +936,7 @@ pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
         "{src} ! \
            videoconvert ! {overlay} ! tee name=v \
          {out_branch} \
-         v. ! queue ! {enc} ! tee name=e \
+         {enc_prefix}{enc} ! tee name=e \
          e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
            mpegtsmux name=tsmux alignment=7 ! {srt_appsink} \
          e. ! queue leaky=downstream ! fakesink sync=false \
@@ -1066,6 +1095,15 @@ mod tests {
     }
 
     #[test]
+    fn gst_mode_looks_interlaced_detects_scan() {
+        assert!(gst_mode_looks_interlaced("1080i50"));
+        assert!(gst_mode_looks_interlaced("1920x1080i50"));
+        assert!(!gst_mode_looks_interlaced("1080p50"));
+        assert!(!gst_mode_looks_interlaced("Hp50"));
+        assert!(!gst_mode_looks_interlaced(""));
+    }
+
+    #[test]
     fn tc_loop_preserves_interlaced_in_to_out() {
         let mut preset = EncodePreset {
             label: "Proxy".into(),
@@ -1099,11 +1137,17 @@ mod tests {
         assert!(!launch.contains("interlaced-encoding="), "{launch}");
         assert!(launch.contains("appsink name=srt_in"), "{launch}");
         assert!(launch.contains("tee name=e"), "{launch}");
-        // Exactly one deinterlace — JPEG thumb only; main path stays interlaced.
+        // OUT stays interlaced; encode + JPEG deinterlace for progressive proxy/WebRTC/SRT.
         assert_eq!(
             launch.matches("deinterlace").count(),
-            1,
-            "expected thumb-only deinterlace: {launch}"
+            2,
+            "expected encode+thumb deinterlace: {launch}"
+        );
+        // Encode branch deinterlaces before NVENC.
+        assert!(
+            launch.contains("deinterlace mode=auto ! ")
+                && launch.contains("nvh264enc"),
+            "{launch}"
         );
     }
 }

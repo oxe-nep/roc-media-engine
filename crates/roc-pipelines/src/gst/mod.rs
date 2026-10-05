@@ -96,6 +96,164 @@ fn poll_tc_runtime(rt: &mut TcLoopRuntime) {
             rt.audio_peaks = [-90.0; 8];
         }
     }
+    // Refresh live format label from DeckLink src caps.
+    if let Some(fmt) = tc_read_live_format(rt) {
+        rt.format_summary = Some(fmt.summary());
+    }
+}
+
+fn tc_read_live_format(rt: &TcLoopRuntime) -> Option<crate::InputFormat> {
+    use gstreamer::prelude::*;
+    let pipeline = rt.pipeline.as_ref()?;
+    let dl = pipeline.by_name("dlsrc")?;
+    let pad = dl.static_pad("src")?;
+    let caps = pad.current_caps()?;
+    crate::format_from_caps(&caps)
+}
+
+fn tc_decklink_signal_present(rt: &TcLoopRuntime) -> Option<bool> {
+    use gstreamer::prelude::*;
+    let pipeline = rt.pipeline.as_ref()?;
+    let dl = pipeline.by_name("dlsrc")?;
+    if dl.find_property("signal").is_none() {
+        return None;
+    }
+    Some(dl.property::<bool>("signal"))
+}
+
+fn tc_alternate_scan(mode: &str) -> Option<&'static str> {
+    match mode {
+        "1080p50" => Some("1080i50"),
+        "1080i50" => Some("1080p50"),
+        "1080p5994" => Some("1080i5994"),
+        "1080i5994" => Some("1080p5994"),
+        "1080p60" => Some("1080i60"),
+        "1080i60" => Some("1080p60"),
+        _ => None,
+    }
+}
+
+/// Decide if TC should relaunch for a new DeckLink mode (format change or p/i flip).
+fn tc_adapt_candidate(rt: &TcLoopRuntime) -> Option<String> {
+    if !matches!(rt.status, TcLoopStatus::Running | TcLoopStatus::Restarting) {
+        return None;
+    }
+    let cool = |t: Option<std::time::Instant>, secs: u64| {
+        t.map(|x| x.elapsed() > std::time::Duration::from_secs(secs))
+            .unwrap_or(true)
+    };
+    // Wrong scan lock with no signal → try alternate a couple of times.
+    if tc_decklink_signal_present(rt) == Some(false)
+        && rt.signal_flip_attempts < 2
+        && cool(rt.last_signal_flip, 6)
+        && cool(rt.last_adapt, 6)
+    {
+        if let Some(alt) = tc_alternate_scan(&rt.locked_mode) {
+            return Some(alt.to_string());
+        }
+    }
+    let fmt = tc_read_live_format(rt)?;
+    if fmt.width < 1280 || fmt.mode == rt.locked_mode {
+        return None;
+    }
+    if !cool(rt.last_adapt, 3) {
+        return None;
+    }
+    Some(fmt.mode)
+}
+
+fn relaunch_tc_for_mode(rt: &mut TcLoopRuntime, channel_id: u32, new_mode: &str) -> Result<()> {
+    use gstreamer::prelude::*;
+    let was_srt = rt.srt;
+    let srt_url = rt.srt_url.clone();
+    let flip = tc_alternate_scan(&rt.locked_mode) == Some(new_mode)
+        || tc_alternate_scan(new_mode).map(|a| a == rt.locked_mode.as_str()).unwrap_or(false);
+
+    tracing::info!(
+        channel_id,
+        from = %rt.locked_mode,
+        to = %new_mode,
+        flip,
+        "TC input format adapt — relaunching"
+    );
+
+    stop_tc_webrtc(rt);
+    stop_tc_srt(rt, channel_id);
+    if let Some(flag) = rt.udp_stop.take() {
+        flag.store(true, Ordering::SeqCst);
+    }
+    if let Some(p) = rt.pipeline.take() {
+        let _ = p.set_state(gstreamer::State::Null);
+    }
+
+    rt.launch_opts.input_mode = new_mode.to_string();
+    rt.launch_opts.output_mode = new_mode.to_string();
+    rt.locked_mode = new_mode.to_string();
+    rt.format_summary = Some(new_mode.to_string());
+    rt.last_adapt = Some(std::time::Instant::now());
+    if flip {
+        rt.last_signal_flip = Some(std::time::Instant::now());
+        rt.signal_flip_attempts = rt.signal_flip_attempts.saturating_add(1);
+    } else {
+        rt.signal_flip_attempts = 0;
+    }
+    rt.status = TcLoopStatus::Restarting;
+
+    let launch = build_tc_loop_launch(&rt.launch_opts);
+    let pipeline = gstreamer::parse::launch(&launch)
+        .with_context(|| format!("parse TC relaunch for channel {channel_id}"))?
+        .downcast::<gstreamer::Pipeline>()
+        .map_err(|_| anyhow!("TC relaunch did not yield a Pipeline"))?;
+
+    let udp_stop = if matches!(rt.launch_opts.source, TcLoopSource::External) {
+        let flag = Arc::new(AtomicBool::new(false));
+        tc_loop::spawn_external_tc_updater(&pipeline, rt.launch_opts.udp_port, flag.clone())?;
+        Some(flag)
+    } else {
+        None
+    };
+
+    pipeline
+        .set_state(gstreamer::State::Playing)
+        .context("TC relaunch PLAYING")?;
+    let (_res, state, pending) = pipeline.state(gstreamer::ClockTime::from_seconds(3));
+    if matches!(state, gstreamer::State::Null | gstreamer::State::Ready)
+        && !matches!(pending, gstreamer::State::Playing | gstreamer::State::Paused)
+    {
+        if let Some(flag) = &udp_stop {
+            flag.store(true, Ordering::SeqCst);
+        }
+        let err = drain_playout_bus_error(&pipeline)
+            .unwrap_or_else(|| format!("TC adapt failed to reach PLAYING (state={state:?})"));
+        let _ = pipeline.set_state(gstreamer::State::Null);
+        rt.status = TcLoopStatus::Error;
+        rt.last_error = Some(err.clone());
+        bail!("{err}");
+    }
+    if let Some(err) = drain_playout_bus_error(&pipeline) {
+        if let Some(flag) = &udp_stop {
+            flag.store(true, Ordering::SeqCst);
+        }
+        let _ = pipeline.set_state(gstreamer::State::Null);
+        rt.status = TcLoopStatus::Error;
+        rt.last_error = Some(err.clone());
+        bail!("{err}");
+    }
+
+    rt.pipeline = Some(pipeline);
+    rt.udp_stop = udp_stop;
+    rt.status = TcLoopStatus::Running;
+    rt.last_error = None;
+    rt.aac_pairs = crate::describe::aac_stereo_pairs(rt.launch_opts.preset.audio_channels);
+
+    if was_srt {
+        if let Some(url) = srt_url.as_deref() {
+            if let Err(e) = start_tc_srt(rt, channel_id, url) {
+                tracing::warn!(channel_id, error = %e, "TC SRT re-arm after adapt failed");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn tc_runtime_snapshot(id: u32, rt: &TcLoopRuntime) -> TcLoopSnapshot {
@@ -116,6 +274,11 @@ fn tc_runtime_snapshot(id: u32, rt: &TcLoopRuntime) -> TcLoopSnapshot {
         }
         _ => None,
     };
+    let format = rt
+        .format_summary
+        .clone()
+        .or_else(|| Some(rt.locked_mode.clone()))
+        .filter(|s| !s.is_empty());
     TcLoopSnapshot {
         id,
         enabled: rt.enabled,
@@ -132,6 +295,8 @@ fn tc_runtime_snapshot(id: u32, rt: &TcLoopRuntime) -> TcLoopSnapshot {
         audio_peaks: Some(rt.audio_peaks.to_vec()),
         srt: rt.srt,
         srt_bitrate_kbps: rt.srt_bitrate.as_ref().and_then(|m| m.kbps()),
+        format,
+        mode: Some(rt.locked_mode.clone()).filter(|s| !s.is_empty()),
     }
 }
 
@@ -166,6 +331,7 @@ fn start_tc_srt(rt: &mut TcLoopRuntime, channel_id: u32, url: &str) -> Result<()
             sink.set_property("uri", &gst_url);
             tracing::info!(channel_id, %gst_url, "updated TC SRT sink URI");
         }
+        rt.srt_url = Some(url.to_string());
         return Ok(());
     }
     capture::disarm_srt_appsink_gate(channel_id, &pipeline);
@@ -179,6 +345,7 @@ fn start_tc_srt(rt: &mut TcLoopRuntime, channel_id: u32, url: &str) -> Result<()
     }
     rt.srt_bitrate = Some(meter);
     rt.srt = true;
+    rt.srt_url = Some(url.to_string());
     tracing::info!(channel_id, %url, gst_uri = %gst_url, "TC SRT publish attached");
     Ok(())
 }
@@ -460,8 +627,16 @@ struct TcLoopRuntime {
     /// AAC stereo pairs in MPEG-TS (for SRT PMT gate).
     aac_pairs: usize,
     srt: bool,
+    srt_url: Option<String>,
     srt_bitrate: Option<self::bitrate::BitrateMeter>,
     webrtc_preview: Option<preview_webrtc::WebRtcPreview>,
+    /// Opts used to (re)launch — updated when format adapts.
+    launch_opts: TcLoopLaunchOpts,
+    locked_mode: String,
+    format_summary: Option<String>,
+    last_adapt: Option<std::time::Instant>,
+    last_signal_flip: Option<std::time::Instant>,
+    signal_flip_attempts: u8,
 }
 
 impl GstBackend {
@@ -1175,8 +1350,15 @@ impl PipelineBackend for GstBackend {
                 udp_stop,
                 aac_pairs,
                 srt: false,
+                srt_url: None,
                 srt_bitrate: None,
                 webrtc_preview: None,
+                launch_opts: opts.clone(),
+                locked_mode: opts.input_mode.clone(),
+                format_summary: Some(opts.input_mode.clone()),
+                last_adapt: None,
+                last_signal_flip: None,
+                signal_flip_attempts: 0,
             },
         );
         self.workflows
@@ -1208,10 +1390,77 @@ impl PipelineBackend for GstBackend {
         Ok(())
     }
 
-    fn list_tc_loops(&self) -> Vec<TcLoopSnapshot> {
+    fn update_tc_overlay(
+        &self,
+        channel_id: u32,
+        fontsize: u32,
+        opacity: f64,
+        x: f64,
+        y: f64,
+        position: crate::TcLoopPosition,
+    ) -> Result<()> {
+        use gstreamer::prelude::*;
+        let _gst = self.gst_op.lock();
         let mut map = self.tc_loops.lock();
-        for rt in map.values_mut() {
+        let rt = map
+            .get_mut(&channel_id)
+            .ok_or_else(|| anyhow!("TC not running on channel {channel_id}"))?;
+        let pipeline = rt
+            .pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow!("TC pipeline missing"))?;
+        let el = pipeline
+            .by_name("tc_overlay")
+            .or_else(|| pipeline.by_name("tc_text"))
+            .ok_or_else(|| anyhow!("TC overlay element missing"))?;
+
+        let fontsize = fontsize.clamp(12, 200);
+        let opacity = opacity.clamp(0.15, 1.0);
+        let x = x.clamp(0.0, 1.0);
+        let y = y.clamp(0.0, 1.0);
+        let font_desc = format!("Sans Bold {fontsize}px");
+        let color = crate::describe::tc_overlay_color(opacity);
+
+        el.set_property("font-desc", &font_desc);
+        el.set_property("xpos", x);
+        el.set_property("ypos", y);
+        el.set_property("color", color);
+
+        rt.fontsize = fontsize;
+        rt.opacity = opacity;
+        rt.x = x;
+        rt.y = y;
+        rt.position = position;
+        rt.launch_opts.fontsize = fontsize;
+        rt.launch_opts.opacity = opacity;
+        rt.launch_opts.x = x;
+        rt.launch_opts.y = y;
+        rt.launch_opts.position = position;
+        tracing::info!(
+            channel_id,
+            fontsize,
+            opacity,
+            x,
+            y,
+            "TC overlay hot-updated (no relaunch)"
+        );
+        Ok(())
+    }
+
+    fn list_tc_loops(&self) -> Vec<TcLoopSnapshot> {
+        let _gst = self.gst_op.lock();
+        let mut map = self.tc_loops.lock();
+        let ids: Vec<u32> = map.keys().copied().collect();
+        for id in ids {
+            let Some(rt) = map.get_mut(&id) else {
+                continue;
+            };
             poll_tc_runtime(rt);
+            if let Some(mode) = tc_adapt_candidate(rt) {
+                if let Err(e) = relaunch_tc_for_mode(rt, id, &mode) {
+                    tracing::warn!(channel_id = id, error = %e, "TC format adapt failed");
+                }
+            }
         }
         let mut out: Vec<_> = map
             .iter()
@@ -1222,9 +1471,15 @@ impl PipelineBackend for GstBackend {
     }
 
     fn tc_loop_snapshot(&self, channel_id: u32) -> Option<TcLoopSnapshot> {
+        let _gst = self.gst_op.lock();
         let mut map = self.tc_loops.lock();
         let rt = map.get_mut(&channel_id)?;
         poll_tc_runtime(rt);
+        if let Some(mode) = tc_adapt_candidate(rt) {
+            if let Err(e) = relaunch_tc_for_mode(rt, channel_id, &mode) {
+                tracing::warn!(channel_id, error = %e, "TC format adapt failed");
+            }
+        }
         Some(tc_runtime_snapshot(channel_id, rt))
     }
 

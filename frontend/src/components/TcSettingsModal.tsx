@@ -3,11 +3,16 @@
 import { useEffect, useState } from "react";
 import {
   fetchEncodePresets,
+  fetchSrt,
   fetchTcLoop,
   setEncodePreset,
   setRecordingName,
+  startSrt,
+  stopSrt,
+  updateSrt,
   updateTcLoop,
   type EncodePreset,
+  type SrtInfo,
   type TcLoopPosition,
   type TcLoopSource,
 } from "@/lib/api";
@@ -60,16 +65,29 @@ export default function TcSettingsModal({
   const [proxyPreset, setProxyPreset] = useState("");
   const [presets, setPresets] = useState<EncodePreset[]>([]);
 
+  const [srtBusy, setSrtBusy] = useState(false);
+  const [srt, setSrt] = useState<SrtInfo | null>(null);
+  const [srtMode, setSrtMode] = useState<"listener" | "caller">("listener");
+  const [srtPort, setSrtPort] = useState(9101);
+  const [srtTarget, setSrtTarget] = useState("");
+  const [srtLatency, setSrtLatency] = useState(120);
+  const [srtPassphrase, setSrtPassphrase] = useState("");
+  const [srtPassDirty, setSrtPassDirty] = useState(false);
+
   useBodyScrollLock(open);
 
   const tcOn = tcEnabled || tcStatus === "running" || tcStatus === "restarting";
+  const tcLive = tcStatus === "running";
   const tcEffectivePort = tcUdpPort > 0 ? tcUdpPort : defaultTcUdpPort(channelId ?? 0);
   const proxyPresets = presets.filter(isProxyPreset);
+  const srtStreaming = srt?.status === "streaming";
 
   useEffect(() => {
     if (!open || channelId == null) return;
     setError(null);
     setTcApplyMsg(null);
+    setSrtPassDirty(false);
+    setSrtPassphrase("");
     setName((channelName || `ch${channelId}`).trim() || `ch${channelId}`);
     setProxyPreset(encodePreset || "");
     fetchEncodePresets()
@@ -97,23 +115,33 @@ export default function TcSettingsModal({
         setTcError(tc.error || "");
       })
       .catch((e) => setError(String(e)));
+    fetchSrt(channelId)
+      .then((info) => {
+        setSrt(info);
+        setSrtMode(info.mode || "listener");
+        setSrtPort(info.port || 9100 + channelId);
+        setSrtTarget(info.target || "");
+        setSrtLatency(info.latency_ms || 120);
+      })
+      .catch(() => setSrt(null));
   }, [open, channelId, channelName, encodePreset]);
 
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
+      if (e.key === "Escape" && !busy && !srtBusy) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose, busy]);
+  }, [open, onClose, busy, srtBusy]);
 
   if (!open || channelId == null) return null;
 
   const applyTc = async (enabled: boolean) => {
     setBusy(true);
     setError(null);
-    setTcApplyMsg(enabled ? "Starting…" : "Stopping…");
+    const wasOn = tcOn;
+    setTcApplyMsg(enabled ? (wasOn ? "Updating…" : "Starting…") : "Stopping…");
     try {
       const cleanName = name.trim() || `ch${channelId}`;
       await setRecordingName(channelId, cleanName);
@@ -142,7 +170,7 @@ export default function TcSettingsModal({
       setTcY(typeof tc.y === "number" ? tc.y : tcY);
       setTcError(tc.error || "");
 
-      if (tc.enabled) {
+      if (tc.enabled && !wasOn) {
         setTcApplyMsg("Waiting for signal…");
         for (let i = 0; i < 20; i++) {
           await new Promise((r) => setTimeout(r, 400));
@@ -171,8 +199,70 @@ export default function TcSettingsModal({
     }
   };
 
+  const saveSrt = async () => {
+    setSrtBusy(true);
+    setError(null);
+    try {
+      const body: Parameters<typeof updateSrt>[1] = {
+        mode: srtMode,
+        port: srtPort,
+        target: srtTarget,
+        latency_ms: srtLatency,
+      };
+      if (srtPassDirty) body.passphrase = srtPassphrase;
+      const info = await updateSrt(channelId, body);
+      setSrt(info);
+      setSrtPassDirty(false);
+      if (!srtPassphrase) setSrtPassphrase("");
+      onSaved();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSrtBusy(false);
+    }
+  };
+
+  const toggleSrt = async () => {
+    setSrtBusy(true);
+    setError(null);
+    try {
+      if (srtStreaming) {
+        setSrt(await stopSrt(channelId));
+      } else {
+        const body: Parameters<typeof updateSrt>[1] = {
+          mode: srtMode,
+          port: srtPort,
+          target: srtTarget,
+          latency_ms: srtLatency,
+        };
+        if (srtPassDirty) body.passphrase = srtPassphrase;
+        await updateSrt(channelId, body);
+        setSrtPassDirty(false);
+        setSrt(await startSrt(channelId));
+      }
+      onSaved();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSrtBusy(false);
+    }
+  };
+
+  const copyUrl = async () => {
+    if (!srt?.publish_url) return;
+    try {
+      await navigator.clipboard.writeText(srt.publish_url);
+    } catch {
+      /* ignore */
+    }
+  };
+
   return (
-    <div className="modal-backdrop" onClick={() => !busy && onClose()} role="presentation">
+    <div
+      className="modal-backdrop"
+      onClick={() => !busy && !srtBusy && onClose()}
+      role="presentation"
+    >
       <div
         className="modal-panel channel-settings-modal"
         onClick={(e) => e.stopPropagation()}
@@ -184,7 +274,13 @@ export default function TcSettingsModal({
             <span className="input-badge decode">{channelId}</span>
             <span>TC</span>
           </h2>
-          <button type="button" className="modal-close" onClick={onClose} aria-label="Close" disabled={busy}>
+          <button
+            type="button"
+            className="modal-close"
+            onClick={onClose}
+            aria-label="Close"
+            disabled={busy || srtBusy}
+          >
             ×
           </button>
         </div>
@@ -244,7 +340,9 @@ export default function TcSettingsModal({
                           <span className="workflow-option-hint">Host clock · HH:MM:SS</span>
                         </span>
                       </label>
-                      <label className={`workflow-option${tcSource === "external" ? " active" : ""}`}>
+                      <label
+                        className={`workflow-option${tcSource === "external" ? " active" : ""}`}
+                      >
                         <input
                           type="radio"
                           name={`tc-source-${channelId}`}
@@ -359,7 +457,12 @@ export default function TcSettingsModal({
                 >
                   {busy ? "…" : "Update"}
                 </button>
-                <button type="button" className="tc-stop-btn" onClick={() => applyTc(false)} disabled={busy}>
+                <button
+                  type="button"
+                  className="tc-stop-btn"
+                  onClick={() => applyTc(false)}
+                  disabled={busy}
+                >
                   {busy ? "…" : "Stop"}
                 </button>
               </>
@@ -373,6 +476,120 @@ export default function TcSettingsModal({
                 {busy ? "…" : "Start"}
               </button>
             )}
+          </div>
+        </div>
+
+        <div className="channel-settings-srt">
+          <div className="channel-settings-srt-head">
+            <h3>SRT</h3>
+            <span className={`srt-pill ${srtStreaming ? "on" : ""}`}>
+              {srtStreaming ? "ON AIR" : "OFF"}
+            </span>
+          </div>
+
+          <div className="channel-settings-form">
+            <label className="presets-field">
+              <span>Mode</span>
+              <select
+                value={srtMode}
+                onChange={(e) => setSrtMode(e.target.value as "listener" | "caller")}
+                disabled={srtBusy || srtStreaming}
+              >
+                <option value="listener">Listener</option>
+                <option value="caller">Caller</option>
+              </select>
+            </label>
+
+            {srtMode === "listener" ? (
+              <label className="presets-field">
+                <span>Port</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={srtPort}
+                  onChange={(e) => setSrtPort(Number(e.target.value) || 0)}
+                  disabled={srtBusy || srtStreaming}
+                />
+              </label>
+            ) : (
+              <label className="presets-field">
+                <span>Target</span>
+                <input
+                  value={srtTarget}
+                  onChange={(e) => setSrtTarget(e.target.value)}
+                  disabled={srtBusy || srtStreaming}
+                  placeholder="host:port or srt://…"
+                />
+              </label>
+            )}
+
+            <label className="presets-field">
+              <span>Latency</span>
+              <input
+                type="number"
+                min={20}
+                max={8000}
+                value={srtLatency}
+                onChange={(e) => setSrtLatency(Number(e.target.value) || 120)}
+                disabled={srtBusy || srtStreaming}
+              />
+            </label>
+
+            <label className="presets-field">
+              <span>Passphrase {srt?.has_passphrase && !srtPassDirty ? "(set)" : ""}</span>
+              <input
+                type="password"
+                value={srtPassphrase}
+                onChange={(e) => {
+                  setSrtPassphrase(e.target.value);
+                  setSrtPassDirty(true);
+                }}
+                disabled={srtBusy || srtStreaming}
+                placeholder={srt?.has_passphrase ? "••••••••" : "optional"}
+                autoComplete="new-password"
+              />
+            </label>
+          </div>
+
+          {srt?.publish_url && (
+            <div className="srt-url-row">
+              <code className="srt-url" title={srt.publish_url}>
+                {srt.publish_url}
+              </code>
+              <button type="button" className="badge" onClick={copyUrl} disabled={!srt.publish_url}>
+                Copy
+              </button>
+            </div>
+          )}
+
+          {srt?.error && <div className="error-bar">{srt.error}</div>}
+
+          <div className="channel-settings-actions">
+            <button
+              type="button"
+              className="badge"
+              onClick={saveSrt}
+              disabled={srtBusy || srtStreaming}
+              title={srtStreaming ? "Stop SRT before changing settings" : "Save SRT settings"}
+            >
+              {srtBusy ? "…" : "Save"}
+            </button>
+            <button
+              type="button"
+              className={`global-rec-btn ${srtStreaming ? "recording" : ""}`}
+              onClick={toggleSrt}
+              disabled={srtBusy || (!tcLive && !srtStreaming)}
+              title={
+                srtStreaming
+                  ? "Stop SRT"
+                  : !tcLive
+                    ? "Start TC first"
+                    : "Start SRT (burned-in proxy)"
+              }
+            >
+              {srtBusy ? "…" : srtStreaming ? "Stop" : "Start"}
+            </button>
           </div>
         </div>
       </div>

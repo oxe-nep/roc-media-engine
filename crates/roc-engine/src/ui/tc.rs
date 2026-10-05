@@ -35,6 +35,8 @@ pub fn tc_info_json(id: u32, meta: &TcMeta, live: Option<&TcLoopSnapshot>) -> Va
             "y": s.y,
             "error": s.error,
             "timecode": s.timecode,
+            "format": s.format,
+            "mode": s.mode,
         });
     }
     json!({
@@ -50,6 +52,8 @@ pub fn tc_info_json(id: u32, meta: &TcMeta, live: Option<&TcLoopSnapshot>) -> Va
         "y": y,
         "error": if meta.enabled { Value::String("TC not running".into()) } else { Value::Null },
         "timecode": Value::Null,
+        "format": Value::Null,
+        "mode": Value::Null,
     })
 }
 

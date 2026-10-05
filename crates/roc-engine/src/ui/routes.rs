@@ -1345,6 +1345,8 @@ async fn put_tc_loop(
         return Err(UiError::not_found("channel not found"));
     }
     let mut meta = st.ui.tc(id);
+    let prev_source = meta.source.clone();
+    let prev_udp = meta.udp_port;
     if let Some(s) = body.source {
         meta.source = if s.eq_ignore_ascii_case("external") {
             "external".into()
@@ -1390,18 +1392,49 @@ async fn put_tc_loop(
 
     let want = body.enabled.unwrap_or(meta.enabled);
     let was = meta.enabled;
+    // Only actual source/UDP value changes need a full TC pipeline relaunch.
+    let need_relaunch = (body.source.is_some() && meta.source != prev_source)
+        || (body.udp_port.is_some() && meta.udp_port != prev_udp);
     meta.enabled = want;
     st.ui.set_tc(id, meta);
 
     let hls = st.hls_dir.to_string_lossy().to_string();
-    let out = if want {
+    let live_running = st
+        .orch
+        .tc_loop_snapshot(id)
+        .as_ref()
+        .map(|s| {
+            matches!(
+                s.status,
+                roc_pipelines::TcLoopStatus::Running | roc_pipelines::TcLoopStatus::Restarting
+            )
+        })
+        .unwrap_or(false);
+
+    let out = if !want {
+        if was || live_running {
+            tc::stop_tc(st.orch.as_ref(), st.ui.as_ref(), id).map_err(UiError::from)?
+        } else {
+            tc::tc_info_json(id, &st.ui.tc(id), None)
+        }
+    } else if !live_running || need_relaunch {
         st.ui.set_workflow_mode(id, "tc");
-        // Restart when settings change while running, or first start.
         tc::start_tc(st.orch.as_ref(), st.ui.as_ref(), id, &hls).map_err(UiError::from)?
-    } else if was {
-        tc::stop_tc(st.orch.as_ref(), st.ui.as_ref(), id).map_err(UiError::from)?
     } else {
-        tc::tc_info_json(id, &st.ui.tc(id), None)
+        let m = st.ui.tc(id);
+        let (x, y) = m.resolved_xy();
+        let snap = st
+            .orch
+            .update_tc_overlay(
+                id,
+                m.fontsize,
+                m.opacity,
+                x,
+                y,
+                roc_pipelines::TcLoopPosition::nearest(x, y),
+            )
+            .map_err(UiError::from)?;
+        tc::tc_info_json(id, &m, Some(&snap))
     };
     Ok(Json(out))
 }

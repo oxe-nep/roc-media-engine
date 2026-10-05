@@ -197,17 +197,33 @@ export default function TcGrid() {
                       <Thumbnail
                         id={s.id}
                         active={tcOn}
-                        lostSignal={!tcLive && tcOn}
+                        lostSignal={!tcLive && tcOn && !showError}
                         path={`/thumb/playout/${s.id}`}
                       />
-                      {tslText && tcOn && (
+                      {showError && (
+                        <div className="thumb-error-overlay" title={showError} role="alert">
+                          <button
+                            type="button"
+                            className="thumb-error-dismiss"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              clearCardError(s.id);
+                            }}
+                            aria-label="Dismiss"
+                          >
+                            ×
+                          </button>
+                          <p className="thumb-error-msg">{actionError || engineError}</p>
+                        </div>
+                      )}
+                      {tslText && tcOn && !showError && (
                         <div className="thumb-tsl-overlay">
                           <div className="tsl-badge" title={`TSL ${s.tsl_index ?? s.id}`}>
                             {tslText}
                           </div>
                         </div>
                       )}
-                      {srtOn && (
+                      {srtOn && !showError && (
                         <div className="thumb-badges">
                           <div
                             className={`stream-badge${srtById[s.id]?.sending ? "" : " waiting"}`}
@@ -263,7 +279,16 @@ export default function TcGrid() {
                           </div>
                           <div
                             className="card-meta"
-                            title={tcOn ? tcSourceLabel(tc?.source, tc?.udp_port, s.id) : undefined}
+                            title={
+                              tcOn
+                                ? [
+                                    tcSourceLabel(tc?.source, tc?.udp_port, s.id),
+                                    tc?.format || tc?.mode,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" · ")
+                                : undefined
+                            }
                           >
                             <span className="card-meta-item card-meta-tc">{tcCardStatusMeta(tc, tcLive)}</span>
                           </div>
@@ -334,19 +359,6 @@ export default function TcGrid() {
                         </div>
                       </div>
                     </div>
-                    {showError && (
-                      <div className="card-error" title={showError}>
-                        <button
-                          type="button"
-                          className="card-error-dismiss"
-                          onClick={() => clearCardError(s.id)}
-                          aria-label="Dismiss"
-                        >
-                          ×
-                        </button>
-                        {actionError || engineError}
-                      </div>
-                    )}
                     </div>
                   </div>
                 </div>

@@ -11,7 +11,8 @@ use roc_devices::DeviceProbeReport;
 
 use crate::{
     ChannelSnapshot, ChannelStatus, PipelineBackend, PlayoutFileControl, PlayoutSnapshot,
-    RecordingRole, TcLoopLaunchOpts, TcLoopSnapshot, TcLoopStatus, WorkflowKind, WorkflowSnapshot,
+    RecordingRole, TcLoopLaunchOpts, TcLoopPosition, TcLoopSnapshot, TcLoopStatus, WorkflowKind,
+    WorkflowSnapshot,
 };
 
 struct Chan {
@@ -573,6 +574,8 @@ impl PipelineBackend for MockBackend {
                 audio_peaks: Some(vec![-90.0; 8]),
                 srt: false,
                 srt_bitrate_kbps: None,
+                format: Some(opts.input_mode.clone()),
+                mode: Some(opts.input_mode.clone()),
             },
         );
         self.workflows
@@ -588,6 +591,27 @@ impl PipelineBackend for MockBackend {
                 entry.1 = false;
             }
         }
+        Ok(())
+    }
+
+    fn update_tc_overlay(
+        &self,
+        channel_id: u32,
+        fontsize: u32,
+        opacity: f64,
+        x: f64,
+        y: f64,
+        position: TcLoopPosition,
+    ) -> Result<()> {
+        let mut map = self.tc_loops.lock();
+        let snap = map
+            .get_mut(&channel_id)
+            .ok_or_else(|| anyhow::anyhow!("TC not running on channel {channel_id}"))?;
+        snap.fontsize = fontsize.clamp(12, 200);
+        snap.opacity = opacity.clamp(0.15, 1.0);
+        snap.x = x.clamp(0.0, 1.0);
+        snap.y = y.clamp(0.0, 1.0);
+        snap.position = position;
         Ok(())
     }
 

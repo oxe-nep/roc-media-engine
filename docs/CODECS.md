@@ -37,6 +37,7 @@ UI (`encode_preset` vs `record_preset`).
 | ProRes | `avenc_prores` present | Optional Apple mezz |
 | True Sony XAVC | needs vendor tooling | Replace x264 Intra approx if required |
 | AV1 NVENC | P2000 unlikely | Skip |
+| **TC interlaced SRT/WebRTC** | done via deinterlace | DeckLink OUT stays interlaced; proxy encode deinterlaces before NVENC so SRT + WebRTC are progressive |
 
 ## Deferred audio
 

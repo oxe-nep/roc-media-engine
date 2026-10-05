@@ -279,6 +279,12 @@ pub struct TcLoopSnapshot {
     pub srt: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub srt_bitrate_kbps: Option<f64>,
+    /// Live input format summary (e.g. `1080i50`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Locked DeckLink GST mode (same as IN/OUT for TC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 fn default_tc_x() -> f64 {
