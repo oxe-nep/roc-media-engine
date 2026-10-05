@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import AudioMeters from "@/components/AudioMeters";
 import { LISTEN_PAIRS } from "@/components/ListenButton";
+import { useDashboard } from "@/hooks/useDashboard";
 import { mediaBase } from "@/lib/mediaBase";
 
 const API_KEY = process.env.NEXT_PUBLIC_API_KEY ?? "";
@@ -38,6 +39,9 @@ export default function WebRtcPreviewPlayer({
   const frameRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const { streams } = useDashboard();
+  const channelStatus = streams.find((s) => s.id === channelId)?.status;
+  const noSignal = channelStatus === "waiting";
   const [pair, setPair] = useState(initialPair);
   const [session, setSession] = useState(0);
   const [status, setStatus] = useState("Connecting…");
@@ -236,8 +240,15 @@ export default function WebRtcPreviewPlayer({
     };
   }, [channelId, pair, session]);
 
-  const live = status === "Live";
-  const showOverlay = Boolean(error) || status === "Error" || status === "Disconnected";
+  const live = status === "Live" && !noSignal;
+  const statusLabel = noSignal && (status === "Live" || status === "DTLS…" || status === "ICE…")
+    ? "No signal"
+    : status;
+  const showOverlay =
+    Boolean(error) ||
+    status === "Error" ||
+    status === "Disconnected" ||
+    noSignal;
 
   return (
     <div className={`preview-player preview-player-${variant}`}>
@@ -246,7 +257,9 @@ export default function WebRtcPreviewPlayer({
           <h2>
             {variant === "window" ? channelName : `Preview · ${channelName}`}
           </h2>
-          <span className={`preview-modal-status${live ? " live" : ""}`}>{status}</span>
+          <span className={`preview-modal-status${live ? " live" : ""}${noSignal ? " waiting" : ""}`}>
+            {statusLabel}
+          </span>
         </div>
         <div className="preview-modal-actions">
           <div className="preview-pair-pills" role="group" aria-label="Audio pair">
@@ -302,11 +315,15 @@ export default function WebRtcPreviewPlayer({
               {showOverlay && (
                 <div className="preview-modal-overlay" role="alert">
                   <p className="preview-modal-overlay-msg">
-                    {error || (status === "Disconnected" ? "Disconnected" : "Preview failed")}
+                    {noSignal && !error
+                      ? "No signal"
+                      : error || (status === "Disconnected" ? "Disconnected" : "Preview failed")}
                   </p>
-                  <button type="button" className="preview-modal-reconnect" onClick={reconnect}>
-                    Reconnect
-                  </button>
+                  {!noSignal && (
+                    <button type="button" className="preview-modal-reconnect" onClick={reconnect}>
+                      Reconnect
+                    </button>
+                  )}
                 </div>
               )}
             </div>

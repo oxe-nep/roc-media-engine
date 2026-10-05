@@ -656,6 +656,25 @@ html {
   color: var(--text-muted);
 }
 
+.card-thumb img.thumb-lost {
+  filter: grayscale(0.35) brightness(0.45);
+}
+
+.thumb-lost-badge {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #e6d29a;
+  background: rgba(0, 0, 0, 0.42);
+  pointer-events: none;
+}
+
 .card-footer {
   display: flex;
   flex-direction: column;
@@ -2158,6 +2177,11 @@ body:has(.preview-window-root) .container {
 .preview-modal-status.live {
   color: #9fd49f;
   background: rgba(92, 184, 92, 0.18);
+}
+
+.preview-modal-status.waiting {
+  color: #e6d29a;
+  background: rgba(200, 160, 60, 0.2);
 }
 
 .preview-pair-pills {

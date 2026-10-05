@@ -1795,16 +1795,35 @@ impl ChannelPipeline {
         }
     }
 
+    /// DeckLink `signal` property: true when a valid input is present.
+    /// `None` if the source has no such property (non-DeckLink graph).
+    fn decklink_signal_present(&self) -> Option<bool> {
+        let dl = self.pipeline.as_ref()?.by_name("dlsrc")?;
+        if dl.find_property("signal").is_none() {
+            return None;
+        }
+        Some(dl.property::<bool>("signal"))
+    }
+
+    fn apply_signal_status(&mut self, playing: bool) {
+        if !playing || self.status == ChannelStatus::Error {
+            return;
+        }
+        match self.decklink_signal_present() {
+            Some(false) => self.status = ChannelStatus::Waiting,
+            Some(true) | None => self.status = ChannelStatus::Running,
+        }
+    }
+
     pub fn poll_bus(&mut self) {
-        {
+        let playing = {
             let Some(p) = self.pipeline.as_ref() else {
                 return;
             };
             let (_, cur, _) = p.state(gstreamer::ClockTime::ZERO);
-            if cur == gstreamer::State::Playing && self.status != ChannelStatus::Error {
-                self.status = ChannelStatus::Running;
-            }
-        }
+            cur == gstreamer::State::Playing
+        };
+        self.apply_signal_status(playing);
 
         let adapt_to = {
             if let Some(fmt) = self.read_live_format() {
@@ -1851,6 +1870,7 @@ impl ChannelPipeline {
             return;
         };
         let bus = p.bus().expect("pipeline bus");
+        let mut lost_signal_warn = false;
         while let Some(msg) = bus.timed_pop(gstreamer::ClockTime::ZERO) {
             use gstreamer::MessageView;
             match msg.view() {
@@ -1864,24 +1884,17 @@ impl ChannelPipeline {
                     tracing::error!(channel = self.id, error = ?self.last_error, "gst error");
                 }
                 MessageView::Eos(_) => {}
-                MessageView::StateChanged(sc) => {
-                    if sc
-                        .src()
-                        .map(|s| s == p.upcast_ref::<gstreamer::Object>())
-                        .unwrap_or(false)
-                        && sc.current() == gstreamer::State::Playing
-                    {
-                        self.status = ChannelStatus::Running;
-                    }
+                MessageView::StateChanged(_) => {
+                    // Running vs Waiting is decided from DeckLink `signal` at poll start.
                 }
                 MessageView::Warning(w) => {
                     let text = format!("{} ({})", w.error(), w.debug().unwrap_or_default());
                     let lower = text.to_ascii_lowercase();
                     // Expected noise: unused DeckLink inputs, brief backlog after attach/restart.
-                    if lower.contains("signal lost")
-                        || lower.contains("no input source")
-                        || lower.contains("dropped") && lower.contains("old frames")
-                    {
+                    if lower.contains("signal lost") || lower.contains("no input source") {
+                        lost_signal_warn = true;
+                        tracing::debug!(channel = self.id, %text, "gst warning (no signal)");
+                    } else if lower.contains("dropped") && lower.contains("old frames") {
                         tracing::debug!(channel = self.id, %text, "gst warning (benign)");
                     } else {
                         tracing::warn!(channel = self.id, %text, "gst warning");
@@ -1896,6 +1909,9 @@ impl ChannelPipeline {
                 }
                 _ => {}
             }
+        }
+        if lost_signal_warn && self.status != ChannelStatus::Error {
+            self.status = ChannelStatus::Waiting;
         }
     }
 

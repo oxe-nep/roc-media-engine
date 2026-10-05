@@ -183,7 +183,7 @@ export default function StreamGrid() {
                   }}
                   title={captureOn ? "Open preview" : undefined}
                 >
-                  <Thumbnail id={s.id} active={captureOn} />
+                  <Thumbnail id={s.id} active={captureOn} lostSignal={!hasSignal && captureOn} />
                   {rec?.schedule && (
                     <div className="thumb-sched" title={`Scheduled ${formatSchedBadge(rec.schedule)}`}>
                       <div className={`sched-badge${rec.schedule.phase === "waiting" ? " waiting" : ""}`}>
@@ -247,12 +247,18 @@ export default function StreamGrid() {
                       </div>
                       <div
                         className="card-meta"
-                        title={s.format || (s.status === "waiting" ? "No signal" : undefined)}
+                        title={
+                          s.status === "waiting"
+                            ? signalLabel
+                              ? `No signal (last: ${signalLabel})`
+                              : "No signal"
+                            : s.format || undefined
+                        }
                       >
-                        {signalLabel ? (
-                          <span className="card-meta-item card-meta-format">{signalLabel}</span>
-                        ) : s.status === "waiting" ? (
+                        {s.status === "waiting" ? (
                           <span className="card-meta-item card-meta-waiting">No signal</span>
+                        ) : signalLabel ? (
+                          <span className="card-meta-item card-meta-format">{signalLabel}</span>
                         ) : (
                           <span className="card-meta-item">—</span>
                         )}
