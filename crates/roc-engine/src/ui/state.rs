@@ -81,6 +81,18 @@ pub struct PlayoutMeta {
     /// Cached media duration in seconds (file source).
     #[serde(default)]
     pub duration_sec: Option<f64>,
+    /// Probed video codec name (e.g. `h264`), empty if unknown.
+    #[serde(default)]
+    pub video_codec: String,
+    /// Probed audio codec name (e.g. `aac`), empty if unknown.
+    #[serde(default)]
+    pub audio_codec: String,
+    /// Number of discrete audio streams/tracks in the file.
+    #[serde(default)]
+    pub audio_tracks: u32,
+    /// Total audio channels across tracks (e.g. 8 for 4×stereo).
+    #[serde(default)]
+    pub audio_channels: u32,
     /// Inclusive playhead start (seconds).
     #[serde(default)]
     pub mark_in_sec: f64,
@@ -103,6 +115,10 @@ impl Default for PlayoutMeta {
             latency_ms: default_latency(),
             format_code: default_auto_format(),
             duration_sec: None,
+            video_codec: String::new(),
+            audio_codec: String::new(),
+            audio_tracks: 0,
+            audio_channels: 0,
             mark_in_sec: 0.0,
             mark_out_sec: None,
         }

@@ -571,6 +571,10 @@ export interface PlayoutClient {
   duration_sec?: number;
   elapsed_sec?: number;
   remain_sec?: number;
+  video_codec?: string;
+  audio_codec?: string;
+  audio_tracks?: number;
+  audio_channels?: number;
   sending?: boolean;
   reconnects?: number;
   error?: string;

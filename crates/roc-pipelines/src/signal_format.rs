@@ -368,30 +368,36 @@ mod gst_probe {
     }
 
     /// How many stereo pairs / codec kind to feed DeckLink (encode uses 1 or 4 AAC).
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone)]
     pub struct PlayoutAudioProbe {
         pub pairs: usize,
         pub compressed: bool,
+        pub video_codec: String,
+        pub audio_codec: String,
+        pub audio_tracks: usize,
+        /// Total PCM channels after layout (e.g. 8 for 4×stereo).
+        pub audio_channels: u32,
     }
 
-    /// Probe audio layout via ffprobe (stereo-track count) with safe defaults.
+    /// Probe media codecs + audio layout via ffprobe (with safe defaults).
     pub fn probe_playout_audio(source: &str) -> PlayoutAudioProbe {
         let default = PlayoutAudioProbe {
             pairs: 1,
             compressed: true,
+            video_codec: String::new(),
+            audio_codec: "aac".into(),
+            audio_tracks: 1,
+            audio_channels: 2,
         };
         if source.starts_with("srt://") {
-            // SRT listen/caller varies; stay stereo-safe (file path probes track count).
             return default;
         }
         let Ok(out) = std::process::Command::new("ffprobe")
             .args([
                 "-v",
                 "error",
-                "-select_streams",
-                "a",
                 "-show_entries",
-                "stream=codec_name,channels",
+                "stream=codec_type,codec_name,channels",
                 "-of",
                 "csv=p=0",
                 source,
@@ -404,37 +410,48 @@ mod gst_probe {
             return default;
         }
         let text = String::from_utf8_lossy(&out.stdout);
-        let mut tracks = Vec::new();
+        let mut video_codec = String::new();
+        let mut tracks: Vec<(String, u32)> = Vec::new();
         for line in text.lines() {
             let mut parts = line.split(',');
-            let codec = parts.next().unwrap_or("aac").trim();
+            let kind = parts.next().unwrap_or("").trim();
+            let codec = parts.next().unwrap_or("").trim();
             let ch = parts
                 .next()
                 .and_then(|s| s.trim().parse::<u32>().ok())
                 .unwrap_or(2);
-            if codec.is_empty() {
-                continue;
+            if kind == "video" && video_codec.is_empty() && !codec.is_empty() {
+                video_codec = codec.to_string();
+            } else if kind == "audio" && !codec.is_empty() {
+                tracks.push((codec.to_string(), ch.max(1)));
             }
-            tracks.push((codec.to_string(), ch));
         }
         if tracks.is_empty() {
-            return default;
+            let mut d = default;
+            d.video_codec = video_codec;
+            return d;
         }
+        let audio_codec = tracks[0].0.clone();
         let compressed = tracks.iter().any(|(codec, _)| {
             !matches!(
                 codec.as_str(),
                 "pcm_s16le" | "pcm_s24le" | "pcm_s32le" | "pcm_f32le"
             )
         });
-        if tracks.len() == 1 {
-            return PlayoutAudioProbe {
-                pairs: 1,
-                compressed,
-            };
-        }
+        let audio_tracks = tracks.len();
+        let audio_channels: u32 = tracks.iter().map(|(_, ch)| *ch).sum();
+        let pairs = if audio_tracks == 1 {
+            1
+        } else {
+            audio_tracks.clamp(1, 4)
+        };
         PlayoutAudioProbe {
-            pairs: tracks.len().clamp(1, 4),
+            pairs,
             compressed,
+            video_codec,
+            audio_codec,
+            audio_tracks,
+            audio_channels: audio_channels.max(2),
         }
     }
 }
@@ -451,10 +468,14 @@ pub fn probe_file_duration(_path: &str, _timeout_ms: u64) -> Option<f64> {
 }
 
 #[cfg(not(feature = "gst"))]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PlayoutAudioProbe {
     pub pairs: usize,
     pub compressed: bool,
+    pub video_codec: String,
+    pub audio_codec: String,
+    pub audio_tracks: usize,
+    pub audio_channels: u32,
 }
 
 #[cfg(not(feature = "gst"))]
@@ -462,6 +483,10 @@ pub fn probe_playout_audio(_source: &str) -> PlayoutAudioProbe {
     PlayoutAudioProbe {
         pairs: 1,
         compressed: true,
+        video_codec: String::new(),
+        audio_codec: "aac".into(),
+        audio_tracks: 1,
+        audio_channels: 2,
     }
 }
 

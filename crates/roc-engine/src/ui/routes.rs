@@ -651,6 +651,11 @@ fn refresh_file_duration(st: &AppState, meta: &mut crate::ui::state::PlayoutMeta
         meta.duration_sec = Some(dur);
         normalize_marks(meta);
     }
+    let audio = roc_pipelines::probe_playout_audio(&path);
+    meta.video_codec = audio.video_codec;
+    meta.audio_codec = audio.audio_codec;
+    meta.audio_tracks = audio.audio_tracks as u32;
+    meta.audio_channels = audio.audio_channels;
 }
 
 fn apply_playout_file_control(st: &AppState, id: u32, meta: &crate::ui::state::PlayoutMeta) {
@@ -702,6 +707,10 @@ async fn put_playout_ui(
         if f != meta.file_id {
             file_changed = true;
             meta.duration_sec = None;
+            meta.video_codec.clear();
+            meta.audio_codec.clear();
+            meta.audio_tracks = 0;
+            meta.audio_channels = 0;
             meta.mark_in_sec = 0.0;
             meta.mark_out_sec = None;
         }
@@ -735,7 +744,7 @@ async fn put_playout_ui(
     if let Some(l) = body.latency_ms {
         meta.latency_ms = l;
     }
-    if file_changed || (meta.source == "file" && meta.duration_sec.is_none()) {
+    if file_changed || (meta.source == "file" && (meta.duration_sec.is_none() || meta.video_codec.is_empty())) {
         refresh_file_duration(&st, &mut meta);
     } else {
         normalize_marks(&mut meta);
@@ -871,7 +880,7 @@ async fn start_playout_ui(
         .map_err(UiError::from)?;
     let mut meta = st.ui.playout(id);
     if meta.source == "file" {
-        if meta.duration_sec.is_none() {
+        if meta.duration_sec.is_none() || meta.video_codec.is_empty() {
             refresh_file_duration(&st, &mut meta);
             st.ui.set_playout(id, meta.clone());
         }

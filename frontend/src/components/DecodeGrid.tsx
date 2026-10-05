@@ -60,11 +60,38 @@ function shortSrt(url: string): string {
   return raw.replace(/^srt:\/\//i, "").split("?")[0] || raw;
 }
 
-function shortOut(device?: string, id?: number): string {
-  const m = device?.match(/\((\d+)\)\s*$/);
-  if (m?.[1]) return `OUT ${m[1]}`;
-  if (id != null) return `OUT ${id}`;
-  return "OUT";
+function prettyCodec(raw?: string): string {
+  if (!raw?.trim()) return "";
+  const c = raw.trim().toLowerCase();
+  const map: Record<string, string> = {
+    h264: "H.264",
+    avc: "H.264",
+    hevc: "H.265",
+    h265: "H.265",
+    aac: "AAC",
+    mp3: "MP3",
+    opus: "Opus",
+    pcm_s16le: "PCM",
+    pcm_s24le: "PCM",
+    pcm_s32le: "PCM",
+    pcm_f32le: "PCM",
+    dnxhd: "DNxHD",
+    prores: "ProRes",
+  };
+  return map[c] || raw.toUpperCase();
+}
+
+function audioLayoutLabel(c: PlayoutClient): string {
+  const codec = prettyCodec(c.audio_codec) || "Audio";
+  const tracks = c.audio_tracks ?? 0;
+  const ch = c.audio_channels ?? 0;
+  if (tracks > 1) {
+    const per = tracks > 0 && ch > 0 ? Math.round(ch / tracks) : 2;
+    return `${tracks}×${codec}${per > 0 ? ` ${per}ch` : ""}`;
+  }
+  if (ch > 0) return `${codec} ${ch}ch`;
+  if (c.audio_codec) return codec;
+  return "";
 }
 
 function cardTitle(c: PlayoutClient): string {
@@ -80,13 +107,17 @@ function cardTitle(c: PlayoutClient): string {
 
 function cardMetaLine(c: PlayoutClient): string {
   const bits: string[] = [];
-  if (c.source === "file") bits.push("File");
-  else if (c.mode === "listener") bits.push("Listener");
-  else bits.push("Caller");
-  bits.push(formatDisplay(c.format_code));
-  bits.push(shortOut(c.device_label || c.device, c.id));
-  if (c.source === "file" && c.loop) bits.push("Loop");
-  if (c.source !== "file" && (c.latency_ms ?? 0) > 0) bits.push(`${c.latency_ms} ms`);
+  if (c.source === "file") {
+    const v = prettyCodec(c.video_codec);
+    if (v) bits.push(v);
+    const a = audioLayoutLabel(c);
+    if (a) bits.push(a);
+    bits.push(formatDisplay(c.format_code));
+  } else {
+    bits.push(c.mode === "listener" ? "Listener" : "Caller");
+    bits.push(formatDisplay(c.format_code));
+    if ((c.latency_ms ?? 0) > 0) bits.push(`${c.latency_ms} ms`);
+  }
   return bits.join(" · ");
 }
 
