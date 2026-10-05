@@ -144,7 +144,7 @@ pub fn start_tc(orch: &Orchestrator, ui: &UiState, id: u32, hls_base: &str) -> R
     match orch.start_tc_loop(id, opts) {
         Ok(snap) => Ok(tc_info_json(id, &meta, Some(&snap))),
         Err(e) => {
-            let mut failed = meta.clone();
+            let failed = meta.clone();
             // Keep enabled=true so UI shows error state until STOP.
             ui.set_tc(id, failed.clone());
             Ok(json!({
