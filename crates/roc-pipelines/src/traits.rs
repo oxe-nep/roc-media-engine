@@ -50,6 +50,8 @@ pub trait PipelineBackend: Send + Sync {
     fn set_webrtc_answer(&self, channel_id: u32, sdp: &str) -> Result<()>;
     fn add_webrtc_ice(&self, channel_id: u32, sdp_mline_index: u32, candidate: &str) -> Result<()>;
     fn stop_webrtc_preview(&self, channel_id: u32) -> Result<()>;
+    /// Stop only if `session_id` still owns the channel preview (avoids killing a handoff).
+    fn stop_webrtc_preview_session(&self, channel_id: u32, session_id: &str) -> Result<()>;
 
     fn channel_snapshot(&self, channel_id: u32) -> Result<ChannelSnapshot>;
     fn list_channels(&self) -> Vec<ChannelSnapshot>;

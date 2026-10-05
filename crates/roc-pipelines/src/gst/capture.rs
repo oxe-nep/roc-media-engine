@@ -1216,6 +1216,17 @@ impl ChannelPipeline {
         }
     }
 
+    /// Stop preview only if `session_id` is still the active one (pop-out handoff safe).
+    pub fn stop_webrtc_preview_session(&mut self, session_id: &str) {
+        let Some(preview) = self.webrtc_preview.as_ref() else {
+            return;
+        };
+        if preview.session_id != session_id {
+            return;
+        }
+        self.stop_webrtc_preview();
+    }
+
     fn encoded_tee(&self) -> Result<gstreamer::Element> {
         let p = self
             .pipeline

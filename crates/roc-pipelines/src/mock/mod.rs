@@ -270,6 +270,10 @@ impl PipelineBackend for MockBackend {
         Ok(())
     }
 
+    fn stop_webrtc_preview_session(&self, _channel_id: u32, _session_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     fn channel_snapshot(&self, channel_id: u32) -> Result<ChannelSnapshot> {
         let mut map = self.channels.lock();
         let ch = map

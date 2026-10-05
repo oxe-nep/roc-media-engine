@@ -248,6 +248,15 @@ impl PipelineBackend for GstBackend {
         Ok(())
     }
 
+    fn stop_webrtc_preview_session(&self, channel_id: u32, session_id: &str) -> Result<()> {
+        let _gst = self.gst_op.lock();
+        let mut map = self.channels.lock();
+        if let Some(pipe) = map.get_mut(&channel_id) {
+            pipe.stop_webrtc_preview_session(session_id);
+        }
+        Ok(())
+    }
+
     fn channel_snapshot(&self, channel_id: u32) -> Result<ChannelSnapshot> {
         // Same lock order as mutations: gst_op → channels (poll_bus may adapt/relaunch).
         let _gst = self.gst_op.lock();

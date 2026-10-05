@@ -310,6 +310,10 @@ impl Orchestrator {
         self.backend.stop_webrtc_preview(id)
     }
 
+    pub fn stop_webrtc_preview_session(&self, id: u32, session_id: &str) -> Result<()> {
+        self.backend.stop_webrtc_preview_session(id, session_id)
+    }
+
     pub fn set_encode_preset(&self, id: u32, preset_id: &str) -> Result<ChannelSnapshot> {
         let preset = self
             .presets

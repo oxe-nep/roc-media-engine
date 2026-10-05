@@ -50,6 +50,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Value>();
     let mut preview_channel: Option<u32> = None;
+    let mut preview_session: Option<String> = None;
     let mut preview_rx: Option<std::sync::mpsc::Receiver<PreviewSignal>> = None;
 
     loop {
@@ -70,6 +71,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 &state,
                                 &m,
                                 &mut preview_channel,
+                                &mut preview_session,
                                 &mut preview_rx,
                                 &out_tx,
                             );
@@ -99,8 +101,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
-    if let Some(ch) = preview_channel.take() {
-        let _ = state.orch.stop_webrtc_preview(ch);
+    // Only tear down if this socket still owns the active session (pop-out handoff).
+    if let (Some(ch), Some(sid)) = (preview_channel.take(), preview_session.take()) {
+        let _ = state.orch.stop_webrtc_preview_session(ch, &sid);
     }
 }
 
@@ -133,6 +136,7 @@ fn handle_client_msg(
     state: &AppState,
     m: &ClientMsg,
     preview_channel: &mut Option<u32>,
+    preview_session: &mut Option<String>,
     preview_rx: &mut Option<std::sync::mpsc::Receiver<PreviewSignal>>,
     out_tx: &mpsc::UnboundedSender<Value>,
 ) {
@@ -140,14 +144,15 @@ fn handle_client_msg(
         "preview_open" => {
             let Some(channel) = m.channel else { return };
             let pair = m.pair.unwrap_or(0);
-            if let Some(prev) = preview_channel.take() {
-                let _ = state.orch.stop_webrtc_preview(prev);
+            if let (Some(prev), Some(sid)) = (preview_channel.take(), preview_session.take()) {
+                let _ = state.orch.stop_webrtc_preview_session(prev, &sid);
             }
             *preview_rx = None;
             let (tx, rx) = new_preview_signal_tx();
             match state.orch.start_webrtc_preview(channel, pair, tx) {
                 Ok(session_id) => {
                     *preview_channel = Some(channel);
+                    *preview_session = Some(session_id.clone());
                     *preview_rx = Some(rx);
                     let _ = out_tx.send(json!({
                         "type": "preview_opened",
@@ -187,8 +192,8 @@ fn handle_client_msg(
             }
         }
         "preview_close" => {
-            if let Some(ch) = preview_channel.take() {
-                let _ = state.orch.stop_webrtc_preview(ch);
+            if let (Some(ch), Some(sid)) = (preview_channel.take(), preview_session.take()) {
+                let _ = state.orch.stop_webrtc_preview_session(ch, &sid);
             }
             *preview_rx = None;
             let _ = out_tx.send(json!({ "type": "preview_closed" }));

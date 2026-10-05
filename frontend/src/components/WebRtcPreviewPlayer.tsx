@@ -46,6 +46,7 @@ export default function WebRtcPreviewPlayer({
   const [session, setSession] = useState(0);
   const [status, setStatus] = useState("Connecting…");
   const [error, setError] = useState<string | null>(null);
+  const [needsUnmute, setNeedsUnmute] = useState(false);
 
   useEffect(() => {
     setPair(initialPair);
@@ -54,6 +55,48 @@ export default function WebRtcPreviewPlayer({
   const reconnect = useCallback(() => {
     setError(null);
     setSession((n) => n + 1);
+  }, []);
+
+  const tryAutostart = useCallback(async (preferUnmuted: boolean) => {
+    const video = videoRef.current;
+    if (!video) return;
+    try {
+      if (preferUnmuted) {
+        video.muted = false;
+        await video.play();
+        setNeedsUnmute(false);
+        return;
+      }
+    } catch {
+      /* fall through — browser blocked unmuted autoplay */
+    }
+    try {
+      video.muted = true;
+      await video.play();
+      video.muted = false;
+      await video.play();
+      setNeedsUnmute(false);
+    } catch {
+      try {
+        video.muted = true;
+        await video.play();
+        setNeedsUnmute(true);
+      } catch {
+        /* ignore */
+      }
+    }
+  }, []);
+
+  const unmute = useCallback(async () => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = false;
+    try {
+      await video.play();
+      setNeedsUnmute(false);
+    } catch {
+      setNeedsUnmute(true);
+    }
   }, []);
 
   const toggleFullscreen = useCallback(async () => {
@@ -72,8 +115,10 @@ export default function WebRtcPreviewPlayer({
 
   const openPopout = useCallback(() => {
     const url = `/preview/${channelId}?pair=${pair}`;
-    window.open(url, `roc-preview-${channelId}`, "noopener,noreferrer,width=1440,height=860");
-    onCloseRef.current?.();
+    // Keep opener relationship briefly so the new window can autoplay; session-scoped
+    // stop on the engine prevents the modal WS teardown from killing the new preview.
+    window.open(url, `roc-preview-${channelId}`, "width=1440,height=860");
+    window.setTimeout(() => onCloseRef.current?.(), 150);
   }, [channelId, pair]);
 
   useEffect(() => {
@@ -81,6 +126,7 @@ export default function WebRtcPreviewPlayer({
     let remoteReady = false;
     const pendingIce: RTCIceCandidateInit[] = [];
     setError(null);
+    setNeedsUnmute(false);
     setStatus("Connecting…");
 
     const pc = new RTCPeerConnection({
@@ -93,7 +139,7 @@ export default function WebRtcPreviewPlayer({
       const video = videoRef.current;
       if (!video) return;
       video.srcObject = stream;
-      void video.play().catch(() => {});
+      void tryAutostart(variant === "window");
     };
 
     pc.ontrack = (ev) => {
@@ -238,7 +284,12 @@ export default function WebRtcPreviewPlayer({
       }
       if (videoRef.current) videoRef.current.srcObject = null;
     };
-  }, [channelId, pair, session]);
+  }, [channelId, pair, session, tryAutostart, variant]);
+
+  useEffect(() => {
+    if (noSignal) return;
+    if (status === "Live") void tryAutostart(variant === "window");
+  }, [noSignal, status, tryAutostart, variant]);
 
   const live = status === "Live" && !noSignal;
   const statusLabel = noSignal && (status === "Live" || status === "DTLS…" || status === "ICE…")
@@ -275,6 +326,17 @@ export default function WebRtcPreviewPlayer({
               </button>
             ))}
           </div>
+          {needsUnmute && !noSignal && (
+            <button
+              type="button"
+              className="preview-tool-btn preview-unmute-btn"
+              onClick={() => void unmute()}
+              title="Unmute"
+              aria-label="Unmute"
+            >
+              ♪
+            </button>
+          )}
           <button
             type="button"
             className="preview-tool-btn"
@@ -318,6 +380,15 @@ export default function WebRtcPreviewPlayer({
                 autoPlay
                 muted={noSignal}
               />
+              {needsUnmute && !showOverlay && (
+                <button
+                  type="button"
+                  className="preview-unmute-overlay"
+                  onClick={() => void unmute()}
+                >
+                  Click to enable sound
+                </button>
+              )}
               {showOverlay && (
                 <div className="preview-modal-overlay" role="alert">
                   <p className="preview-modal-overlay-msg">
