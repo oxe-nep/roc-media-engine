@@ -114,7 +114,7 @@ fn arm_file_transport(p: &mut PlayoutRuntime, position_sec: f64, running: bool) 
 fn poll_playout_runtime(p: &mut PlayoutRuntime) {
     use gstreamer::prelude::*;
     use gstreamer::MessageView;
-    let Some(pipeline) = p.pipeline.as_ref() else {
+    let Some(pipeline) = p.pipeline.clone() else {
         return;
     };
     let Some(bus) = pipeline.bus() else {
@@ -695,14 +695,15 @@ impl PipelineBackend for GstBackend {
         let p = map
             .get_mut(client_id)
             .with_context(|| format!("playout {client_id} not running"))?;
-        let pipe = p
-            .pipeline
-            .as_ref()
-            .with_context(|| format!("playout {client_id} has no pipeline"))?;
         if p.is_file {
             let pos = file_transport_position(p);
             arm_file_transport(p, pos, false);
         }
+        let pipe = p
+            .pipeline
+            .as_ref()
+            .with_context(|| format!("playout {client_id} has no pipeline"))?
+            .clone();
         pipe.set_state(gstreamer::State::Paused)
             .context("playout PAUSED")?;
         p.status = ChannelStatus::Paused;
@@ -718,7 +719,8 @@ impl PipelineBackend for GstBackend {
         let pipe = p
             .pipeline
             .as_ref()
-            .with_context(|| format!("playout {client_id} has no pipeline"))?;
+            .with_context(|| format!("playout {client_id} has no pipeline"))?
+            .clone();
         // If parked at mark-out / EOF, restart from mark-in on resume.
         if p.is_file {
             let pos = file_transport_position(p);
@@ -735,7 +737,7 @@ impl PipelineBackend for GstBackend {
                 pos
             };
             if (target - pos).abs() > 0.02 {
-                playout_seek_pipeline(pipe, target)?;
+                playout_seek_pipeline(&pipe, target)?;
             }
             arm_file_transport(p, target, true);
         }
@@ -756,7 +758,8 @@ impl PipelineBackend for GstBackend {
         let pipe = p
             .pipeline
             .as_ref()
-            .with_context(|| format!("playout {client_id} has no pipeline"))?;
+            .with_context(|| format!("playout {client_id} has no pipeline"))?
+            .clone();
         let target = {
             let mut t = if position_sec.is_finite() {
                 position_sec.max(0.0)
@@ -768,7 +771,7 @@ impl PipelineBackend for GstBackend {
             }
             t
         };
-        playout_seek_pipeline(pipe, target)?;
+        playout_seek_pipeline(&pipe, target)?;
         let running = matches!(p.status, ChannelStatus::Running | ChannelStatus::Waiting);
         arm_file_transport(p, target, running);
         Ok(())
