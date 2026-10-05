@@ -13,7 +13,7 @@ Live/SRT always uses NVENC (encode-once tee `e`).
 
 | Preset | Codec | Container | Notes |
 |--------|-------|-----------|--------|
-| `dnxhd_145` / `dnxhd_185` | `avenc_dnxhd` | `.mov` (`qtmux`) | Y42B from raw tee `t` |
+| `dnxhd_145` / `dnxhd_185` | `avenc_dnxhd` | `.mxf` (`mxfmux`) | Y42B from raw tee `t` (qtmux cannot take DNxHD on this host) |
 | `xavc_intra_hd` | `x264enc` High 4:2:2 Intra | `.mxf` (`mxfmux`) | Open-source XAVC Intra HD approximation |
 
 Timecode: GStreamer `timecodestamper source=rtc set=always` — uses the host
@@ -39,4 +39,4 @@ only the REC branch switches to DNxHD/XAVC.
 ## Deferred audio
 
 Full 8ch AAC (4× pairs) on SRT/REC remains deferred; stereo default stays.
-Mezz MXF uses stereo PCM; DNxHD MOV uses stereo AAC.
+Mezz MXF uses stereo PCM for both DNxHD and XAVC.

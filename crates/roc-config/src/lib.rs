@@ -128,9 +128,7 @@ pub fn is_mezz_codec(video_codec: &str) -> bool {
 /// File extension for recordings produced with this codec.
 pub fn recording_extension(video_codec: &str) -> &'static str {
     let c = video_codec.to_ascii_lowercase();
-    if c.contains("dnx") {
-        "mov"
-    } else if c.contains("xavc") {
+    if c.contains("dnx") || c.contains("xavc") {
         "mxf"
     } else {
         "mp4"
@@ -423,7 +421,7 @@ mod tests {
         assert!(is_mezz_codec("avenc_dnxhd"));
         assert!(is_mezz_codec("xavc_intra"));
         assert!(!is_mezz_codec("nvh264enc"));
-        assert_eq!(recording_extension("avenc_dnxhd"), "mov");
+        assert_eq!(recording_extension("avenc_dnxhd"), "mxf");
         assert_eq!(recording_extension("xavc_intra"), "mxf");
         assert_eq!(recording_extension("nvh264enc"), "mp4");
         assert_eq!(map_nvenc_preset("p4"), "hq");

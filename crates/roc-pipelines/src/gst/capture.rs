@@ -1263,7 +1263,8 @@ impl ChannelPipeline {
                     .build()
                     .context("avenc_dnxhd")?;
                 let _ = enc.set_property_from_str("profile", "dnxhd");
-                (enc, None, "qtmux")
+                // Host probe: only mxfmux accepts video/x-dnxhd (qtmux/avmux_mov do not).
+                (enc, None, "mxfmux")
             } else if codec.contains("xavc") {
                 let enc = gstreamer::ElementFactory::make("x264enc")
                     .name(format!("enc_rec_{}", self.id))
@@ -1284,12 +1285,10 @@ impl ChannelPipeline {
                 bail!("unsupported mezz codec {}", self.preset.video_codec);
             };
 
-        let mut mux_builder = gstreamer::ElementFactory::make(mux_name)
-            .name(format!("mux_rec_{}", self.id));
-        if mux_name == "qtmux" {
-            mux_builder = mux_builder.property("force-create-timecode-trak", true);
-        }
-        let mux = mux_builder.build().with_context(|| format!("make {mux_name}"))?;
+        let mux = gstreamer::ElementFactory::make(mux_name)
+            .name(format!("mux_rec_{}", self.id))
+            .build()
+            .with_context(|| format!("make {mux_name}"))?;
         let sink = gstreamer::ElementFactory::make("filesink")
             .name(format!("fs_rec_{}", self.id))
             .property("location", path)
@@ -1339,12 +1338,8 @@ impl ChannelPipeline {
 
         let mut audio_tee_pads = Vec::new();
         if let Some(a_tee) = audio_tee {
-            let audio_res = if mux_name == "mxfmux" {
-                self.link_mezz_pcm(&pipeline, &a_tee, &mux, "rec")
-            } else {
-                self.link_program_aac(&pipeline, &a_tee, &mux, "rec", true)
-            };
-            match audio_res {
+            // MXF path: stereo PCM (voaacenc bitrates in mezz presets exceed live AAC limits).
+            match self.link_mezz_pcm(&pipeline, &a_tee, &mux, "rec") {
                 Ok((a_pads, audio_els)) => {
                     audio_tee_pads = a_pads;
                     elements.extend(audio_els);

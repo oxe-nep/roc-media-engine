@@ -475,7 +475,9 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
             "e. ! queue ! {parse} ! mp4mux fragment-duration=1000 ! filesink location=\"{path}\" sync=false"
         ));
     }
-    let aac_bps = parse_bitrate(&opts.preset.audio_bitrate).unwrap_or(192_000);
+    let aac_bps = parse_bitrate(&opts.preset.audio_bitrate)
+        .unwrap_or(192_000)
+        .clamp(64_000, 320_000);
     let pairs = aac_stereo_pairs(opts.preset.audio_channels);
 
     // MPEG-TS egress follows HydraSRT's program model (streamband/hydra-srt):
