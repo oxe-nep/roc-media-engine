@@ -757,6 +757,30 @@ html {
   line-height: 1.2;
 }
 
+.card-name-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.card-name-row .card-name {
+  flex: 1 1 auto;
+}
+
+.card-category {
+  flex-shrink: 0;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--text-muted);
+  line-height: 1.2;
+}
+
 .input-badge {
   flex-shrink: 0;
   display: inline-flex;

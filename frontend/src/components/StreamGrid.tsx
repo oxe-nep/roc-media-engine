@@ -37,6 +37,14 @@ function formatBitrate(kbps?: number): string {
   return `${kbps.toFixed(0)} kbit/s`;
 }
 
+/** Prefer short mode labels: "1920x1080p50/1 (1080p50)" → "1080p50". */
+function shortSignalFormat(raw?: string): string | null {
+  if (!raw) return null;
+  const paren = raw.match(/\(([^)]+)\)\s*$/);
+  if (paren?.[1]) return paren[1].trim();
+  return raw;
+}
+
 function formatSchedBadge(sch: RecordingSchedule): string {
   const hm = (iso: string) => {
     const d = new Date(iso);
@@ -156,6 +164,7 @@ export default function StreamGrid() {
           const proxyLabel = activePreset?.label || s.encode_preset || null;
           const recLabel =
             activeRecPreset?.label || s.record_preset || s.encode_preset || null;
+          const signalLabel = shortSignalFormat(s.format);
           return (
             <div key={s.id} className={`card-panel ${s.status}`}>
               <div className="card-stage">
@@ -217,29 +226,28 @@ export default function StreamGrid() {
                       {s.id}
                     </span>
                     <div className="card-identity-text">
-                      <span className="card-name" title={rec?.name || `ch${s.id}`}>
-                        {rec?.name || `ch${s.id}`}
-                      </span>
-                      <div
-                        className="card-meta"
-                        title={[
-                          s.format || (s.status === "waiting" ? "No signal" : null),
-                          cat === "_unsorted" ? "Unsorted" : cat,
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")}
-                      >
-                        {s.format ? (
-                          <span className="card-meta-item card-meta-format">{s.format}</span>
-                        ) : s.status === "waiting" ? (
-                          <span className="card-meta-item card-meta-waiting">No signal</span>
-                        ) : null}
-                        {(s.format || s.status === "waiting") && (
-                          <span className="card-meta-sep">·</span>
-                        )}
-                        <span className="card-meta-item">
+                      <div className="card-name-row">
+                        <span className="card-name" title={rec?.name || `ch${s.id}`}>
+                          {rec?.name || `ch${s.id}`}
+                        </span>
+                        <span
+                          className="card-category"
+                          title={cat === "_unsorted" ? "Unsorted" : cat}
+                        >
                           {cat === "_unsorted" ? "Unsorted" : cat}
                         </span>
+                      </div>
+                      <div
+                        className="card-meta"
+                        title={s.format || (s.status === "waiting" ? "No signal" : undefined)}
+                      >
+                        {signalLabel ? (
+                          <span className="card-meta-item card-meta-format">{signalLabel}</span>
+                        ) : s.status === "waiting" ? (
+                          <span className="card-meta-item card-meta-waiting">No signal</span>
+                        ) : (
+                          <span className="card-meta-item">—</span>
+                        )}
                       </div>
                       <div className="card-presets" title={`Proxy ${proxyLabel || "—"} · REC ${recLabel || "—"}`}>
                         <span className="card-preset-line">

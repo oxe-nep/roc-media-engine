@@ -14,7 +14,22 @@ pub struct InputFormat {
 }
 
 impl InputFormat {
+    /// Short UI label, e.g. `1080p50`.
     pub fn summary(&self) -> String {
+        if !self.mode.is_empty() {
+            return self.mode.clone();
+        }
+        let scan = if self.interlaced { "i" } else { "p" };
+        let fps = if self.fps_den == 1 {
+            format!("{}", self.fps_num)
+        } else {
+            format!("{}/{}", self.fps_num, self.fps_den)
+        };
+        format!("{}x{}{}{}", self.width, self.height, scan, fps)
+    }
+
+    /// Verbose label for logs/tooltips.
+    pub fn detail(&self) -> String {
         let scan = if self.interlaced { "i" } else { "p" };
         format!(
             "{}x{}{}{}/{} ({})",
