@@ -12,8 +12,6 @@ import {
   stopHqRecording,
   startSrt,
   stopSrt,
-  startStream,
-  stopStream,
   type EncodePreset,
   type LibraryCategory,
   type RecordingSchedule,
@@ -80,8 +78,6 @@ export default function StreamGrid() {
   const [editingNameId, setEditingNameId] = useState<number | null>(null);
   const [nameDraft, setNameDraft] = useState("");
   const [metaBusy, setMetaBusy] = useState<Record<number, boolean>>({});
-  const [encodeBusy, setEncodeBusy] = useState<Record<number, boolean>>({});
-  const [bulkBusy, setBulkBusy] = useState(false);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const { workflows } = useWorkflows();
 
@@ -124,10 +120,14 @@ export default function StreamGrid() {
   };
 
   const toggleProxyRecording = async (id: number) => {
+    const recording = recordings[id]?.proxy?.status === "recording";
+    if (recording) {
+      if (!window.confirm(`Stop proxy recording on channel ${id}?`)) return;
+    }
     setProxyRecBusy((b) => ({ ...b, [id]: true }));
     clearCardError(id);
     try {
-      if (recordings[id]?.proxy?.status === "recording") await stopProxyRecording(id);
+      if (recording) await stopProxyRecording(id);
       else await startProxyRecording(id);
     } catch (e) {
       setCardError((prev) => ({ ...prev, [id]: String(e) }));
@@ -137,10 +137,18 @@ export default function StreamGrid() {
   };
 
   const toggleHqRecording = async (id: number) => {
+    const recording =
+      recordings[id]?.hq?.status === "recording" ||
+      (recordings[id]?.hq == null &&
+        recordings[id]?.proxy == null &&
+        recordings[id]?.status === "recording");
+    if (recording) {
+      if (!window.confirm(`Stop HQ recording on channel ${id}?`)) return;
+    }
     setHqRecBusy((b) => ({ ...b, [id]: true }));
     clearCardError(id);
     try {
-      if (recordings[id]?.hq?.status === "recording") await stopHqRecording(id);
+      if (recording) await stopHqRecording(id);
       else await startHqRecording(id);
     } catch (e) {
       setCardError((prev) => ({ ...prev, [id]: String(e) }));
@@ -159,19 +167,6 @@ export default function StreamGrid() {
       setCardError((prev) => ({ ...prev, [id]: String(e) }));
     } finally {
       setSrtBusy((b) => ({ ...b, [id]: false }));
-    }
-  };
-
-  const toggleEncode = async (id: number, currentlyOn: boolean) => {
-    setEncodeBusy((b) => ({ ...b, [id]: true }));
-    clearCardError(id);
-    try {
-      if (currentlyOn) await stopStream(id);
-      else await startStream(id);
-    } catch (e) {
-      setCardError((prev) => ({ ...prev, [id]: String(e) }));
-    } finally {
-      setEncodeBusy((b) => ({ ...b, [id]: false }));
     }
   };
 
@@ -220,70 +215,12 @@ export default function StreamGrid() {
 
   const settingsStream = settingsId != null ? streams.find((s) => s.id === settingsId) ?? null : null;
   const visibleStreams = sortByChannelId(streams.filter((s) => showEncodeCard(workflows, s.id)));
-  const anyEncodeOn = visibleStreams.some((s) => isCaptureOn(s.status));
-  const anyEncodeOff = visibleStreams.some((s) => !isCaptureOn(s.status));
-
-  const startAllEncode = async () => {
-    setBulkBusy(true);
-    for (const s of visibleStreams) {
-      if (isCaptureOn(s.status)) continue;
-      setEncodeBusy((b) => ({ ...b, [s.id]: true }));
-      clearCardError(s.id);
-      try {
-        await startStream(s.id);
-      } catch (e) {
-        setCardError((prev) => ({ ...prev, [s.id]: String(e) }));
-      } finally {
-        setEncodeBusy((b) => ({ ...b, [s.id]: false }));
-      }
-    }
-    setBulkBusy(false);
-  };
-
-  const stopAllEncode = async () => {
-    setBulkBusy(true);
-    for (const s of visibleStreams) {
-      if (!isCaptureOn(s.status)) continue;
-      setEncodeBusy((b) => ({ ...b, [s.id]: true }));
-      clearCardError(s.id);
-      try {
-        await stopStream(s.id);
-      } catch (e) {
-        setCardError((prev) => ({ ...prev, [s.id]: String(e) }));
-      } finally {
-        setEncodeBusy((b) => ({ ...b, [s.id]: false }));
-      }
-    }
-    setBulkBusy(false);
-  };
 
   return (
     <>
       <section className="io-section">
         <div className="io-section-head">
           <h2 className="io-section-title">Encode</h2>
-          {visibleStreams.length > 0 && (
-            <div className="io-section-actions">
-              <button
-                type="button"
-                className="ctrl-btn"
-                disabled={bulkBusy || !anyEncodeOff}
-                onClick={() => void startAllEncode()}
-                title="Start encode on all visible channels"
-              >
-                {bulkBusy ? "…" : "START ALL"}
-              </button>
-              <button
-                type="button"
-                className="ctrl-btn"
-                disabled={bulkBusy || !anyEncodeOn}
-                onClick={() => void stopAllEncode()}
-                title="Stop encode on all visible channels"
-              >
-                STOP ALL
-              </button>
-            </div>
-          )}
         </div>
 
       {loading && visibleStreams.length === 0 ? (
@@ -473,15 +410,6 @@ export default function StreamGrid() {
                     </div>
                     <div className="card-actions">
                       <div className="card-actions-primary">
-                        <button
-                          type="button"
-                          className={`stream-btn ${captureOn ? "streaming" : "idle"}`}
-                          onClick={() => void toggleEncode(s.id, captureOn)}
-                          disabled={encodeBusy[s.id] || bulkBusy}
-                          title={captureOn ? "Stop encode capture" : "Start encode capture"}
-                        >
-                          {encodeBusy[s.id] ? "…" : captureOn ? "STOP" : "START"}
-                        </button>
                         <button
                           type="button"
                           className={`rec-btn ${proxyRecOn ? "recording" : "idle"}`}

@@ -13,6 +13,7 @@ import {
   startSrt,
   startStream,
   stopSrt,
+  stopStream,
   updateSrt,
   type EncodePreset,
   type LibraryCategory,
@@ -80,6 +81,7 @@ export default function ChannelSettingsModal({
   const [schedArmProxy, setSchedArmProxy] = useState(false);
   const [schedArmHq, setSchedArmHq] = useState(false);
   const [schedBusy, setSchedBusy] = useState(false);
+  const [encodeBusy, setEncodeBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [logsOpen, setLogsOpen] = useState(false);
   const logBoxRef = useRef<HTMLPreElement>(null);
@@ -186,13 +188,41 @@ export default function ChannelSettingsModal({
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy && !srtBusy && !schedBusy) onClose();
+      if (e.key === "Escape" && !busy && !srtBusy && !schedBusy && !encodeBusy) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose, busy, srtBusy]);
+  }, [open, onClose, busy, srtBusy, schedBusy, encodeBusy]);
 
   if (!open || !stream) return null;
+
+  const toggleEncode = async () => {
+    setEncodeBusy(true);
+    setError(null);
+    try {
+      if (captureOn) {
+        if (isRecording) {
+          setError("Stop recording first");
+          return;
+        }
+        if (
+          !window.confirm(
+            `Stop encode on channel ${stream.id}? Preview, REC and SRT will stop until encode is started again.`,
+          )
+        ) {
+          return;
+        }
+        await stopStream(stream.id);
+      } else {
+        await startStream(stream.id);
+      }
+      onSaved();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setEncodeBusy(false);
+    }
+  };
 
   const apply = async () => {
     if (isRecording) {
@@ -369,7 +399,7 @@ export default function ChannelSettingsModal({
   };
 
   return (
-    <div className="modal-backdrop" onClick={() => !busy && !srtBusy && !schedBusy && onClose()} role="presentation">
+    <div className="modal-backdrop" onClick={() => !busy && !srtBusy && !schedBusy && !encodeBusy && onClose()} role="presentation">
       <div
         className="modal-panel channel-settings-modal"
         onClick={(e) => e.stopPropagation()}
@@ -386,7 +416,7 @@ export default function ChannelSettingsModal({
             className="modal-close"
             onClick={onClose}
             aria-label="Close"
-            disabled={busy || srtBusy || schedBusy}
+            disabled={busy || srtBusy || schedBusy || encodeBusy}
           >
             ×
           </button>
@@ -397,6 +427,30 @@ export default function ChannelSettingsModal({
         {isRecording && (
           <div className="channel-settings-lock">Recording — settings locked.</div>
         )}
+
+        <div className="channel-settings-encode">
+          <div className="channel-settings-encode-meta">
+            <span className="channel-settings-encode-label">Encode</span>
+            <span className={`channel-settings-encode-status ${captureOn ? "on" : "off"}`}>
+              {captureOn ? (isRunning ? "Running" : "Waiting") : "Stopped"}
+            </span>
+          </div>
+          <button
+            type="button"
+            className={`stream-btn ${captureOn ? "streaming" : "idle"}`}
+            onClick={() => void toggleEncode()}
+            disabled={encodeBusy || busy || (captureOn && isRecording)}
+            title={
+              captureOn && isRecording
+                ? "Stop recording first"
+                : captureOn
+                  ? "Stop encode capture"
+                  : "Start encode capture"
+            }
+          >
+            {encodeBusy ? "…" : captureOn ? "STOP ENCODE" : "START ENCODE"}
+          </button>
+        </div>
 
         <div className="channel-settings-form">
           <label className="presets-field">

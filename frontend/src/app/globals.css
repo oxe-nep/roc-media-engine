@@ -1260,6 +1260,50 @@ html {
   color: var(--text-secondary);
 }
 
+.channel-settings-encode {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.channel-settings-encode-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.channel-settings-encode-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.channel-settings-encode-status {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.channel-settings-encode-status.on {
+  color: #8fd48f;
+}
+
+.channel-settings-encode-status.off {
+  color: var(--text-muted);
+}
+
+.channel-settings-encode .stream-btn {
+  flex-shrink: 0;
+}
+
 .channel-settings-note {
   margin-bottom: 10px;
   padding: 8px 10px;
