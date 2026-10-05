@@ -109,6 +109,7 @@ async fn main() -> Result<()> {
     }
     ui.persist();
 
+    ui::spawn_encode_autostart(orch.clone(), ui.clone());
     ui::spawn_schedule_ticker(orch.clone(), ui.clone());
 
     let app = ui::router(orch, ui, cfg.hls_dir.clone(), data_dir.clone());

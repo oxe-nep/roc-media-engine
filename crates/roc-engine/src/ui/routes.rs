@@ -96,6 +96,7 @@ async fn start_stream(
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
     st.orch.start_capture(id).map_err(UiError::from)?;
+    st.ui.set_encode_wanted(id, true);
     snapshot::stream_json(st.orch.as_ref(), st.ui.as_ref(), id)
         .map(Json)
         .ok_or_else(|| UiError::not_found("channel not found"))
@@ -111,6 +112,7 @@ async fn stop_stream(
     st.ui.mark_recording_stopped_role(id, RecordingRole::Proxy);
     st.ui.mark_recording_stopped_role(id, RecordingRole::Hq);
     st.orch.stop_capture(id).map_err(UiError::from)?;
+    st.ui.set_encode_wanted(id, false);
     snapshot::stream_json(st.orch.as_ref(), st.ui.as_ref(), id)
         .map(Json)
         .ok_or_else(|| UiError::not_found("channel not found"))

@@ -193,6 +193,9 @@ struct PersistFile {
     recordings: HashMap<String, RecMetaPersist>,
     #[serde(default)]
     playout: HashMap<String, PlayoutMeta>,
+    /// Encode capture desired-on across engine restarts (`"1": true`).
+    #[serde(default)]
+    encode_wanted: HashMap<String, bool>,
     #[serde(default)]
     recordings_dir: Option<PathBuf>,
 }
@@ -217,6 +220,8 @@ struct Inner {
     srt: HashMap<u32, SrtSettings>,
     recordings: HashMap<u32, RecMeta>,
     playout: HashMap<u32, PlayoutMeta>,
+    /// When true (or unset), encode capture should come back after engine restart.
+    encode_wanted: HashMap<u32, bool>,
     recordings_dir: PathBuf,
 }
 
@@ -227,6 +232,7 @@ impl UiState {
         let mut srt = HashMap::new();
         let mut recordings = HashMap::new();
         let mut playout = HashMap::new();
+        let mut encode_wanted = HashMap::new();
         let mut recordings_dir = default_recordings;
         if let Ok(raw) = fs::read_to_string(&path) {
             if let Ok(f) = serde_json::from_str::<PersistFile>(&raw) {
@@ -258,6 +264,11 @@ impl UiState {
                         playout.insert(id, v);
                     }
                 }
+                for (k, v) in f.encode_wanted {
+                    if let Ok(id) = k.parse::<u32>() {
+                        encode_wanted.insert(id, v);
+                    }
+                }
                 if let Some(p) = f.recordings_dir {
                     if !p.as_os_str().is_empty() {
                         recordings_dir = p;
@@ -272,6 +283,7 @@ impl UiState {
                 srt,
                 recordings,
                 playout,
+                encode_wanted,
                 recordings_dir,
             }),
         }
@@ -295,6 +307,9 @@ impl UiState {
         }
         for (id, p) in &guard.playout {
             f.playout.insert(id.to_string(), p.clone());
+        }
+        for (id, w) in &guard.encode_wanted {
+            f.encode_wanted.insert(id.to_string(), *w);
         }
         f.recordings_dir = Some(guard.recordings_dir.clone());
         drop(guard);
@@ -324,6 +339,17 @@ impl UiState {
             name: default_name.to_string(),
             ..RecMeta::default()
         });
+    }
+
+    /// Whether encode capture should be restored after engine restart.
+    /// `None` means unset (legacy) — treat as wanted so existing installs come back up.
+    pub fn encode_wanted(&self, id: u32) -> Option<bool> {
+        self.inner.lock().encode_wanted.get(&id).copied()
+    }
+
+    pub fn set_encode_wanted(&self, id: u32, wanted: bool) {
+        self.inner.lock().encode_wanted.insert(id, wanted);
+        self.persist();
     }
 
     pub fn ensure_playout(&self, id: u32, default_name: &str) {

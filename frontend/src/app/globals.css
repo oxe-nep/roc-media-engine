@@ -540,6 +540,19 @@ html {
   margin-bottom: 12px;
 }
 
+.io-section-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.io-section-actions .ctrl-btn {
+  padding: 5px 10px;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+}
+
 .io-section-title {
   margin: 0;
   font-size: 0.72rem;

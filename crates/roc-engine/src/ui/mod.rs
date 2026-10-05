@@ -79,6 +79,38 @@ pub fn router(
 }
 
 /// Background ticker: honor recording schedules for armed PROXY and/or HQ roles.
+/// Restore encode capture for channels that were left running (or never marked off).
+pub fn spawn_encode_autostart(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
+    tokio::spawn(async move {
+        // Let HTTP bind and DeckLink settle before hammering starts.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let ids: Vec<u32> = orch.list_channels().into_iter().map(|c| c.id).collect();
+        for id in ids {
+            // Explicit false = user stopped; None/true = bring back after restart.
+            if ui.encode_wanted(id) == Some(false) {
+                continue;
+            }
+            match orch.channel(id) {
+                Ok(ch) if matches!(ch.status, roc_pipelines::ChannelStatus::Running | roc_pipelines::ChannelStatus::Waiting) => {
+                    ui.set_encode_wanted(id, true);
+                    continue;
+                }
+                _ => {}
+            }
+            match orch.start_capture(id) {
+                Ok(_) => {
+                    ui.set_encode_wanted(id, true);
+                    tracing::info!(channel = id, "encode autostart");
+                }
+                Err(e) => {
+                    tracing::warn!(channel = id, error = %e, "encode autostart failed");
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(750)).await;
+        }
+    });
+}
+
 pub fn spawn_schedule_ticker(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
