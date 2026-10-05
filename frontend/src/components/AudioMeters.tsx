@@ -163,11 +163,14 @@ function AudioMetersInner({
   bus,
   children,
   channels = 8,
+  silent = false,
 }: {
   channelId: number;
   bus: MeterBus;
   children: ReactNode;
   channels?: 2 | 8;
+  /** Force meters quiet (e.g. DeckLink no-signal). */
+  silent?: boolean;
 }) {
   const live = useMeterLevels(channelId, bus);
   const delayMs = usePreviewDelayMs();
@@ -175,12 +178,12 @@ function AudioMetersInner({
   const anyHls = hlsBanks.some((p) => p != null);
   // JPEG grid / WebRTC modal: show GST `level` meters with no artificial delay.
   const delayed = useDelayedMeterLevels(live, anyHls ? delayMs : 0);
-  const levels = mergeHlsBanks(delayed, hlsBanks);
+  const levels = silent ? undefined : mergeHlsBanks(delayed, hlsBanks);
   const ch = meterChannels(levels);
   if (channels === 2) {
     return (
       <>
-        <div className="audio-meter audio-meter-left audio-meter-stereo">
+        <div className={`audio-meter audio-meter-left audio-meter-stereo${silent ? " silent" : ""}`}>
           <MeterBank dbs={ch.slice(0, 2)} labels={["1", "2"]} title="Audio 1–2" />
         </div>
         {children}
@@ -189,11 +192,11 @@ function AudioMetersInner({
   }
   return (
     <>
-      <div className="audio-meter audio-meter-left audio-meter-8ch">
+      <div className={`audio-meter audio-meter-left audio-meter-8ch${silent ? " silent" : ""}`}>
         <MeterBank dbs={ch.slice(0, 4)} labels={["1", "2", "3", "4"]} title="Audio 1–4" />
       </div>
       {children}
-      <div className="audio-meter audio-meter-right audio-meter-8ch">
+      <div className={`audio-meter audio-meter-right audio-meter-8ch${silent ? " silent" : ""}`}>
         <MeterBank dbs={ch.slice(4, 8)} labels={["5", "6", "7", "8"]} title="Audio 5–8" />
       </div>
     </>
@@ -207,6 +210,8 @@ export default function AudioMeters(props: {
   children: ReactNode;
   /** Decode/playout is stereo; encode and TC keep 8 meters. */
   channels?: 2 | 8;
+  /** Hide live levels (no input signal). */
+  silent?: boolean;
 }) {
   return (
     <PreviewLatencyProvider>

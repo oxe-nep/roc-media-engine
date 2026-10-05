@@ -308,10 +308,16 @@ export default function WebRtcPreviewPlayer({
         </div>
       </div>
       <div className="preview-modal-stage">
-        <AudioMeters channelId={channelId} bus="encode">
+        <AudioMeters channelId={channelId} bus="encode" silent={noSignal}>
           <div className="preview-modal-video-wrap">
             <div className="preview-modal-video-frame" ref={frameRef}>
-              <video ref={videoRef} className="preview-modal-video" playsInline autoPlay />
+              <video
+                ref={videoRef}
+                className={`preview-modal-video${noSignal ? " lost" : ""}`}
+                playsInline
+                autoPlay
+                muted={noSignal}
+              />
               {showOverlay && (
                 <div className="preview-modal-overlay" role="alert">
                   <p className="preview-modal-overlay-msg">

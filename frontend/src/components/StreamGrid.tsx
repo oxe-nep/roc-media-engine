@@ -168,7 +168,7 @@ export default function StreamGrid() {
           return (
             <div key={s.id} className={`card-panel ${s.status}`}>
               <div className="card-stage">
-                <AudioMeters channelId={s.id} bus="encode">
+                <AudioMeters channelId={s.id} bus="encode" silent={!hasSignal}>
                 <div
                   className="card-thumb"
                   role="button"
