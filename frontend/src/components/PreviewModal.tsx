@@ -41,6 +41,7 @@ export default function PreviewModal({
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const [pair, setPair] = useState(initialPair);
+  const [session, setSession] = useState(0);
   const [status, setStatus] = useState("Connecting…");
   const [error, setError] = useState<string | null>(null);
 
@@ -93,7 +94,7 @@ export default function PreviewModal({
       const st = pc.connectionState;
       if (st === "connected") setStatus("Live");
       else if (st === "failed") {
-        setError("WebRTC connection failed — close and reopen preview");
+        setError("WebRTC connection failed");
         setStatus("Error");
       } else if (st === "connecting") setStatus("Connecting media…");
       else if (st === "disconnected") setStatus("Disconnected");
@@ -193,10 +194,13 @@ export default function PreviewModal({
     };
 
     ws.onerror = () => {
-      if (!cancelled) setError("WebSocket error");
+      if (!cancelled) {
+        setError("WebSocket error");
+        setStatus("Error");
+      }
     };
     ws.onclose = () => {
-      if (!cancelled) setStatus("Disconnected");
+      if (!cancelled) setStatus((s) => (s === "Live" || s === "Error" ? s : "Disconnected"));
     };
 
     const onKey = (e: KeyboardEvent) => {
@@ -226,13 +230,13 @@ export default function PreviewModal({
       wsRef.current = null;
       if (videoRef.current) videoRef.current.srcObject = null;
     };
-    // Intentionally omit onClose — parent passes an inline lambda that changes every render
-    // (dashboard meters ~30 Hz) and would tear down the WebRTC session in a loop.
-  }, [open, channelId, pair]);
+    // Intentionally omit onClose — parent passes an inline lambda that changes every render.
+  }, [open, channelId, pair, session]);
 
   if (!open) return null;
 
   const live = status === "Live";
+  const showOverlay = Boolean(error) || status === "Error" || status === "Disconnected";
 
   return (
     <div
@@ -275,12 +279,28 @@ export default function PreviewModal({
             </button>
           </div>
         </div>
-        {error && <div className="error-message">{error}</div>}
         <div className="preview-modal-stage">
           <AudioMeters channelId={channelId} bus="encode">
             <div className="preview-modal-video-wrap">
               <div className="preview-modal-video-frame">
                 <video ref={videoRef} className="preview-modal-video" playsInline autoPlay />
+                {showOverlay && (
+                  <div className="preview-modal-overlay" role="alert">
+                    <p className="preview-modal-overlay-msg">
+                      {error || (status === "Disconnected" ? "Disconnected" : "Preview failed")}
+                    </p>
+                    <button
+                      type="button"
+                      className="preview-modal-reconnect"
+                      onClick={() => {
+                        setError(null);
+                        setSession((n) => n + 1);
+                      }}
+                    >
+                      Reconnect
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </AudioMeters>

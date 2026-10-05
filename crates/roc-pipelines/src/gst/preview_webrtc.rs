@@ -1,11 +1,10 @@
 //! On-demand WebRTC encode preview (sendonly) via `webrtcbin`.
 //!
-//! Hot-attaches to raw tees `t` / `a` for one stereo pair at a time.
-//! Signaling (offer / answer / ICE) is owned by the UI WebSocket layer.
+//! Video is taken from the **proxy encode tee `e`** (NVENC/x264 already running)
+//! so preview matches live/proxy quality without a second encode.
+//! Audio is mixed from raw tee `a` for the selected stereo pair.
 //!
-//! The encode branch stays in a nested [`Bin`] so `parse::launch` links
-//! (payloader → webrtcbin) remain intact — moving children out of a parse
-//! bin unlinks pads and yields an empty SDP offer.
+//! The branch stays in a nested [`Bin`] so `parse::launch` links remain intact.
 
 use anyhow::{anyhow, bail, Context, Result};
 use gstreamer::prelude::*;
@@ -36,9 +35,10 @@ impl WebRtcPreview {
         if pair > 3 {
             bail!("listen pair must be 0..=3");
         }
+        // Full-quality video from the live proxy encode (same bitstream as SRT/UDP).
         let video_tee = pipeline
-            .by_name("t")
-            .ok_or_else(|| anyhow!("raw tee `t` missing"))?;
+            .by_name("e")
+            .ok_or_else(|| anyhow!("encoded tee `e` missing"))?;
         let audio_tee = pipeline
             .by_name("a")
             .ok_or_else(|| anyhow!("audio tee `a` missing"))?;
@@ -47,16 +47,9 @@ impl WebRtcPreview {
         let tag = format!("wpv{channel}p{pair}");
         let matrix = stereo_pair_matrix(pair as usize);
 
-        // Browser-friendly H264: constrained-baseline, SPS/PPS on every IDR,
-        // packetization-mode=1 via rtph264pay aggregate-mode=zero-latency.
+        // Re-payload existing H264 (no scale/re-encode). SPS/PPS on every IDR for browsers.
         let desc = format!(
-            "queue name=q_v_{tag} max-size-buffers=2 leaky=downstream ! \
-             videoconvert ! videoscale ! videorate skip-to-first=true ! \
-             video/x-raw,width=640,height=360,framerate=15/1 ! \
-             x264enc name=venc_{tag} tune=zerolatency speed-preset=ultrafast bitrate=800 \
-             key-int-max=15 bframes=0 threads=1 byte-stream=true \
-             option-string=\"repeat-headers=1\" ! \
-             video/x-h264,profile=constrained-baseline,stream-format=byte-stream,alignment=au ! \
+            "queue name=q_v_{tag} max-size-buffers=4 leaky=downstream ! \
              h264parse config-interval=-1 ! \
              rtph264pay name=vpay_{tag} pt=96 config-interval=-1 aggregate-mode=zero-latency ! \
              application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! \
@@ -64,7 +57,7 @@ impl WebRtcPreview {
              queue name=q_a_{tag} max-size-buffers=4 leaky=downstream ! \
              audioconvert mix-matrix=\"{matrix}\" ! \
              audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved ! \
-             opusenc bitrate=64000 ! \
+             opusenc bitrate=128000 ! \
              rtpopuspay name=apay_{tag} pt=97 ! \
              application/x-rtp,media=audio,encoding-name=OPUS,payload=97,clock-rate=48000 ! \
              webrtc_{tag}."
@@ -106,10 +99,10 @@ impl WebRtcPreview {
 
         let tee_pad = video_tee
             .request_pad_simple("src_%u")
-            .ok_or_else(|| anyhow!("request video tee pad"))?;
+            .ok_or_else(|| anyhow!("request encode tee pad"))?;
         tee_pad
             .link(&ghost_v)
-            .context("link video tee → webrtc branch")?;
+            .context("link encode tee → webrtc branch (proxy must be H264)")?;
 
         let audio_tee_pad = audio_tee
             .request_pad_simple("src_%u")
@@ -144,8 +137,6 @@ impl WebRtcPreview {
             .sync_state_with_parent()
             .context("sync webrtc branch")?;
 
-        // Wait until rtph264pay has real caps (profile-level-id / packetization-mode).
-        // Creating the offer too early yields H264 without fmtp → browsers show black video.
         let vpay = branch
             .by_name(&format!("vpay_{tag}"))
             .ok_or_else(|| anyhow!("vpay missing"))?;
@@ -167,8 +158,7 @@ impl WebRtcPreview {
             warn!(channel, "H264 RTP caps still missing fmtp fields before create-offer");
         }
 
-        // Do NOT wait on set-local-description inside this callback — that deadlocks
-        // (create-offer promise never completes → UI shows "create-offer").
+        // Do NOT wait on set-local-description inside this callback — that deadlocks.
         let (offer_tx, offer_rx) = std::sync::mpsc::channel::<Result<String>>();
         let promise = Promise::with_change_func({
             let webrtc = webrtc.clone();
@@ -204,9 +194,6 @@ impl WebRtcPreview {
         if !sdp.contains("m=video") || !sdp.contains("m=audio") {
             bail!("webrtc offer missing media lines (sdp_len={})", sdp.len());
         }
-        if !sdp.to_ascii_lowercase().contains("packetization-mode") {
-            warn!(channel, "offer H264 fmtp may lack packetization-mode");
-        }
         if let Some(tx) = signal_tx.lock().as_ref() {
             let _ = tx.send(PreviewSignal::Offer {
                 channel,
@@ -214,7 +201,7 @@ impl WebRtcPreview {
             });
         }
 
-        info!(channel, pair, %session_id, "attached webrtc preview");
+        info!(channel, pair, %session_id, "attached webrtc preview (proxy encode)");
         Ok(Self {
             session_id,
             pair,
@@ -250,7 +237,7 @@ impl WebRtcPreview {
     }
 
     pub fn detach(self, pipeline: &Pipeline) {
-        let video_tee = pipeline.by_name("t");
+        let video_tee = pipeline.by_name("e");
         let audio_tee = pipeline.by_name("a");
         if let Some(peer) = self.tee_pad.peer() {
             let _ = self.tee_pad.unlink(&peer);

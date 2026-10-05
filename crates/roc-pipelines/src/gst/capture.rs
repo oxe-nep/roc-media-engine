@@ -983,7 +983,8 @@ impl ChannelPipeline {
                 Ok(fmt.mode)
             }
             Err(err) => {
-                tracing::warn!(
+                // No SDI/IP signal yet is normal on unused inputs after restart.
+                tracing::debug!(
                     channel = self.id,
                     error = %err,
                     "input probe failed — falling back to 1080p50"
@@ -1875,7 +1876,16 @@ impl ChannelPipeline {
                 }
                 MessageView::Warning(w) => {
                     let text = format!("{} ({})", w.error(), w.debug().unwrap_or_default());
-                    tracing::warn!(channel = self.id, %text, "gst warning");
+                    let lower = text.to_ascii_lowercase();
+                    // Expected noise: unused DeckLink inputs, brief backlog after attach/restart.
+                    if lower.contains("signal lost")
+                        || lower.contains("no input source")
+                        || lower.contains("dropped") && lower.contains("old frames")
+                    {
+                        tracing::debug!(channel = self.id, %text, "gst warning (benign)");
+                    } else {
+                        tracing::warn!(channel = self.id, %text, "gst warning");
+                    }
                 }
                 MessageView::Element(el) => {
                     if let Some(s) = el.structure() {
