@@ -349,6 +349,8 @@ fn nvenc_chain(video_codec: &str, preset: &str, bitrate_kbit: u64, gop: u32) -> 
 }
 
 /// `interlaced`: keep field structure for TC burn-in (1080i in → 1080i SRT).
+/// Note: older `nvh264enc` builds have no `interlaced-encoding` property — we rely on
+/// feeding interleaved frames and DeckLink OUT caps instead.
 fn nvenc_chain_ex(
     video_codec: &str,
     preset: &str,
@@ -365,16 +367,11 @@ fn nvenc_chain_ex(
         EncodeFamily::H264 => " bframes=0",
         EncodeFamily::Hevc => "",
     };
-    // nvh264enc/nvh265enc: interlaced-encoding preserves fields for SRT when IN is i.
-    let interlaced_prop = if interlaced {
-        " interlaced-encoding=true"
-    } else {
-        ""
-    };
+    let _ = interlaced; // reserved: property not available on all NVENC builds
     format!(
         "videoconvert ! video/x-raw,format=NV12 ! cudaupload ! \
          {enc} preset={preset} bitrate={bitrate_kbit} gop-size={gop} \
-         zerolatency=true aud=true repeat-sequence-header=true{bframes}{interlaced_prop} ! \
+         zerolatency=true aud=true repeat-sequence-header=true{bframes} ! \
          {caps} ! {parse} config-interval=-1"
     )
 }
@@ -1099,7 +1096,7 @@ mod tests {
         });
         assert!(launch.contains("mode=1080i50"), "{launch}");
         assert!(launch.contains("interlace-mode=interleaved"), "{launch}");
-        assert!(launch.contains("interlaced-encoding=true"), "{launch}");
+        assert!(!launch.contains("interlaced-encoding="), "{launch}");
         assert!(launch.contains("appsink name=srt_in"), "{launch}");
         assert!(launch.contains("tee name=e"), "{launch}");
         // Exactly one deinterlace — JPEG thumb only; main path stays interlaced.
