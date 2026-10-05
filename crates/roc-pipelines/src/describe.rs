@@ -112,6 +112,24 @@ pub fn stereo_pair_matrix(pair: usize) -> String {
     format!("<{}>", rows.join(", "))
 }
 
+/// 2→8 matrix placing a stereo pair into DeckLink ch 1-2 … 7-8 (inverse of encode).
+pub fn stereo_into_8ch_matrix(pair: usize) -> String {
+    let mut rows = Vec::with_capacity(8);
+    for out_ch in 0..8 {
+        let mut coeffs = Vec::with_capacity(2);
+        for in_ch in 0..2 {
+            let v = if out_ch == pair * 2 + in_ch {
+                "1.0"
+            } else {
+                "0.0"
+            };
+            coeffs.push(v.to_string());
+        }
+        rows.push(format!("<{}>", coeffs.join(", ")));
+    }
+    format!("<{}>", rows.join(", "))
+}
+
 /// One AAC encode fan-out target: named mpegtsmux request pad + optional valve.
 struct AacMuxOut<'a> {
     mux_name: &'a str,
@@ -572,44 +590,54 @@ fn playout_stereo_decode(compressed: bool) -> &'static str {
     }
 }
 
-/// File/SRT audio → DeckLink: up to 4 stereo pairs folded to 8ch (encode layout).
+/// File/SRT audio → DeckLink 8ch using the inverse of encode's stereo-pair matrices.
 ///
-/// `interleave` only accepts mono pads, so each stereo track is split then folded.
-fn build_playout_audio(pairs: usize, compressed: bool, asink: &str) -> String {
+/// Each demux AAC/PCM track is expanded into its pair slots (1-2 … 7-8) and mixed.
+/// File demux uses named pads (`audio_0`…) so track order matches encode pair order.
+fn build_playout_audio(pairs: usize, compressed: bool, asink: &str, named_pads: bool) -> String {
     let pairs = pairs.clamp(1, 4);
     let dec = playout_stereo_decode(compressed);
     let q = "queue max-size-buffers=0 max-size-bytes=0 max-size-time=0";
     let stereo = "audio/x-raw,format=S16LE,channels=2,rate=48000,layout=interleaved";
-    let mono = "audio/x-raw,format=S16LE,channels=1,rate=48000,layout=interleaved";
     let out8 = "audio/x-raw,format=S16LE,channels=8,rate=48000,layout=interleaved";
     let meter = format!(
         "a. ! queue max-size-buffers=8 leaky=downstream ! \
            level name=ameter interval=33000000 post-messages=true ! \
            fakesink sync=false async=false"
     );
+    let pad = |n: usize| -> String {
+        if named_pads {
+            format!("d.audio_{n}")
+        } else {
+            "d.".into()
+        }
+    };
+
     if pairs == 1 {
-        // Single stereo (or multi-ch) track — audioconvert expands to 8ch for DeckLink.
+        // One track: keep on ch1-2 (encode pair 0); leave 3-8 silent.
+        let matrix = stereo_into_8ch_matrix(0);
+        let src = pad(0);
         return format!(
-            "d. ! {q} ! {dec} ! tee name=a \
-             a. ! {q} ! audioconvert ! audioresample ! {out8} ! {asink} \
+            "{src} ! {q} ! {dec} ! audioconvert ! audioresample ! {stereo} ! \
+             audioconvert mix-matrix=\"{matrix}\" ! {out8} ! tee name=a \
+             a. ! {q} ! {asink} \
              {meter}"
         );
     }
-    let mut parts = Vec::with_capacity(pairs * 3 + 2);
-    parts.push("interleave name=i".to_string());
+
+    let mut parts = Vec::with_capacity(pairs + 2);
+    parts.push("audiomixer name=mix start-time-selection=first".to_string());
     for n in 0..pairs {
-        let left = n * 2;
-        let right = left + 1;
+        let matrix = stereo_into_8ch_matrix(n);
+        let src = pad(n);
         parts.push(format!(
-            "d. ! {q} ! {dec} ! audioconvert ! audioresample ! {stereo} ! \
-             deinterleave name=di{n} \
-             di{n}.src_0 ! queue ! {mono} ! i.sink_{left} \
-             di{n}.src_1 ! queue ! {mono} ! i.sink_{right}"
+            "{src} ! {q} ! {dec} ! audioconvert ! audioresample ! {stereo} ! \
+             audioconvert mix-matrix=\"{matrix}\" ! {out8} ! mix."
         ));
     }
     parts.push(format!(
-        "i. ! audioconvert ! audioresample ! tee name=a \
-         a. ! {q} ! {out8} ! {asink} \
+        "mix. ! audioconvert ! {out8} ! tee name=a \
+         a. ! {q} ! {asink} \
          {meter}"
     ));
     parts.join(" ")
@@ -676,7 +704,9 @@ pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
     // Caps on demux pads are required: our MPEG-TS often exposes AAC before H.264,
     // so untyped `d.` can latch the audio pad onto the video branch → audio-only OUT.
     let asink = decklink_audio_sink(&opts.device);
-    let audio = build_playout_audio(opts.audio_pairs, opts.audio_compressed, &asink);
+    // qtdemux exposes stable `audio_N` pads; tsdemux does not — use anonymous there.
+    let named_audio = !opts.source.starts_with("srt://") && !opts.source.ends_with(".ts");
+    let audio = build_playout_audio(opts.audio_pairs, opts.audio_compressed, &asink, named_audio);
     format!(
         "{src} \
          d. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
@@ -711,6 +741,14 @@ mod tests {
         assert!(m0.contains("1.0, 0.0, 0.0"));
         let m1 = stereo_pair_matrix(1);
         assert!(m1.contains("0.0, 0.0, 1.0, 0.0"));
+    }
+
+    #[test]
+    fn stereo_into_8ch_places_pair() {
+        let m0 = stereo_into_8ch_matrix(0);
+        assert!(m0.starts_with("<<1.0, 0.0>, <0.0, 1.0>, <0.0, 0.0>"));
+        let m2 = stereo_into_8ch_matrix(2);
+        assert!(m2.contains("<0.0, 0.0>, <0.0, 0.0>, <1.0, 0.0>, <0.0, 1.0>"));
     }
 
     #[test]
