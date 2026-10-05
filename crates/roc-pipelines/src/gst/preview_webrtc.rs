@@ -60,8 +60,7 @@ impl WebRtcPreview {
              h264parse config-interval=-1 ! \
              rtph264pay name=vpay_{tag} pt=96 config-interval=-1 aggregate-mode=zero-latency ! \
              application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! \
-             webrtcbin name=webrtc_{tag} stun-server=stun://stun.l.google.com:19302 \
-             bundle-policy=max-bundle \
+             webrtcbin name=webrtc_{tag} bundle-policy=max-bundle \
              queue name=q_a_{tag} max-size-buffers=4 leaky=downstream ! \
              audioconvert mix-matrix=\"{matrix}\" ! \
              audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved ! \
@@ -145,6 +144,8 @@ impl WebRtcPreview {
             .sync_state_with_parent()
             .context("sync webrtc branch")?;
 
+        // Do NOT wait on set-local-description inside this callback — that deadlocks
+        // (create-offer promise never completes → UI shows "create-offer").
         let (offer_tx, offer_rx) = std::sync::mpsc::channel::<Result<String>>();
         let promise = Promise::with_change_func({
             let webrtc = webrtc.clone();
@@ -158,17 +159,10 @@ impl WebRtcPreview {
                         .context("offer field")?
                         .get::<WebRTCSessionDescription>()
                         .context("offer type")?;
-                    let (local_tx, local_rx) = std::sync::mpsc::channel::<Result<()>>();
-                    let local_promise = Promise::with_change_func(move |r| {
-                        let _ = local_tx.send(
-                            r.map_err(|e| anyhow!("set-local-description: {e:?}"))
-                                .map(|_| ()),
-                        );
-                    });
-                    webrtc.emit_by_name::<()>("set-local-description", &[&offer, &local_promise]);
-                    local_rx
-                        .recv_timeout(std::time::Duration::from_secs(3))
-                        .context("set-local-description timeout")??;
+                    webrtc.emit_by_name::<()>(
+                        "set-local-description",
+                        &[&offer, &None::<Promise>],
+                    );
                     let mut sdp = offer.sdp().as_text().context("sdp text")?;
                     sdp = sdp.replace("a=sendrecv", "a=sendonly");
                     Ok(sdp)
