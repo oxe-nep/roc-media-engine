@@ -172,7 +172,7 @@ fn poll_playout_runtime(p: &mut PlayoutRuntime) {
         p.status,
         ChannelStatus::Running | ChannelStatus::Paused | ChannelStatus::Waiting
     ) {
-        let (_gst_pos, dur) = query_playout_clock(pipeline);
+        let (_gst_pos, dur) = query_playout_clock(&pipeline);
         if let Some(d) = dur {
             p.duration_sec = Some(d);
         }
@@ -216,7 +216,7 @@ fn poll_playout_runtime(p: &mut PlayoutRuntime) {
         p.status,
         ChannelStatus::Running | ChannelStatus::Paused | ChannelStatus::Waiting
     ) {
-        let (pos, _) = query_playout_clock(pipeline);
+        let (pos, _) = query_playout_clock(&pipeline);
         if let Some(pos) = pos {
             p.position_sec = Some(pos);
         }
@@ -234,7 +234,7 @@ fn poll_playout_runtime(p: &mut PlayoutRuntime) {
 
     if seek_to_in {
         let target = p.mark_in_sec.max(0.0);
-        match playout_seek_pipeline(pipeline, target) {
+        match playout_seek_pipeline(&pipeline, target) {
             Ok(()) => {
                 let running = !matches!(p.status, ChannelStatus::Paused);
                 if matches!(p.status, ChannelStatus::Stopped | ChannelStatus::Paused) {
