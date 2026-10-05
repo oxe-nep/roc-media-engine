@@ -156,9 +156,6 @@ export default function StreamGrid() {
           const proxyLabel = activePreset?.label || s.encode_preset || null;
           const recLabel =
             activeRecPreset?.label || s.record_preset || s.encode_preset || null;
-          const dualPreset =
-            Boolean(proxyLabel && recLabel) &&
-            (s.record_preset || s.encode_preset) !== s.encode_preset;
           return (
             <div key={s.id} className={`card-panel ${s.status}`}>
               <div className="card-stage">
@@ -228,32 +225,30 @@ export default function StreamGrid() {
                         title={[
                           s.format || (s.status === "waiting" ? "No signal" : null),
                           cat === "_unsorted" ? "Unsorted" : cat,
-                          dualPreset
-                            ? `Proxy ${proxyLabel} · REC ${recLabel}`
-                            : proxyLabel,
                         ]
                           .filter(Boolean)
                           .join(" · ")}
                       >
                         {s.format ? (
-                          <>
-                            <span className="card-meta-item card-meta-format">{s.format}</span>
-                            <span className="card-meta-sep">·</span>
-                          </>
+                          <span className="card-meta-item card-meta-format">{s.format}</span>
                         ) : s.status === "waiting" ? (
-                          <>
-                            <span className="card-meta-item card-meta-waiting">No signal</span>
-                            <span className="card-meta-sep">·</span>
-                          </>
+                          <span className="card-meta-item card-meta-waiting">No signal</span>
                         ) : null}
+                        {(s.format || s.status === "waiting") && (
+                          <span className="card-meta-sep">·</span>
+                        )}
                         <span className="card-meta-item">
                           {cat === "_unsorted" ? "Unsorted" : cat}
                         </span>
-                        <span className="card-meta-sep">·</span>
-                        <span className="card-meta-item">
-                          {dualPreset
-                            ? `Proxy ${proxyLabel} · REC ${recLabel}`
-                            : proxyLabel || "—"}
+                      </div>
+                      <div className="card-presets" title={`Proxy ${proxyLabel || "—"} · REC ${recLabel || "—"}`}>
+                        <span className="card-preset-line">
+                          <span className="card-preset-role">Proxy</span>
+                          <span className="card-preset-value">{proxyLabel || "—"}</span>
+                        </span>
+                        <span className="card-preset-line">
+                          <span className="card-preset-role">REC</span>
+                          <span className="card-preset-value">{recLabel || "—"}</span>
                         </span>
                       </div>
                     </div>

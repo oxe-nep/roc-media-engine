@@ -23,7 +23,7 @@ authors = ["ROC"]
 
 [workspace.dependencies]
 anyhow = "1"
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
 parking_lot = "0.12"

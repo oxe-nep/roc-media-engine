@@ -40,6 +40,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/encode/options", get(encode_options))
         .route("/api/playout", get(list_playout_ui))
+        .route("/api/playout/media", get(list_playout_media).post(upload_playout_media))
+        .route("/api/playout/media/{id}", axum::routing::delete(delete_playout_media))
         .route("/api/playout/{id}/start", post(start_playout_ui))
         .route("/api/playout/{id}/stop", post(stop_playout_ui))
         .route("/api/playout/devices", get(playout_devices))
@@ -708,21 +710,96 @@ async fn set_rec_path(
         .ui
         .set_recordings_dir(PathBuf::from(body.path))
         .map_err(UiError::from)?;
+    st.sys.set_disk_path(p.clone());
     Ok(Json(json!({ "path": p.display().to_string() })))
 }
 
 async fn system_status(State(st): State<AppState>) -> Json<Value> {
+    let mut snap = st.sys.snapshot();
+    // Keep disk path aligned with current recordings root.
+    let rec = st.ui.recordings_dir();
+    if snap.disk_path != rec.display().to_string() {
+        st.sys.set_disk_path(rec.clone());
+        snap = st.sys.snapshot();
+    }
     let h = st.orch.health();
-    Json(json!({
-        "cpu_percent": 0.0,
-        "mem_percent": 0.0,
-        "disk_percent": 0.0,
-        "disk_path": st.ui.recordings_dir().display().to_string(),
-        "nvenc_used": h.get("nvenc_used").cloned().unwrap_or(json!(0)),
-        "nvenc_limit": h.get("nvenc_limit").cloned().unwrap_or(json!(8)),
-        "ok": true,
-        "backend": "media_engine",
-    }))
+    let mut v = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "nvenc_used".into(),
+            h.get("nvenc_used").cloned().unwrap_or(json!(0)),
+        );
+        obj.insert(
+            "nvenc_limit".into(),
+            h.get("nvenc_limit").cloned().unwrap_or(json!(8)),
+        );
+        obj.insert("ok".into(), json!(true));
+        obj.insert("backend".into(), json!("media_engine"));
+    }
+    Json(v)
+}
+
+async fn list_playout_media(State(st): State<AppState>) -> Json<Value> {
+    let items: Vec<Value> = st
+        .playout_media
+        .list()
+        .into_iter()
+        .map(|it| {
+            json!({
+                "id": it.id,
+                "name": it.name,
+                "size": it.size,
+                "created_at": it.created_at.to_rfc3339(),
+            })
+        })
+        .collect();
+    Json(Value::Array(items))
+}
+
+async fn upload_playout_media(
+    State(st): State<AppState>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<Value>, UiError> {
+    let mut filename = None;
+    let mut bytes: Option<Vec<u8>> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| UiError::bad(e.to_string()))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        filename = field.file_name().map(|s| s.to_string());
+        bytes = Some(
+            field
+                .bytes()
+                .await
+                .map_err(|e| UiError::bad(e.to_string()))?
+                .to_vec(),
+        );
+        break;
+    }
+    let name = filename.ok_or_else(|| UiError::bad("file field required"))?;
+    let data = bytes.ok_or_else(|| UiError::bad("file field required"))?;
+    let item = st
+        .playout_media
+        .add_from_reader(&name, data.as_slice())
+        .map_err(UiError::from)?;
+    Ok(Json(json!({
+        "id": item.id,
+        "name": item.name,
+        "size": item.size,
+        "created_at": item.created_at.to_rfc3339(),
+    })))
+}
+
+async fn delete_playout_media(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, UiError> {
+    st.playout_media.delete(&id).map_err(UiError::from)?;
+    Ok(Json(json!({ "status": "deleted" })))
 }
 
 async fn workflows_map(State(st): State<AppState>) -> Json<Value> {

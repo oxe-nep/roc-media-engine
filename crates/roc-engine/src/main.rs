@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
 
     ui::spawn_schedule_ticker(orch.clone(), ui.clone());
 
-    let app = ui::router(orch, ui, cfg.hls_dir.clone());
+    let app = ui::router(orch, ui, cfg.hls_dir.clone(), data_dir.clone());
     let addr: SocketAddr = cfg.bind.parse().context("parse bind address")?;
     tracing::info!(%addr, hls = %cfg.hls_dir.display(), "roc-media-engine listening (UI cutover)");
     let listener = tokio::net::TcpListener::bind(addr).await?;

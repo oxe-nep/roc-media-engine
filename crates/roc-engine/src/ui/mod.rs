@@ -1,8 +1,10 @@
 mod auth;
 mod library;
+mod playout_media;
 mod routes;
 mod snapshot;
 pub mod state;
+mod sysmetrics;
 mod ws;
 
 use std::path::PathBuf;
@@ -21,21 +23,34 @@ use tower_http::trace::TraceLayer;
 
 use crate::orchestrator::Orchestrator;
 use crate::ui::auth::{require_api_key, ApiKey};
+use crate::ui::playout_media::MediaStore;
 use crate::ui::state::UiState;
+use crate::ui::sysmetrics::Collector as SysCollector;
 
 #[derive(Clone)]
 pub struct AppState {
     pub orch: Arc<Orchestrator>,
     pub ui: Arc<UiState>,
     pub hls_dir: PathBuf,
+    pub sys: Arc<SysCollector>,
+    pub playout_media: Arc<MediaStore>,
 }
 
-pub fn router(orch: Arc<Orchestrator>, ui: Arc<UiState>, hls_dir: PathBuf) -> Router {
+pub fn router(
+    orch: Arc<Orchestrator>,
+    ui: Arc<UiState>,
+    hls_dir: PathBuf,
+    data_dir: PathBuf,
+) -> Router {
     let _ = std::fs::create_dir_all(&hls_dir);
+    let sys = Arc::new(SysCollector::new(ui.recordings_dir()));
+    let playout_media = Arc::new(MediaStore::open(&data_dir));
     let state = AppState {
         orch: orch.clone(),
         ui: ui.clone(),
         hls_dir: hls_dir.clone(),
+        sys,
+        playout_media,
     };
 
     let api_key = ApiKey::from_env();
