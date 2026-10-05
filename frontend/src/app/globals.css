@@ -1110,25 +1110,43 @@ html {
 .channel-settings-arms {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px 16px;
-  padding: 4px 0 2px;
+  gap: 8px;
+  padding: 6px 0 2px;
 }
 
-.channel-settings-arm {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 0.72rem;
-  font-weight: 650;
+.schedule-arm-btn {
+  flex: 1 1 calc(50% - 4px);
+  min-width: 8.5rem;
+  height: 2rem;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
   color: var(--text-secondary);
+  font-size: 0.64rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
   cursor: pointer;
-  user-select: none;
+  transition: var(--transition);
 }
 
-.channel-settings-arm input {
-  width: 0.95rem;
-  height: 0.95rem;
-  accent-color: #c83a2e;
+.schedule-arm-btn:hover:not(:disabled) {
+  border-color: rgba(200, 160, 60, 0.45);
+  background: rgba(200, 160, 60, 0.1);
+  color: #e6d29a;
+}
+
+.schedule-arm-btn.armed {
+  border-color: rgba(200, 160, 60, 0.65);
+  background: rgba(200, 160, 60, 0.22);
+  color: #f0e0b0;
+  box-shadow: 0 0 8px rgba(200, 160, 60, 0.2);
+}
+
+.schedule-arm-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .channel-settings-lock {

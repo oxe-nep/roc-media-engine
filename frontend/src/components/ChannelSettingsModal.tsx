@@ -492,24 +492,24 @@ export default function ChannelSettingsModal({
               />
             </label>
             <div className="channel-settings-arms" role="group" aria-label="Schedule arms">
-              <label className="channel-settings-arm">
-                <input
-                  type="checkbox"
-                  checked={schedArmProxy}
-                  onChange={(e) => setSchedArmProxy(e.target.checked)}
-                  disabled={schedBusy}
-                />
-                <span>Arm PROXY</span>
-              </label>
-              <label className="channel-settings-arm">
-                <input
-                  type="checkbox"
-                  checked={schedArmHq}
-                  onChange={(e) => setSchedArmHq(e.target.checked)}
-                  disabled={schedBusy}
-                />
-                <span>Arm HQ</span>
-              </label>
+              <button
+                type="button"
+                className={`schedule-arm-btn ${schedArmHq ? "armed" : ""}`}
+                onClick={() => setSchedArmHq((v) => !v)}
+                disabled={schedBusy}
+                aria-pressed={schedArmHq}
+              >
+                ARM HQ REC
+              </button>
+              <button
+                type="button"
+                className={`schedule-arm-btn ${schedArmProxy ? "armed" : ""}`}
+                onClick={() => setSchedArmProxy((v) => !v)}
+                disabled={schedBusy}
+                aria-pressed={schedArmProxy}
+              >
+                ARM PROXY REC
+              </button>
             </div>
           </div>
           <div className="channel-settings-actions">
