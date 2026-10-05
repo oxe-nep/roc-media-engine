@@ -40,3 +40,45 @@ fn srt_and_record_require_capture() {
     assert!(snap.recording);
     assert!(snap.srt);
 }
+
+#[test]
+fn proxy_and_hq_recording_are_independent() {
+    let cfg = Config::example();
+    let backend = MockBackend::new(8);
+    let ch = &cfg.channels[0];
+    let encode = cfg.preset_for_channel(ch).unwrap();
+    let record = cfg.record_preset_for_channel(ch).unwrap();
+    backend.ensure_channel(ch, encode, record).unwrap();
+    backend.start_capture(ch.id).unwrap();
+
+    backend.start_proxy_recording(ch.id, "/tmp/p.mp4").unwrap();
+    let snap = backend.channel_snapshot(ch.id).unwrap();
+    assert!(snap.recording && snap.proxy_recording && !snap.hq_recording);
+    assert_eq!(snap.recording_path.as_deref(), Some("/tmp/p.mp4"));
+
+    // Starting HQ alongside proxy; legacy path prefers HQ.
+    backend.start_hq_recording(ch.id, "/tmp/h.mxf").unwrap();
+    let snap = backend.channel_snapshot(ch.id).unwrap();
+    assert!(snap.proxy_recording && snap.hq_recording);
+    assert_eq!(snap.proxy_recording_path.as_deref(), Some("/tmp/p.mp4"));
+    assert_eq!(snap.hq_recording_path.as_deref(), Some("/tmp/h.mxf"));
+    assert_eq!(snap.recording_path.as_deref(), Some("/tmp/h.mxf"));
+    assert!(backend.start_hq_recording(ch.id, "/tmp/h2.mxf").is_err());
+
+    // Record preset change is blocked only while HQ records.
+    assert!(backend
+        .apply_record_preset(ch.id, "hq", record)
+        .is_err());
+
+    // Legacy stop_recording = HQ stop; proxy keeps running.
+    backend.stop_recording(ch.id).unwrap();
+    let snap = backend.channel_snapshot(ch.id).unwrap();
+    assert!(snap.recording && snap.proxy_recording && !snap.hq_recording);
+    assert_eq!(snap.recording_path.as_deref(), Some("/tmp/p.mp4"));
+    assert!(backend.apply_record_preset(ch.id, "hq", record).is_ok());
+
+    backend.stop_proxy_recording(ch.id).unwrap();
+    let snap = backend.channel_snapshot(ch.id).unwrap();
+    assert!(!snap.recording);
+    assert!(snap.recording_path.is_none());
+}

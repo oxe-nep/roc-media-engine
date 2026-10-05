@@ -4,8 +4,10 @@ import { useEffect, useState } from "react";
 import {
   fetchEncodePresets,
   fetchLibraryCategories,
-  startRecording,
-  stopRecording,
+  startProxyRecording,
+  stopProxyRecording,
+  startHqRecording,
+  stopHqRecording,
   startSrt,
   stopSrt,
   type EncodePreset,
@@ -62,7 +64,8 @@ export default function StreamGrid() {
   const [presets, setPresets] = useState<EncodePreset[]>([]);
   const [categories, setCategories] = useState<LibraryCategory[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [recBusy, setRecBusy] = useState<Record<number, boolean>>({});
+  const [proxyRecBusy, setProxyRecBusy] = useState<Record<number, boolean>>({});
+  const [hqRecBusy, setHqRecBusy] = useState<Record<number, boolean>>({});
   const [srtBusy, setSrtBusy] = useState<Record<number, boolean>>({});
   const [preview, setPreview] = useState<{ id: number; pair: number } | null>(null);
   const [settingsId, setSettingsId] = useState<number | null>(null);
@@ -91,15 +94,27 @@ export default function StreamGrid() {
     };
   }, []);
 
-  const toggleRecording = async (id: number) => {
-    setRecBusy((b) => ({ ...b, [id]: true }));
+  const toggleProxyRecording = async (id: number) => {
+    setProxyRecBusy((b) => ({ ...b, [id]: true }));
     try {
-      if (recordings[id]?.status === "recording") await stopRecording(id);
-      else await startRecording(id);
+      if (recordings[id]?.proxy?.status === "recording") await stopProxyRecording(id);
+      else await startProxyRecording(id);
     } catch (e) {
       setError(String(e));
     } finally {
-      setRecBusy((b) => ({ ...b, [id]: false }));
+      setProxyRecBusy((b) => ({ ...b, [id]: false }));
+    }
+  };
+
+  const toggleHqRecording = async (id: number) => {
+    setHqRecBusy((b) => ({ ...b, [id]: true }));
+    try {
+      if (recordings[id]?.hq?.status === "recording") await stopHqRecording(id);
+      else await startHqRecording(id);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setHqRecBusy((b) => ({ ...b, [id]: false }));
     }
   };
 
@@ -150,8 +165,11 @@ export default function StreamGrid() {
       <div className="cards-grid">
         {visibleStreams.map((s) => {
           const rec = recordings[s.id];
-          const isRecording = rec?.status === "recording";
-          const isEncoding = isRecording && !!rec?.encoding;
+          const proxyRecOn = rec?.proxy?.status === "recording";
+          const hqRecOn =
+            rec?.hq?.status === "recording" ||
+            (rec?.hq == null && rec?.proxy == null && rec?.status === "recording");
+          const isRecording = proxyRecOn || hqRecOn;
           const srtOn = srtById[s.id]?.status === "streaming";
           const activePreset = presets.find((p) => p.id === s.encode_preset);
           const activeRecPreset = presets.find(
@@ -200,13 +218,15 @@ export default function StreamGrid() {
                   )}
                   {(isRecording || srtOn) && (
                     <div className="thumb-badges">
-                      {isEncoding && (
-                        <div className="rec-badge">
-                          REC · {formatElapsed(rec?.elapsed_sec)}
+                      {proxyRecOn && (
+                        <div className="rec-badge" title="Proxy recording">
+                          PROXY · {formatElapsed(rec?.proxy?.elapsed_sec)}
                         </div>
                       )}
-                      {isRecording && !isEncoding && (
-                        <div className="rec-badge starting">REC …</div>
+                      {hqRecOn && (
+                        <div className="rec-badge" title="HQ recording">
+                          HQ · {formatElapsed(rec?.hq?.elapsed_sec)}
+                        </div>
                       )}
                       {srtOn && (
                         <div
@@ -225,112 +245,131 @@ export default function StreamGrid() {
               </div>
 
               <div className="card-footer">
-                <div className="card-main">
-                  <span
-                    className={`card-channel-num ${s.status}`}
-                    title={s.name || `Input ${s.id}`}
-                  >
-                    {s.id}
-                  </span>
-                  <div className="card-identity-text">
-                    <span className="card-name" title={rec?.name || `ch${s.id}`}>
-                      {rec?.name || `ch${s.id}`}
-                    </span>
-                    <div className="card-meta-row">
-                      <span
-                        className="card-category"
-                        title={cat === "_unsorted" ? "Unsorted" : cat}
-                      >
-                        {cat === "_unsorted" ? "Unsorted" : cat}
-                      </span>
-                      <span
-                        className="card-meta"
-                        title={
-                          s.status === "waiting"
-                            ? signalLabel
-                              ? `No signal (last: ${signalLabel})`
-                              : "No signal"
-                            : s.format || undefined
-                        }
-                      >
-                        {s.status === "waiting" ? (
-                          <span className="card-meta-item card-meta-waiting">No signal</span>
-                        ) : signalLabel ? (
-                          <span className="card-meta-item card-meta-format">{signalLabel}</span>
-                        ) : (
-                          <span className="card-meta-item">—</span>
-                        )}
-                      </span>
-                    </div>
-                    <div
-                      className="card-presets"
-                      title={`Proxy ${proxyLabel || "—"} · REC ${recLabel || "—"}`}
+                <div className="card-top">
+                  <div className="card-main">
+                    <span
+                      className={`card-channel-num ${s.status}`}
+                      title={s.name || `Input ${s.id}`}
                     >
-                      <span className="card-preset-line">
-                        <span className="card-preset-role">Proxy</span>
-                        <span className="card-preset-value">{proxyLabel || "—"}</span>
+                      {s.id}
+                    </span>
+                    <div className="card-identity-text">
+                      <span className="card-name" title={rec?.name || `ch${s.id}`}>
+                        {rec?.name || `ch${s.id}`}
                       </span>
-                      <span className="card-preset-line">
-                        <span className="card-preset-role">REC</span>
-                        <span className="card-preset-value">{recLabel || "—"}</span>
-                      </span>
+                      <div className="card-meta-row">
+                        <span
+                          className="card-category"
+                          title={cat === "_unsorted" ? "Unsorted" : cat}
+                        >
+                          {cat === "_unsorted" ? "Unsorted" : cat}
+                        </span>
+                        <span
+                          className="card-meta"
+                          title={
+                            s.status === "waiting"
+                              ? signalLabel
+                                ? `No signal (last: ${signalLabel})`
+                                : "No signal"
+                              : s.format || undefined
+                          }
+                        >
+                          {s.status === "waiting" ? (
+                            <span className="card-meta-item card-meta-waiting">No signal</span>
+                          ) : signalLabel ? (
+                            <span className="card-meta-item card-meta-format">{signalLabel}</span>
+                          ) : (
+                            <span className="card-meta-item">—</span>
+                          )}
+                        </span>
+                      </div>
+                      <div
+                        className="card-presets"
+                        title={`Proxy ${proxyLabel || "—"} · REC ${recLabel || "—"}`}
+                      >
+                        <span className="card-preset-line">
+                          <span className="card-preset-role">Proxy</span>
+                          <span className="card-preset-value">{proxyLabel || "—"}</span>
+                        </span>
+                        <span className="card-preset-line">
+                          <span className="card-preset-role">REC</span>
+                          <span className="card-preset-value">{recLabel || "—"}</span>
+                        </span>
+                      </div>
                     </div>
                   </div>
-                </div>
-                <div className="card-actions-primary">
-                  <button
-                    type="button"
-                    className={`rec-btn ${isRecording ? "recording" : "idle"}`}
-                    onClick={() => toggleRecording(s.id)}
-                    disabled={recBusy[s.id] || (!hasSignal && !isRecording)}
-                    title={
-                      isRecording
-                        ? `Stop recording (${recLabel || "REC"})`
-                        : !hasSignal
-                          ? "No signal"
-                          : `Start recording (${recLabel || "REC"})`
-                    }
-                  >
-                    {recBusy[s.id] ? "…" : "REC"}
-                  </button>
-                  <button
-                    type="button"
-                    className={`stream-btn ${srtOn ? "streaming" : "idle"}`}
-                    onClick={() => toggleSrt(s.id)}
-                    disabled={srtBusy[s.id] || (!hasSignal && !srtOn)}
-                    title={
-                      srtOn
-                        ? srtById[s.id]?.publish_url || "Stop SRT"
-                        : !hasSignal
-                          ? "No signal"
-                          : "Start SRT"
-                    }
-                  >
-                    {srtBusy[s.id] ? "…" : "SRT"}
-                  </button>
-                </div>
-                <div className="card-actions-tools">
-                  {captureOn && (
-                    <ListenButton
-                      pair={preview?.id === s.id ? preview.pair : null}
-                      onChange={(p) => {
-                        if (p == null) {
-                          setPreview(null);
-                          return;
+                  <div className="card-actions">
+                    <div className="card-actions-primary">
+                      <button
+                        type="button"
+                        className={`rec-btn ${proxyRecOn ? "recording" : "idle"}`}
+                        onClick={() => toggleProxyRecording(s.id)}
+                        disabled={proxyRecBusy[s.id] || (!hasSignal && !proxyRecOn)}
+                        title={
+                          proxyRecOn
+                            ? "Stop proxy recording"
+                            : !hasSignal
+                              ? "No signal"
+                              : `Start proxy recording (${proxyLabel || "proxy"})`
                         }
-                        setPreview({ id: s.id, pair: p });
-                      }}
-                    />
-                  )}
-                  <button
-                    type="button"
-                    className="badge settings-btn"
-                    onClick={() => setSettingsId(s.id)}
-                    title="Channel settings"
-                    aria-label="Settings"
-                  >
-                    ⚙
-                  </button>
+                      >
+                        {proxyRecBusy[s.id] ? "…" : "PROXY"}
+                      </button>
+                      <button
+                        type="button"
+                        className={`rec-btn ${hqRecOn ? "recording" : "idle"}`}
+                        onClick={() => toggleHqRecording(s.id)}
+                        disabled={hqRecBusy[s.id] || (!hasSignal && !hqRecOn)}
+                        title={
+                          hqRecOn
+                            ? "Stop HQ recording"
+                            : !hasSignal
+                              ? "No signal"
+                              : `Start HQ recording (${recLabel || "HQ"})`
+                        }
+                      >
+                        {hqRecBusy[s.id] ? "…" : "HQ"}
+                      </button>
+                      <button
+                        type="button"
+                        className={`stream-btn ${srtOn ? "streaming" : "idle"}`}
+                        onClick={() => toggleSrt(s.id)}
+                        disabled={srtBusy[s.id] || (!hasSignal && !srtOn)}
+                        title={
+                          srtOn
+                            ? srtById[s.id]?.publish_url || "Stop SRT"
+                            : !hasSignal
+                              ? "No signal"
+                              : "Start SRT"
+                        }
+                      >
+                        {srtBusy[s.id] ? "…" : "SRT"}
+                      </button>
+                    </div>
+                    <div className="card-actions-tools">
+                      {captureOn && (
+                        <ListenButton
+                          pair={preview?.id === s.id ? preview.pair : null}
+                          onChange={(p) => {
+                            if (p == null) {
+                              setPreview(null);
+                              return;
+                            }
+                            setPreview({ id: s.id, pair: p });
+                          }}
+                        />
+                      )}
+                      <button
+                        type="button"
+                        className="badge settings-btn"
+                        onClick={() => setSettingsId(s.id)}
+                        title="Channel settings"
+                        aria-label="Settings"
+                      >
+                        ⚙
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

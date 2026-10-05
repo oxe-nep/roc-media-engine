@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::fs::File;
+use roc_pipelines::RecordingRole;
 use tokio_util::io::ReaderStream;
 
 use crate::ui::library;
@@ -24,8 +25,13 @@ pub fn router() -> Router<AppState> {
         .route("/api/streams/{id}/encode-preset", put(set_stream_preset))
         .route("/api/streams/{id}/record-preset", put(set_stream_record_preset))
         .route("/api/recordings", get(list_recordings))
+        // `/start` + `/stop` stay as HQ aliases for older UI builds.
         .route("/api/recordings/{id}/start", post(start_recording))
         .route("/api/recordings/{id}/stop", post(stop_recording))
+        .route("/api/recordings/{id}/proxy/start", post(start_proxy_recording))
+        .route("/api/recordings/{id}/proxy/stop", post(stop_proxy_recording))
+        .route("/api/recordings/{id}/hq/start", post(start_hq_recording))
+        .route("/api/recordings/{id}/hq/stop", post(stop_hq_recording))
         .route("/api/recordings/{id}/name", put(set_rec_name))
         .route("/api/recordings/{id}/category", put(set_rec_category))
         .route("/api/recordings/{id}/schedule", put(set_schedule).delete(clear_schedule))
@@ -92,8 +98,10 @@ async fn stop_stream(
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
     let _ = st.orch.stop_srt(id);
-    let _ = st.orch.stop_recording(id);
-    st.ui.mark_recording_stopped(id);
+    let _ = st.orch.stop_proxy_recording(id);
+    let _ = st.orch.stop_hq_recording(id);
+    st.ui.mark_recording_stopped_role(id, RecordingRole::Proxy);
+    st.ui.mark_recording_stopped_role(id, RecordingRole::Hq);
     st.orch.stop_capture(id).map_err(UiError::from)?;
     snapshot::stream_json(st.orch.as_ref(), st.ui.as_ref(), id)
         .map(Json)
@@ -147,9 +155,12 @@ async fn list_recordings(State(st): State<AppState>) -> Json<Value> {
     Json(Value::Array(out))
 }
 
-async fn start_recording(
-    State(st): State<AppState>,
-    Path(id): Path<u32>,
+/// Start a REC role using the channel's UI name/category. Proxy files get a
+/// `_proxy` suffix (see `Orchestrator::recording_file_name`).
+fn start_role_recording(
+    st: &AppState,
+    id: u32,
+    role: RecordingRole,
 ) -> Result<Json<Value>, UiError> {
     let meta = st.ui.rec_meta(id);
     let name = if meta.name.is_empty() {
@@ -161,17 +172,22 @@ async fn start_recording(
     let cat = meta.category.clone();
     let dir = root.join(&cat);
     std::fs::create_dir_all(&dir).map_err(UiError::from)?;
-    let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let safe = name.replace(' ', "_");
-    let ext = st.orch.recording_ext(id);
     let path = dir
-        .join(format!("{safe}_ch{id}_{stamp}.{ext}"))
+        .join(st.orch.recording_file_name(id, role, &safe, &stamp))
         .to_string_lossy()
         .into_owned();
-    st.orch
-        .start_recording(id, Some(path), Some(name), Some(cat))
-        .map_err(UiError::from)?;
-    st.ui.mark_recording_started(id);
+    let started = match role {
+        RecordingRole::Proxy => st
+            .orch
+            .start_proxy_recording(id, Some(path), Some(name), Some(cat)),
+        RecordingRole::Hq => st
+            .orch
+            .start_hq_recording(id, Some(path), Some(name), Some(cat)),
+    };
+    started.map_err(UiError::from)?;
+    st.ui.mark_recording_started_role(id, role);
     Ok(Json(snapshot::recording_json(
         st.orch.as_ref(),
         st.ui.as_ref(),
@@ -179,17 +195,66 @@ async fn start_recording(
     )))
 }
 
-async fn stop_recording(
-    State(st): State<AppState>,
-    Path(id): Path<u32>,
+fn stop_role_recording(
+    st: &AppState,
+    id: u32,
+    role: RecordingRole,
 ) -> Result<Json<Value>, UiError> {
-    st.orch.stop_recording(id).map_err(UiError::from)?;
-    st.ui.mark_recording_stopped(id);
+    let stopped = match role {
+        RecordingRole::Proxy => st.orch.stop_proxy_recording(id),
+        RecordingRole::Hq => st.orch.stop_hq_recording(id),
+    };
+    stopped.map_err(UiError::from)?;
+    st.ui.mark_recording_stopped_role(id, role);
     Ok(Json(snapshot::recording_json(
         st.orch.as_ref(),
         st.ui.as_ref(),
         id,
     )))
+}
+
+/// `POST /api/recordings/{id}/start` — alias for HQ start.
+async fn start_recording(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+) -> Result<Json<Value>, UiError> {
+    start_role_recording(&st, id, RecordingRole::Hq)
+}
+
+/// `POST /api/recordings/{id}/stop` — alias for HQ stop.
+async fn stop_recording(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+) -> Result<Json<Value>, UiError> {
+    stop_role_recording(&st, id, RecordingRole::Hq)
+}
+
+async fn start_proxy_recording(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+) -> Result<Json<Value>, UiError> {
+    start_role_recording(&st, id, RecordingRole::Proxy)
+}
+
+async fn stop_proxy_recording(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+) -> Result<Json<Value>, UiError> {
+    stop_role_recording(&st, id, RecordingRole::Proxy)
+}
+
+async fn start_hq_recording(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+) -> Result<Json<Value>, UiError> {
+    start_role_recording(&st, id, RecordingRole::Hq)
+}
+
+async fn stop_hq_recording(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+) -> Result<Json<Value>, UiError> {
+    stop_role_recording(&st, id, RecordingRole::Hq)
 }
 
 #[derive(Deserialize)]

@@ -8,7 +8,8 @@ use parking_lot::Mutex;
 use roc_config::{Config, EncodePreset};
 use roc_devices::DeviceProbeReport;
 use roc_pipelines::{
-    ChannelSnapshot, PipelineBackend, PlayoutSnapshot, WorkflowKind, WorkflowSnapshot,
+    ChannelSnapshot, PipelineBackend, PlayoutSnapshot, RecordingRole, WorkflowKind,
+    WorkflowSnapshot,
 };
 
 fn stamp_now() -> String {
@@ -56,7 +57,17 @@ pub struct Orchestrator {
 
 impl Orchestrator {
     /// File extension for the channel's current *record* preset (.mp4 / .mxf).
+    /// Same as `recording_ext_for(id, RecordingRole::Hq)`.
     pub fn recording_ext(&self, id: u32) -> &'static str {
+        self.recording_ext_for(id, RecordingRole::Hq)
+    }
+
+    /// File extension for a REC role. Proxy is always the encoded bitstream in
+    /// an MP4 container; HQ follows the channel's record preset (.mp4 / .mxf).
+    pub fn recording_ext_for(&self, id: u32, role: RecordingRole) -> &'static str {
+        if role == RecordingRole::Proxy {
+            return "mp4";
+        }
         let preset_id = self
             .backend
             .channel_snapshot(id)
@@ -239,9 +250,59 @@ impl Orchestrator {
         self.backend.channel_snapshot(id)
     }
 
+    /// File name (without directory) for an auto-named recording. The proxy gets a
+    /// `_proxy` suffix so it never collides with an encoded HQ `.mp4` started in
+    /// the same second.
+    pub fn recording_file_name(
+        &self,
+        id: u32,
+        role: RecordingRole,
+        label: &str,
+        stamp: &str,
+    ) -> String {
+        let suffix = match role {
+            RecordingRole::Proxy => "_proxy",
+            RecordingRole::Hq => "",
+        };
+        let ext = self.recording_ext_for(id, role);
+        format!("{label}_ch{id}_{stamp}{suffix}.{ext}")
+    }
+
+    /// Start HQ recording (backward-compatible entry point for `start_recording`).
     pub fn start_recording(
         &self,
         id: u32,
+        path: Option<String>,
+        label: Option<String>,
+        category: Option<String>,
+    ) -> Result<ChannelSnapshot> {
+        self.start_hq_recording(id, path, label, category)
+    }
+
+    pub fn start_proxy_recording(
+        &self,
+        id: u32,
+        path: Option<String>,
+        label: Option<String>,
+        category: Option<String>,
+    ) -> Result<ChannelSnapshot> {
+        self.start_role_recording(id, RecordingRole::Proxy, path, label, category)
+    }
+
+    pub fn start_hq_recording(
+        &self,
+        id: u32,
+        path: Option<String>,
+        label: Option<String>,
+        category: Option<String>,
+    ) -> Result<ChannelSnapshot> {
+        self.start_role_recording(id, RecordingRole::Hq, path, label, category)
+    }
+
+    fn start_role_recording(
+        &self,
+        id: u32,
+        role: RecordingRole,
         path: Option<String>,
         label: Option<String>,
         category: Option<String>,
@@ -261,17 +322,29 @@ impl Orchestrator {
             let cat = sanitize_category(category.as_deref().unwrap_or("_unsorted"));
             let dir = self.cfg.recordings_dir.join(&cat);
             std::fs::create_dir_all(&dir)?;
-            let ext = self.recording_ext(id);
-            dir.join(format!("{name}_ch{id}_{stamp}.{ext}"))
+            dir.join(self.recording_file_name(id, role, &name, &stamp))
                 .to_string_lossy()
                 .into_owned()
         };
-        self.backend.start_recording(id, &path_str)?;
+        match role {
+            RecordingRole::Proxy => self.backend.start_proxy_recording(id, &path_str)?,
+            RecordingRole::Hq => self.backend.start_hq_recording(id, &path_str)?,
+        }
         self.backend.channel_snapshot(id)
     }
 
+    /// Stop HQ recording (backward-compatible entry point for `stop_recording`).
     pub fn stop_recording(&self, id: u32) -> Result<ChannelSnapshot> {
-        self.backend.stop_recording(id)?;
+        self.stop_hq_recording(id)
+    }
+
+    pub fn stop_proxy_recording(&self, id: u32) -> Result<ChannelSnapshot> {
+        self.backend.stop_proxy_recording(id)?;
+        self.backend.channel_snapshot(id)
+    }
+
+    pub fn stop_hq_recording(&self, id: u32) -> Result<ChannelSnapshot> {
+        self.backend.stop_hq_recording(id)?;
         self.backend.channel_snapshot(id)
     }
 

@@ -163,21 +163,47 @@ impl PipelineBackend for GstBackend {
     }
 
     fn start_recording(&self, channel_id: u32, path: &str) -> Result<()> {
-        let _gst = self.gst_op.lock();
-        let mut map = self.channels.lock();
-        let pipe = map
-            .get_mut(&channel_id)
-            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
-        pipe.start_recording(path)
+        self.start_hq_recording(channel_id, path)
     }
 
     fn stop_recording(&self, channel_id: u32) -> Result<()> {
+        self.stop_hq_recording(channel_id)
+    }
+
+    fn start_proxy_recording(&self, channel_id: u32, path: &str) -> Result<()> {
         let _gst = self.gst_op.lock();
         let mut map = self.channels.lock();
         let pipe = map
             .get_mut(&channel_id)
             .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
-        pipe.stop_recording()
+        pipe.start_proxy_recording(path)
+    }
+
+    fn stop_proxy_recording(&self, channel_id: u32) -> Result<()> {
+        let _gst = self.gst_op.lock();
+        let mut map = self.channels.lock();
+        let pipe = map
+            .get_mut(&channel_id)
+            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+        pipe.stop_proxy_recording()
+    }
+
+    fn start_hq_recording(&self, channel_id: u32, path: &str) -> Result<()> {
+        let _gst = self.gst_op.lock();
+        let mut map = self.channels.lock();
+        let pipe = map
+            .get_mut(&channel_id)
+            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+        pipe.start_hq_recording(path)
+    }
+
+    fn stop_hq_recording(&self, channel_id: u32) -> Result<()> {
+        let _gst = self.gst_op.lock();
+        let mut map = self.channels.lock();
+        let pipe = map
+            .get_mut(&channel_id)
+            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+        pipe.stop_hq_recording()
     }
 
     fn start_srt(&self, channel_id: u32, url: &str) -> Result<()> {

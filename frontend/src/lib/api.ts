@@ -159,6 +159,14 @@ export interface RecordingSchedule {
   phase?: "pending" | "waiting" | "active";
 }
 
+export interface RecordingRoleInfo {
+  status: "idle" | "recording";
+  started_at?: string;
+  file_path?: string;
+  elapsed_sec?: number;
+  encoding?: boolean;
+}
+
 export interface RecordingInfo {
   id: number;
   status: "idle" | "recording";
@@ -170,6 +178,10 @@ export interface RecordingInfo {
   bitrate_kbps?: number;
   encoding?: boolean;
   schedule?: RecordingSchedule;
+  /** Independent proxy file (tee `e` / encode preset). */
+  proxy?: RecordingRoleInfo;
+  /** Independent HQ / mezz file (record preset). */
+  hq?: RecordingRoleInfo;
 }
 
 export interface LibraryCategory {
@@ -275,6 +287,30 @@ export async function startRecording(id: number): Promise<RecordingInfo> {
 export async function stopRecording(id: number): Promise<RecordingInfo> {
   const res = await apiFetch(`/api/recordings/${id}/stop`, { method: "POST" });
   if (!res.ok) throw new Error(`stopRecording: ${res.status}`);
+  return res.json();
+}
+
+export async function startProxyRecording(id: number): Promise<RecordingInfo> {
+  const res = await apiFetch(`/api/recordings/${id}/proxy/start`, { method: "POST" });
+  if (!res.ok) throw new Error(`startProxyRecording: ${res.status}`);
+  return res.json();
+}
+
+export async function stopProxyRecording(id: number): Promise<RecordingInfo> {
+  const res = await apiFetch(`/api/recordings/${id}/proxy/stop`, { method: "POST" });
+  if (!res.ok) throw new Error(`stopProxyRecording: ${res.status}`);
+  return res.json();
+}
+
+export async function startHqRecording(id: number): Promise<RecordingInfo> {
+  const res = await apiFetch(`/api/recordings/${id}/hq/start`, { method: "POST" });
+  if (!res.ok) throw new Error(`startHqRecording: ${res.status}`);
+  return res.json();
+}
+
+export async function stopHqRecording(id: number): Promise<RecordingInfo> {
+  const res = await apiFetch(`/api/recordings/${id}/hq/stop`, { method: "POST" });
+  if (!res.ok) throw new Error(`stopHqRecording: ${res.status}`);
   return res.json();
 }
 

@@ -34,8 +34,18 @@ pub trait PipelineBackend: Send + Sync {
     fn start_capture(&self, channel_id: u32) -> Result<()>;
     fn stop_capture(&self, channel_id: u32) -> Result<()>;
 
+    /// Backward-compatible alias for [`Self::start_hq_recording`].
     fn start_recording(&self, channel_id: u32, path: &str) -> Result<()>;
+    /// Backward-compatible alias for [`Self::stop_hq_recording`].
     fn stop_recording(&self, channel_id: u32) -> Result<()>;
+
+    /// Proxy REC: encoded bitstream from tee `e` (encode preset codec) → .mp4.
+    fn start_proxy_recording(&self, channel_id: u32, path: &str) -> Result<()>;
+    fn stop_proxy_recording(&self, channel_id: u32) -> Result<()>;
+
+    /// HQ REC: record preset (mezz from raw tee `t`, else encoded from tee `e`).
+    fn start_hq_recording(&self, channel_id: u32, path: &str) -> Result<()>;
+    fn stop_hq_recording(&self, channel_id: u32) -> Result<()>;
 
     fn start_srt(&self, channel_id: u32, url: &str) -> Result<()>;
     fn stop_srt(&self, channel_id: u32) -> Result<()>;

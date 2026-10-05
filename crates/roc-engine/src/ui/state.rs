@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
+use roc_pipelines::RecordingRole;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,9 +53,22 @@ pub struct RecMeta {
     pub category: String,
     #[serde(default)]
     pub schedule: Option<RecSchedule>,
-    /// Wall-clock when current recording started (not persisted across restart).
+    /// Wall-clock when the current PROXY recording started (not persisted across restart).
     #[serde(skip)]
-    pub started_at: Option<DateTime<Utc>>,
+    pub started_at_proxy: Option<DateTime<Utc>>,
+    /// Wall-clock when the current HQ recording started (not persisted across restart).
+    #[serde(skip)]
+    pub started_at_hq: Option<DateTime<Utc>>,
+}
+
+impl RecMeta {
+    /// Start time for a REC role.
+    pub fn started_at_for(&self, role: RecordingRole) -> Option<DateTime<Utc>> {
+        match role {
+            RecordingRole::Proxy => self.started_at_proxy,
+            RecordingRole::Hq => self.started_at_hq,
+        }
+    }
 }
 
 fn default_category() -> String {
@@ -67,7 +81,8 @@ impl Default for RecMeta {
             name: String::new(),
             category: default_category(),
             schedule: None,
-            started_at: None,
+            started_at_proxy: None,
+            started_at_hq: None,
         }
     }
 }
@@ -138,7 +153,8 @@ impl UiState {
                                     v.category
                                 },
                                 schedule: v.schedule,
-                                started_at: None,
+                                started_at_proxy: None,
+                                started_at_hq: None,
                             },
                         );
                     }
@@ -274,18 +290,38 @@ impl UiState {
         self.persist();
     }
 
+    /// Backward-compatible: marks the HQ recording as started.
     pub fn mark_recording_started(&self, id: u32) {
-        let mut g = self.inner.lock();
-        let e = g.recordings.entry(id).or_default();
-        e.started_at = Some(Utc::now());
+        self.mark_recording_started_role(id, RecordingRole::Hq);
     }
 
+    /// Backward-compatible: marks the HQ recording as stopped.
     pub fn mark_recording_stopped(&self, id: u32) {
+        self.mark_recording_stopped_role(id, RecordingRole::Hq);
+    }
+
+    pub fn mark_recording_started_role(&self, id: u32, role: RecordingRole) {
+        let mut g = self.inner.lock();
+        let e = g.recordings.entry(id).or_default();
+        let now = Some(Utc::now());
+        match role {
+            RecordingRole::Proxy => e.started_at_proxy = now,
+            RecordingRole::Hq => e.started_at_hq = now,
+        }
+    }
+
+    pub fn mark_recording_stopped_role(&self, id: u32, role: RecordingRole) {
         let mut g = self.inner.lock();
         if let Some(e) = g.recordings.get_mut(&id) {
-            e.started_at = None;
-            if let Some(s) = e.schedule.as_mut() {
-                s.phase = None;
+            match role {
+                RecordingRole::Proxy => e.started_at_proxy = None,
+                RecordingRole::Hq => {
+                    e.started_at_hq = None;
+                    // Schedules drive HQ only.
+                    if let Some(s) = e.schedule.as_mut() {
+                        s.phase = None;
+                    }
+                }
             }
         }
     }

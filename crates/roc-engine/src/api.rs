@@ -22,6 +22,10 @@ pub fn router(orch: Arc<Orchestrator>) -> Router {
         .route("/api/channels/{id}/stop", post(stop_capture))
         .route("/api/channels/{id}/record/start", post(start_record))
         .route("/api/channels/{id}/record/stop", post(stop_record))
+        .route("/api/channels/{id}/record/proxy/start", post(start_record_proxy))
+        .route("/api/channels/{id}/record/proxy/stop", post(stop_record_proxy))
+        .route("/api/channels/{id}/record/hq/start", post(start_record_hq))
+        .route("/api/channels/{id}/record/hq/stop", post(stop_record_hq))
         .route("/api/channels/{id}/srt/start", post(start_srt))
         .route("/api/channels/{id}/srt/stop", post(stop_srt))
         .route("/api/channels/{id}/encode-preset", post(set_encode_preset))
@@ -109,6 +113,44 @@ async fn stop_record(
     Path(id): Path<u32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let snap = orch.stop_recording(id).map_err(ApiError::from)?;
+    Ok(Json(serde_json::to_value(snap).unwrap()))
+}
+
+async fn start_record_proxy(
+    State(orch): State<ApiState>,
+    Path(id): Path<u32>,
+    Query(q): Query<RecordQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let snap = orch
+        .start_proxy_recording(id, q.path, q.label, q.category)
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::to_value(snap).unwrap()))
+}
+
+async fn stop_record_proxy(
+    State(orch): State<ApiState>,
+    Path(id): Path<u32>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let snap = orch.stop_proxy_recording(id).map_err(ApiError::from)?;
+    Ok(Json(serde_json::to_value(snap).unwrap()))
+}
+
+async fn start_record_hq(
+    State(orch): State<ApiState>,
+    Path(id): Path<u32>,
+    Query(q): Query<RecordQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let snap = orch
+        .start_hq_recording(id, q.path, q.label, q.category)
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::to_value(snap).unwrap()))
+}
+
+async fn stop_record_hq(
+    State(orch): State<ApiState>,
+    Path(id): Path<u32>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let snap = orch.stop_hq_recording(id).map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }
 

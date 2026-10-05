@@ -1,6 +1,13 @@
 //! Per-channel GStreamer capture graph.
 //!
-//! REC attaches as a dynamic branch on the encoded tee `e` and is independent
+//! Two independent REC roles attach as dynamic branches and can run at the same
+//! time (each with its own start/stop):
+//! - **proxy**: encoded tee `e` → encode-preset parser → mp4mux (`.mp4`);
+//! - **hq**: record preset — mezz from raw tee `t` (DNxHD/XAVC → `.mxf`), or the
+//!   encoded bitstream from tee `e` (`.mp4`) for NVENC record presets.
+//!
+//! Element names carry the role tag (`q_proxy_*` / `q_hq_*`) and each branch
+//! remembers its video tee so detach releases the right pad. REC is independent
 //! of SRT. Program MPEG-TS is muxed once (Hydra-style) to `ts_out` → UDP +
 //! `appsink srt_in`. SRT start/stop only arms/disarms appsrc→srtsink on that
 //! appsink — no capture relaunch, so an active REC is never torn down.
@@ -15,7 +22,7 @@ use crate::describe::{
     aac_stereo_pairs, build_capture_encode_once_launch, stereo_pair_matrix, CaptureLaunchOpts,
 };
 use crate::signal_format::{format_from_caps, is_auto_mode, probe_input_format, InputFormat};
-use crate::{ChannelSnapshot, ChannelStatus};
+use crate::{ChannelSnapshot, ChannelStatus, RecordingRole};
 
 /// Insert an `identity` that forces a clean TIME segment from 0.
 ///
@@ -734,9 +741,13 @@ pub struct ChannelPipeline {
     pub record_preset_id: String,
     pub record_preset_label: String,
     pub status: ChannelStatus,
-    pub recording: bool,
+    /// Proxy REC (encoded tee `e`, encode preset codec → .mp4) is attached.
+    pub proxy_recording: bool,
+    /// HQ REC (record preset: mezz from tee `t`, else encoded from tee `e`) is attached.
+    pub hq_recording: bool,
     pub srt: bool,
-    pub recording_path: Option<String>,
+    pub proxy_recording_path: Option<String>,
+    pub hq_recording_path: Option<String>,
     pub srt_url: Option<String>,
     pub last_error: Option<String>,
     device: String,
@@ -750,9 +761,11 @@ pub struct ChannelPipeline {
     /// Recording encode settings (NVENC bitstream or mezz from raw tee).
     record_preset: EncodePreset,
     udp_egress: Option<String>,
-    parse_element: String,
     pipeline: Option<gstreamer::Pipeline>,
-    rec_branch: Option<Branch>,
+    /// Dynamic proxy REC branch (always on encoded tee `e`).
+    proxy_branch: Option<Branch>,
+    /// Dynamic HQ REC branch (tee `t` for mezz, tee `e` for encoded).
+    hq_branch: Option<Branch>,
     /// On-demand WebRTC encode preview (modal). At most one per channel.
     webrtc_preview: Option<crate::gst::preview_webrtc::WebRtcPreview>,
     /// Avoid relaunch storms: last adapt attempt.
@@ -774,20 +787,24 @@ pub struct ChannelPipeline {
 }
 
 struct Branch {
-    tee_pad: gstreamer::Pad,
+    role: RecordingRole,
+    /// Name of the video tee this branch's `tee_pad` was requested from (`"e"` | `"t"`).
+    /// Detach must release the pad on this exact tee.
+    video_tee: &'static str,
+    /// Request pad on `video_tee`; `None` while a branch is only partially built.
+    tee_pad: Option<gstreamer::Pad>,
     /// Pads from audio tee `a` (one per AAC stereo pair).
     audio_tee_pads: Vec<gstreamer::Pad>,
     elements: Vec<gstreamer::Element>,
 }
 
+/// Parser for the NVENC bitstream on encoded tee `e` (follows the *encode* preset).
 fn parse_element_for_codec(video_codec: &str) -> &'static str {
     let c = video_codec.to_ascii_lowercase();
-    if roc_config::is_mezz_codec(&c) {
-        // Mezz REC does not use the encoded tee parse path.
-        "identity"
-    } else if c.contains("265") || c.contains("hevc") {
+    if c.contains("265") || c.contains("hevc") {
         "h265parse"
     } else {
+        // H.264 (and any unknown/mezz codec, which never reaches tee `e`).
         "h264parse"
     }
 }
@@ -810,9 +827,11 @@ impl ChannelPipeline {
             record_preset_id: record_id,
             record_preset_label: record.label.clone(),
             status: ChannelStatus::Stopped,
-            recording: false,
+            proxy_recording: false,
+            hq_recording: false,
             srt: false,
-            recording_path: None,
+            proxy_recording_path: None,
+            hq_recording_path: None,
             srt_url: ch.srt_url.clone(),
             last_error: None,
             device: ch.device.clone(),
@@ -822,12 +841,12 @@ impl ChannelPipeline {
                 .unwrap_or_else(|| "auto".into()),
             locked_mode: String::new(),
             detected: None,
-            parse_element: parse_element_for_codec(&record.video_codec).to_string(),
             preset: encode.clone(),
             record_preset: record.clone(),
             udp_egress: ch.udp_egress.clone(),
             pipeline: None,
-            rec_branch: None,
+            proxy_branch: None,
+            hq_branch: None,
             webrtc_preview: None,
             last_adapt: None,
             last_signal_flip: None,
@@ -861,7 +880,6 @@ impl ChannelPipeline {
             self.record_preset_id = id.clone();
         }
         self.record_preset_label = record.label.clone();
-        self.parse_element = parse_element_for_codec(&record.video_codec).to_string();
         self.udp_egress = ch.udp_egress.clone();
         if self.srt_url.is_none() {
             self.srt_url = ch.srt_url.clone();
@@ -873,7 +891,8 @@ impl ChannelPipeline {
         if roc_config::is_mezz_codec(&preset.video_codec) {
             bail!("mezz codecs belong on the record preset — pick an NVENC proxy for live/SRT");
         }
-        if self.recording {
+        // Relaunch rebuilds tee `e`; any active REC (proxy or HQ) must be stopped first.
+        if self.proxy_recording || self.hq_recording {
             bail!("stop recording before changing encode preset");
         }
         let live = matches!(
@@ -905,15 +924,16 @@ impl ChannelPipeline {
         self.relaunch_preserving_branches(&mode)
     }
 
-    /// Apply REC preset. No graph relaunch; used on next start_recording.
+    /// Apply REC preset. No graph relaunch; used on next HQ start. Only an active
+    /// HQ recording blocks the change — proxy REC follows the encode preset and
+    /// can keep running.
     pub fn apply_record_preset(&mut self, preset_id: &str, preset: &EncodePreset) -> Result<()> {
-        if self.recording {
+        if self.hq_recording {
             bail!("stop recording before changing record preset");
         }
         self.record_preset_id = preset_id.to_string();
         self.record_preset_label = preset.label.clone();
         self.record_preset = preset.clone();
-        self.parse_element = parse_element_for_codec(&preset.video_codec).to_string();
         tracing::info!(
             channel = self.id,
             preset_id,
@@ -924,17 +944,29 @@ impl ChannelPipeline {
     }
 
     fn relaunch_preserving_branches(&mut self, mode: &str) -> Result<()> {
-        let was_rec = self.recording;
-        let rec_path = self.recording_path.clone();
+        // Remember which roles were active so both can be re-attached after relaunch.
+        let proxy_path = if self.proxy_recording {
+            self.proxy_recording_path.clone()
+        } else {
+            None
+        };
+        let hq_path = if self.hq_recording {
+            self.hq_recording_path.clone()
+        } else {
+            None
+        };
         // Keep self.srt / self.srt_url — launch_locked bakes SRT into the graph.
 
         self.stop_webrtc_preview();
-        let _ = self.detach_recording(false);
+        let _ = self.detach_recording(RecordingRole::Proxy, false);
+        let _ = self.detach_recording(RecordingRole::Hq, false);
         if let Some(p) = self.pipeline.take() {
             let _ = p.set_state(gstreamer::State::Null);
         }
-        self.recording = false;
-        self.recording_path = None;
+        self.proxy_recording = false;
+        self.hq_recording = false;
+        self.proxy_recording_path = None;
+        self.hq_recording_path = None;
         self.srt_bitrate = None;
         if mode != "auto" && !mode.is_empty() {
             self.locked_mode = mode.to_string();
@@ -946,15 +978,22 @@ impl ChannelPipeline {
         };
         match self.launch_locked(&launch_mode) {
             Ok(()) => {
-                if was_rec {
-                    if let Some(path) = rec_path {
-                        if let Err(err) = self.start_recording(&path) {
-                            tracing::error!(
-                                channel = self.id,
-                                error = %err,
-                                "failed to re-attach recording after relaunch"
-                            );
-                        }
+                if let Some(path) = proxy_path {
+                    if let Err(err) = self.start_proxy_recording(&path) {
+                        tracing::error!(
+                            channel = self.id,
+                            error = %err,
+                            "failed to re-attach proxy recording after relaunch"
+                        );
+                    }
+                }
+                if let Some(path) = hq_path {
+                    if let Err(err) = self.start_hq_recording(&path) {
+                        tracing::error!(
+                            channel = self.id,
+                            error = %err,
+                            "failed to re-attach HQ recording after relaunch"
+                        );
                     }
                 }
                 Ok(())
@@ -1083,15 +1122,18 @@ impl ChannelPipeline {
 
     pub fn stop(&mut self) -> Result<()> {
         self.stop_webrtc_preview();
-        let _ = self.detach_recording(false);
+        let _ = self.detach_recording(RecordingRole::Proxy, false);
+        let _ = self.detach_recording(RecordingRole::Hq, false);
         if let Some(p) = self.pipeline.take() {
             let _ = p.send_event(gstreamer::event::Eos::new());
             let _ = p.set_state(gstreamer::State::Null);
         }
         self.status = ChannelStatus::Stopped;
-        self.recording = false;
+        self.proxy_recording = false;
+        self.hq_recording = false;
         self.srt = false;
-        self.recording_path = None;
+        self.proxy_recording_path = None;
+        self.hq_recording_path = None;
         self.audio_peaks = [-90.0; 8];
         self.last_level_at = None;
         self.encode_bitrate.reset();
@@ -1099,27 +1141,69 @@ impl ChannelPipeline {
         Ok(())
     }
 
+    /// Backward-compatible alias: `start_recording` = HQ start.
     pub fn start_recording(&mut self, path: &str) -> Result<()> {
+        self.start_hq_recording(path)
+    }
+
+    /// Backward-compatible alias: `stop_recording` = HQ stop.
+    pub fn stop_recording(&mut self) -> Result<()> {
+        self.stop_hq_recording()
+    }
+
+    /// Proxy REC: encoded tee `e` → encode-preset parser → mp4mux (.mp4).
+    pub fn start_proxy_recording(&mut self, path: &str) -> Result<()> {
         if self.pipeline.is_none() {
             bail!("capture not running");
         }
-        if self.recording {
-            bail!("already recording");
+        if self.proxy_recording {
+            bail!("already recording proxy");
         }
-        self.attach_recording(path)?;
-        self.recording = true;
-        self.recording_path = Some(path.to_string());
+        let branch = self.attach_encoded_recording(RecordingRole::Proxy, path)?;
+        self.proxy_branch = Some(branch);
+        self.proxy_recording = true;
+        self.proxy_recording_path = Some(path.to_string());
         Ok(())
     }
 
-    pub fn stop_recording(&mut self) -> Result<()> {
-        if !self.recording {
+    pub fn stop_proxy_recording(&mut self) -> Result<()> {
+        if !self.proxy_recording {
             return Ok(());
         }
-        self.detach_recording(true)?;
-        self.recording = false;
-        self.recording_path = None;
+        let res = self.detach_recording(RecordingRole::Proxy, true);
+        self.proxy_recording = false;
+        self.proxy_recording_path = None;
+        res
+    }
+
+    /// HQ REC: mezz from raw tee `t` when the record preset is mezz, otherwise
+    /// the encoded bitstream from tee `e`.
+    pub fn start_hq_recording(&mut self, path: &str) -> Result<()> {
+        if self.pipeline.is_none() {
+            bail!("capture not running");
+        }
+        if self.hq_recording {
+            bail!("already recording hq");
+        }
+        let branch = if roc_config::is_mezz_codec(&self.record_preset.video_codec) {
+            self.attach_mezz_recording(RecordingRole::Hq, path)?
+        } else {
+            self.attach_encoded_recording(RecordingRole::Hq, path)?
+        };
+        self.hq_branch = Some(branch);
+        self.hq_recording = true;
+        self.hq_recording_path = Some(path.to_string());
         Ok(())
+    }
+
+    pub fn stop_hq_recording(&mut self) -> Result<()> {
+        if !self.hq_recording {
+            return Ok(());
+        }
+        let res = self.detach_recording(RecordingRole::Hq, true);
+        self.hq_recording = false;
+        self.hq_recording_path = None;
+        res
     }
 
     pub fn start_srt(&mut self, url: &str) -> Result<()> {
@@ -1245,44 +1329,92 @@ impl ChannelPipeline {
             .ok_or_else(|| anyhow!("raw tee `t` missing — is capture running?"))
     }
 
-    fn attach_recording(&mut self, path: &str) -> Result<()> {
-        if roc_config::is_mezz_codec(&self.record_preset.video_codec) {
-            self.attach_mezz_recording(path)
-        } else {
-            self.attach_encoded_recording(path)
+    /// Audio settings for a REC role. Proxy follows the live/proxy encode preset;
+    /// HQ follows the record preset.
+    fn audio_preset_for(&self, role: RecordingRole) -> &EncodePreset {
+        match role {
+            RecordingRole::Proxy => &self.preset,
+            RecordingRole::Hq => &self.record_preset,
         }
     }
 
-    /// NVENC bitstream REC from encoded tee `e` → mp4mux.
-    fn attach_encoded_recording(&mut self, path: &str) -> Result<()> {
+    /// Release tee pads and remove every element of a (possibly partial) branch.
+    /// Used on attach failure and by `detach_recording`.
+    fn discard_branch(pipeline: &gstreamer::Pipeline, branch: &Branch) {
+        Self::unlink_branch(pipeline, branch);
+        for el in branch.elements.iter().rev() {
+            let _ = el.set_state(gstreamer::State::Null);
+        }
+        for el in &branch.elements {
+            let _ = pipeline.remove(el);
+        }
+    }
+
+    /// NVENC bitstream REC from encoded tee `e` → parse → mp4mux.
+    ///
+    /// Used by the proxy role (always) and by the HQ role when the record preset
+    /// is not a mezz codec. The parser follows the *encode* preset codec because
+    /// that is what tee `e` carries.
+    fn attach_encoded_recording(&self, role: RecordingRole, path: &str) -> Result<Branch> {
         let pipeline = self
             .pipeline
             .as_ref()
             .ok_or_else(|| anyhow!("no pipeline"))?
             .clone();
+        let mut branch = Branch {
+            role,
+            video_tee: "e",
+            tee_pad: None,
+            audio_tee_pads: Vec::new(),
+            elements: Vec::new(),
+        };
+        match self.build_encoded_recording(&pipeline, &mut branch, path) {
+            Ok(()) => Ok(branch),
+            Err(err) => {
+                tracing::error!(
+                    channel = self.id,
+                    role = role.tag(),
+                    error = %err,
+                    "encoded record attach failed — discarding partial branch"
+                );
+                Self::discard_branch(&pipeline, &branch);
+                Err(err)
+            }
+        }
+    }
+
+    fn build_encoded_recording(
+        &self,
+        pipeline: &gstreamer::Pipeline,
+        branch: &mut Branch,
+        path: &str,
+    ) -> Result<()> {
+        let role = branch.role;
+        let tag = role.tag();
         let tee = self.encoded_tee()?;
         let audio_tee = pipeline.by_name("a");
+        let parse_element = parse_element_for_codec(&self.preset.video_codec);
 
         let queue_v = gstreamer::ElementFactory::make("queue")
-            .name(format!("q_rec_v_{}", self.id))
+            .name(format!("q_{tag}_v_{}", self.id))
             .build()
             .context("queue video")?;
-        let parse = gstreamer::ElementFactory::make(&self.parse_element)
-            .name(format!("parse_rec_{}", self.id))
+        let parse = gstreamer::ElementFactory::make(parse_element)
+            .name(format!("parse_{tag}_{}", self.id))
             .build()
-            .with_context(|| format!("make {}", self.parse_element))?;
+            .with_context(|| format!("make {parse_element}"))?;
         // Keep SPS/PPS (or VPS/SPS/PPS for HEVC) in-band for mid-stream joiners.
         let _ = parse.set_property_from_str("config-interval", "-1");
         // Progressive MP4 (moov at end). Fragmented/streamable files often look
         // "corrupt" in browsers and desktop players when finalize is incomplete.
         let mux = gstreamer::ElementFactory::make("mp4mux")
-            .name(format!("mux_rec_{}", self.id))
+            .name(format!("mux_{tag}_{}", self.id))
             .property("fragment-duration", 0u32)
             .property("streamable", false)
             .build()
             .context("mp4mux")?;
         let sink = gstreamer::ElementFactory::make("filesink")
-            .name(format!("fs_rec_{}", self.id))
+            .name(format!("fs_{tag}_{}", self.id))
             .property("location", path)
             .property("sync", false)
             // Ensure CIFS/NFS sees bytes promptly; helps avoid 0-byte stubs on stop.
@@ -1290,14 +1422,15 @@ impl ChannelPipeline {
             .build()
             .context("filesink")?;
 
-        let id_v = make_mux_ts_align(&format!("id_rec_v_{}", self.id))?;
-        let mut elements = vec![
+        let id_v = make_mux_ts_align(&format!("id_{tag}_v_{}", self.id))?;
+        // First element must stay the video queue (`unlink_branch` relies on it).
+        branch.elements.extend([
             queue_v.clone(),
             parse.clone(),
             id_v.clone(),
             mux.clone(),
             sink.clone(),
-        ];
+        ]);
         pipeline.add_many([&queue_v, &parse, &id_v, &mux, &sink])?;
         queue_v.link(&parse).context("link rec queue→parse")?;
         parse.link(&id_v).context("link rec parse→identity")?;
@@ -1309,23 +1442,31 @@ impl ChannelPipeline {
         // video waits up to one GOP (~1s) for IDR — both get pts=0 via
         // single-segment → permanent ~1s lipsync error.
         let av_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut audio_tee_pads = Vec::new();
+        let audio_queue_prefix = format!("q_{tag}_a");
         if let Some(a_tee) = audio_tee {
-            match self.link_program_aac(&pipeline, &a_tee, &mux, "rec", true) {
+            match self.link_program_aac(
+                pipeline,
+                &a_tee,
+                &mux,
+                tag,
+                true,
+                self.audio_preset_for(role),
+            ) {
                 Ok((a_pads, audio_els)) => {
                     // Gate every AAC queue until the first video keyframe.
                     for el in &audio_els {
-                        if el.name().starts_with("q_rec_a") {
+                        if el.name().starts_with(&audio_queue_prefix) {
                             install_av_start_gate(el, av_gate.clone());
                         }
                     }
-                    audio_tee_pads = a_pads;
-                    elements.extend(audio_els);
-                    install_mux_av_sync_log("rec");
+                    branch.audio_tee_pads = a_pads;
+                    branch.elements.extend(audio_els);
+                    install_mux_av_sync_log(tag);
                 }
                 Err(err) => {
                     tracing::warn!(
                         channel = self.id,
+                        role = tag,
                         error = %err,
                         "REC video-only — program AAC attach failed"
                     );
@@ -1334,23 +1475,26 @@ impl ChannelPipeline {
         } else {
             tracing::warn!(
                 channel = self.id,
+                role = tag,
                 "REC video-only — audio tee `a` missing"
             );
         }
 
-        for el in &elements {
+        for el in &branch.elements {
             el.sync_state_with_parent()
                 .context("sync_state_with_parent record")?;
         }
 
         // Open the audio gate on the first video keyframe (non-DELTA_UNIT).
-        if !audio_tee_pads.is_empty() {
+        if !branch.audio_tee_pads.is_empty() {
             arm_av_gate_on_keyframe(&id_v, av_gate);
         }
 
         let tee_pad = tee
             .request_pad_simple("src_%u")
             .ok_or_else(|| anyhow!("tee request_pad failed"))?;
+        // Record the pad before linking so a link failure still releases it.
+        branch.tee_pad = Some(tee_pad.clone());
         let sink_pad = queue_v
             .static_pad("sink")
             .ok_or_else(|| anyhow!("queue sink pad"))?;
@@ -1360,39 +1504,69 @@ impl ChannelPipeline {
 
         tracing::info!(
             channel = self.id,
+            role = tag,
             %path,
-            audio_pairs = audio_tee_pads.len(),
+            parse = parse_element,
+            video_tee = branch.video_tee,
+            audio_pairs = branch.audio_tee_pads.len(),
             "attached record branch (no relaunch)"
         );
-        self.rec_branch = Some(Branch {
-            tee_pad,
-            audio_tee_pads,
-            elements,
-        });
         Ok(())
     }
 
     /// Mezz REC from raw tee `t`: DNxHD (.mov) or XAVC Intra (.mxf) + NTP/RTC timecode.
-    fn attach_mezz_recording(&mut self, path: &str) -> Result<()> {
+    ///
+    /// HQ-only: raw tee `t` is the video tee for this branch, so detach releases
+    /// its pad on `t` (not on `e`).
+    fn attach_mezz_recording(&self, role: RecordingRole, path: &str) -> Result<Branch> {
         let pipeline = self
             .pipeline
             .as_ref()
             .ok_or_else(|| anyhow!("no pipeline"))?
             .clone();
+        let mut branch = Branch {
+            role,
+            video_tee: "t",
+            tee_pad: None,
+            audio_tee_pads: Vec::new(),
+            elements: Vec::new(),
+        };
+        match self.build_mezz_recording(&pipeline, &mut branch, path) {
+            Ok(()) => Ok(branch),
+            Err(err) => {
+                tracing::error!(
+                    channel = self.id,
+                    role = role.tag(),
+                    error = %err,
+                    "mezz record attach failed — discarding partial branch"
+                );
+                Self::discard_branch(&pipeline, &branch);
+                Err(err)
+            }
+        }
+    }
+
+    fn build_mezz_recording(
+        &self,
+        pipeline: &gstreamer::Pipeline,
+        branch: &mut Branch,
+        path: &str,
+    ) -> Result<()> {
+        let tag = branch.role.tag();
         let tee = self.raw_tee()?;
         let audio_tee = pipeline.by_name("a");
         let codec = self.record_preset.video_codec.to_ascii_lowercase();
         let bitrate = crate::parse_bitrate(&self.record_preset.video_bitrate).unwrap_or(185_000_000);
 
         let queue_v = gstreamer::ElementFactory::make("queue")
-            .name(format!("q_rec_v_{}", self.id))
+            .name(format!("q_{tag}_v_{}", self.id))
             .property("max-size-buffers", 8u32)
             .property("max-size-bytes", 0u32)
             .property("max-size-time", gstreamer::ClockTime::from_seconds(1))
             .build()
             .context("mezz queue")?;
         let convert = gstreamer::ElementFactory::make("videoconvert")
-            .name(format!("vconv_rec_{}", self.id))
+            .name(format!("vconv_{tag}_{}", self.id))
             .build()
             .context("videoconvert")?;
         let (fps_n, fps_d) = self
@@ -1412,7 +1586,7 @@ impl ChannelPipeline {
             .saturating_div(fps_n as u64)
             .max(1);
         let caps = gstreamer::ElementFactory::make("capsfilter")
-            .name(format!("caps_rec_{}", self.id))
+            .name(format!("caps_{tag}_{}", self.id))
             .property(
                 "caps",
                 gstreamer::Caps::from_str(&format!(
@@ -1424,7 +1598,7 @@ impl ChannelPipeline {
             .context("capsfilter")?;
         // RTC source uses the host clock (chrony/NTP). No PTP on this machine.
         let tc = gstreamer::ElementFactory::make("timecodestamper")
-            .name(format!("tc_rec_{}", self.id))
+            .name(format!("tc_{tag}_{}", self.id))
             .build()
             .context("timecodestamper")?;
         let _ = tc.set_property_from_str("source", "rtc");
@@ -1433,7 +1607,7 @@ impl ChannelPipeline {
         let (enc, parse_opt, mux_name): (gstreamer::Element, Option<gstreamer::Element>, &str) =
             if codec.contains("dnx") {
                 let enc = gstreamer::ElementFactory::make("avenc_dnxhd")
-                    .name(format!("enc_rec_{}", self.id))
+                    .name(format!("enc_{tag}_{}", self.id))
                     .property("bitrate", bitrate as i32)
                     .build()
                     .context("avenc_dnxhd")?;
@@ -1442,7 +1616,7 @@ impl ChannelPipeline {
                 (enc, None, "mxfmux")
             } else if codec.contains("xavc") {
                 let enc = gstreamer::ElementFactory::make("x264enc")
-                    .name(format!("enc_rec_{}", self.id))
+                    .name(format!("enc_{tag}_{}", self.id))
                     .property("bitrate", (bitrate / 1000) as u32)
                     .property("key-int-max", 1u32)
                     .property("bframes", 0u32)
@@ -1451,7 +1625,7 @@ impl ChannelPipeline {
                 let _ = enc.set_property_from_str("speed-preset", "medium");
                 let _ = enc.set_property_from_str("tune", "zerolatency");
                 let parse = gstreamer::ElementFactory::make("h264parse")
-                    .name(format!("parse_rec_{}", self.id))
+                    .name(format!("parse_{tag}_{}", self.id))
                     .build()
                     .context("h264parse")?;
                 let _ = parse.set_property_from_str("config-interval", "-1");
@@ -1462,21 +1636,22 @@ impl ChannelPipeline {
 
         // Hot-attach onto a live tee: reset TIME segment *after* encode so
         // mxfmux sees pts≈0 (raw-side identity alone is not enough for avenc).
-        let id_v = make_mux_ts_align(&format!("id_rec_v_{}", self.id))?;
+        let id_v = make_mux_ts_align(&format!("id_{tag}_v_{}", self.id))?;
 
         let mux = gstreamer::ElementFactory::make(mux_name)
-            .name(format!("mux_rec_{}", self.id))
+            .name(format!("mux_{tag}_{}", self.id))
             .build()
             .with_context(|| format!("make {mux_name}"))?;
         let sink = gstreamer::ElementFactory::make("filesink")
-            .name(format!("fs_rec_{}", self.id))
+            .name(format!("fs_{tag}_{}", self.id))
             .property("location", path)
             .property("sync", false)
             .property("async", false)
             .build()
             .context("filesink")?;
 
-        let mut elements = vec![
+        // First element must stay the video queue (`unlink_branch` relies on it).
+        branch.elements.extend([
             queue_v.clone(),
             convert.clone(),
             caps.clone(),
@@ -1485,7 +1660,7 @@ impl ChannelPipeline {
             id_v.clone(),
             mux.clone(),
             sink.clone(),
-        ];
+        ]);
         pipeline.add_many([
             &queue_v, &convert, &caps, &tc, &enc, &id_v, &mux, &sink,
         ])?;
@@ -1494,10 +1669,11 @@ impl ChannelPipeline {
         caps.link(&tc).context("mezz caps→timecode")?;
         tc.link(&enc).context("mezz timecode→enc")?;
         if let Some(parse) = &parse_opt {
+            branch.elements.push(parse.clone());
             pipeline.add(parse)?;
             // High 4:2:2 Intra profile for XAVC-HD-style Intra.
             let profile_caps = gstreamer::ElementFactory::make("capsfilter")
-                .name(format!("prof_rec_{}", self.id))
+                .name(format!("prof_{tag}_{}", self.id))
                 .property(
                     "caps",
                     gstreamer::Caps::from_str("video/x-h264,profile=high-4:2:2-intra")
@@ -1505,12 +1681,11 @@ impl ChannelPipeline {
                 )
                 .build()
                 .context("profile capsfilter")?;
+            branch.elements.push(profile_caps.clone());
             pipeline.add(&profile_caps)?;
             enc.link(&profile_caps).context("xavc enc→profile")?;
             profile_caps.link(parse).context("xavc profile→parse")?;
             parse.link(&id_v).context("xavc parse→identity")?;
-            elements.push(profile_caps);
-            elements.push(parse.clone());
         } else {
             enc.link(&id_v).context("dnxhd enc→identity")?;
         }
@@ -1520,22 +1695,23 @@ impl ChannelPipeline {
         // Gate PCM until the first video buffer reaches post-encode identity so
         // mxfmux does not open on audio alone with a huge running PTS.
         let av_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut audio_tee_pads = Vec::new();
+        let audio_queue_prefix = format!("q_{tag}_pcm");
         if let Some(a_tee) = audio_tee {
-            match self.link_mezz_pcm(&pipeline, &a_tee, &mux, "rec") {
+            match self.link_mezz_pcm(pipeline, &a_tee, &mux, tag) {
                 Ok((a_pads, audio_els)) => {
                     for el in &audio_els {
-                        if el.name().starts_with("q_rec_pcm") {
+                        if el.name().starts_with(&audio_queue_prefix) {
                             install_av_start_gate(el, av_gate.clone());
                         }
                     }
-                    audio_tee_pads = a_pads;
-                    elements.extend(audio_els);
+                    branch.audio_tee_pads = a_pads;
+                    branch.elements.extend(audio_els);
                     install_mux_av_sync_log("mezz");
                 }
                 Err(err) => {
                     tracing::warn!(
                         channel = self.id,
+                        role = tag,
                         error = %err,
                         "mezz REC video-only — audio attach failed"
                     );
@@ -1543,7 +1719,7 @@ impl ChannelPipeline {
             }
         }
 
-        for el in &elements {
+        for el in &branch.elements {
             el.sync_state_with_parent()
                 .context("sync_state_with_parent mezz record")?;
         }
@@ -1551,7 +1727,7 @@ impl ChannelPipeline {
         // Force CFR timestamps into mxfmux (hot-attach skips a fresh segment).
         arm_mezz_pts_reset(&id_v, frame_duration_ns);
 
-        if !audio_tee_pads.is_empty() {
+        if !branch.audio_tee_pads.is_empty() {
             // Intra codecs: every frame is a keyframe — first buffer opens the gate.
             arm_av_gate_on_keyframe(&id_v, av_gate);
         }
@@ -1559,6 +1735,8 @@ impl ChannelPipeline {
         let tee_pad = tee
             .request_pad_simple("src_%u")
             .ok_or_else(|| anyhow!("raw tee request_pad failed"))?;
+        // Record the pad before linking so a link failure still releases it.
+        branch.tee_pad = Some(tee_pad.clone());
         let sink_pad = queue_v
             .static_pad("sink")
             .ok_or_else(|| anyhow!("queue sink pad"))?;
@@ -1568,18 +1746,15 @@ impl ChannelPipeline {
 
         tracing::info!(
             channel = self.id,
+            role = tag,
             %path,
             codec = %self.record_preset.video_codec,
             mux = mux_name,
             bitrate,
-            audio_pads = audio_tee_pads.len(),
+            video_tee = branch.video_tee,
+            audio_pads = branch.audio_tee_pads.len(),
             "attached mezz record branch (NTP/RTC timecode)"
         );
-        self.rec_branch = Some(Branch {
-            tee_pad,
-            audio_tee_pads,
-            elements,
-        });
         Ok(())
     }
 
@@ -1648,6 +1823,8 @@ impl ChannelPipeline {
     /// `audio_channels >= 8` → four AAC stereo pairs (same as Go/FFmpeg).
     /// `ts_align`: insert `identity single-segment` (needed for REC mp4mux late-join).
     /// Leave false for live MPEG-TS/SRT — gating/restamp there makes PMT video-only.
+    /// `audio` supplies channel count / AAC bitrate (proxy: encode preset, HQ: record preset).
+    /// `tag` (`proxy` / `hq`) prefixes element names so two RECs never collide.
     fn link_program_aac(
         &self,
         pipeline: &gstreamer::Pipeline,
@@ -1655,10 +1832,11 @@ impl ChannelPipeline {
         mux: &gstreamer::Element,
         tag: &str,
         ts_align: bool,
+        audio: &EncodePreset,
     ) -> Result<(Vec<gstreamer::Pad>, Vec<gstreamer::Element>)> {
-        let pairs = aac_stereo_pairs(self.record_preset.audio_channels);
+        let pairs = aac_stereo_pairs(audio.audio_channels);
         let hold_ms = if ts_align { 40u64 } else { 0 };
-        let aac_bps = crate::parse_bitrate(&self.record_preset.audio_bitrate).unwrap_or(192_000);
+        let aac_bps = crate::parse_bitrate(&audio.audio_bitrate).unwrap_or(192_000);
         let mut pads = Vec::with_capacity(pairs);
         let mut els = Vec::new();
 
@@ -1725,32 +1903,40 @@ impl ChannelPipeline {
         Ok((pads, els))
     }
 
-    fn detach_recording(&mut self, finalize: bool) -> Result<()> {
-        let Some(branch) = self.rec_branch.take() else {
+    /// Detach one REC role. The branch remembers which video tee (`e` | `t`) its
+    /// pad came from, so the correct tee releases it.
+    fn detach_recording(&mut self, role: RecordingRole, finalize: bool) -> Result<()> {
+        let taken = match role {
+            RecordingRole::Proxy => self.proxy_branch.take(),
+            RecordingRole::Hq => self.hq_branch.take(),
+        };
+        let Some(branch) = taken else {
             return Ok(());
         };
+        let tag = branch.role.tag();
         let pipeline = self
             .pipeline
             .as_ref()
             .ok_or_else(|| anyhow!("no pipeline"))?
             .clone();
-        let tee = self.encoded_tee()?;
 
-        // 1) Cut data path from tee before touching downstream state.
-        Self::unlink_branch(&pipeline, &tee, &branch);
+        // 1) Cut data path from the video/audio tees before touching downstream state.
+        Self::unlink_branch(&pipeline, &branch);
 
-        // 2) Optional EOS for a cleaner mp4 footer. Do NOT wait on the pipeline bus:
-        //    that raced under multi-channel stop and held the global lock for seconds.
+        // 2) Optional EOS for a cleaner mp4/mxf footer. Do NOT wait on the pipeline
+        //    bus: that raced under multi-channel stop and held the global lock for seconds.
         if finalize {
             use gstreamer::{PadProbeReturn, PadProbeType};
             use std::sync::mpsc;
 
+            let sink_prefix = format!("fs_{tag}_");
+            let queue_prefix = format!("q_{tag}_");
             let (tx, rx) = mpsc::channel::<()>();
             // Keep probe id alive until after recv — dropping it removes the probe.
             let eos_probe = branch
                 .elements
                 .iter()
-                .find(|e| e.name().starts_with("fs_rec"))
+                .find(|e| e.name().starts_with(&sink_prefix))
                 .and_then(|sink| sink.static_pad("sink"))
                 .map(|pad| {
                     let tx = tx.clone();
@@ -1768,10 +1954,10 @@ impl ChannelPipeline {
 
             // Inject EOS *into* each record queue sink (downstream). Element-level
             // send_event(EOS) on a filter goes to its sink pads (upstream) and
-            // never reaches mp4mux — leaving a moov-less "corrupt" file.
+            // never reaches the muxer — leaving a moov-less "corrupt" file.
             for el in &branch.elements {
                 let name = el.name();
-                if name.starts_with("q_rec") {
+                if name.starts_with(&queue_prefix) {
                     if let Some(sink) = el.static_pad("sink") {
                         let _ = sink.send_event(gstreamer::event::Eos::new());
                     }
@@ -1779,9 +1965,14 @@ impl ChannelPipeline {
             }
             // Progressive mp4mux writes moov only on EOS — wait generously.
             match rx.recv_timeout(std::time::Duration::from_millis(3000)) {
-                Ok(()) => tracing::info!(channel = self.id, "record EOS reached filesink"),
+                Ok(()) => tracing::info!(
+                    channel = self.id,
+                    role = tag,
+                    "record EOS reached filesink"
+                ),
                 Err(_) => tracing::warn!(
                     channel = self.id,
+                    role = tag,
                     "record EOS timeout — moov may be missing"
                 ),
             }
@@ -1795,19 +1986,31 @@ impl ChannelPipeline {
         for el in &branch.elements {
             let _ = pipeline.remove(el);
         }
-        tracing::info!(channel = self.id, "detached record branch");
+        tracing::info!(
+            channel = self.id,
+            role = tag,
+            video_tee = branch.video_tee,
+            "detached record branch"
+        );
         Ok(())
     }
 
-    fn unlink_branch(
-        pipeline: &gstreamer::Pipeline,
-        video_tee: &gstreamer::Element,
-        branch: &Branch,
-    ) {
-        if let Some(qpad) = branch.elements.first().and_then(|e| e.static_pad("sink")) {
-            let _ = branch.tee_pad.unlink(&qpad);
+    /// Unlink and release the branch's request pads: the video pad on
+    /// `branch.video_tee` (`e` or `t`) and every AAC/PCM pad on audio tee `a`.
+    fn unlink_branch(pipeline: &gstreamer::Pipeline, branch: &Branch) {
+        if let Some(tee_pad) = branch.tee_pad.as_ref() {
+            if let Some(qpad) = branch.elements.first().and_then(|e| e.static_pad("sink")) {
+                let _ = tee_pad.unlink(&qpad);
+            }
+            match pipeline.by_name(branch.video_tee) {
+                Some(video_tee) => video_tee.release_request_pad(tee_pad),
+                None => tracing::warn!(
+                    tee = branch.video_tee,
+                    role = branch.role.tag(),
+                    "video tee missing while releasing record pad"
+                ),
+            }
         }
-        video_tee.release_request_pad(&branch.tee_pad);
         if let Some(a_tee) = pipeline.by_name("a") {
             for audio_pad in &branch.audio_tee_pads {
                 if let Some(peer) = audio_pad.peer() {
@@ -2059,9 +2262,17 @@ impl ChannelPipeline {
             record_preset: self.record_preset_id.clone(),
             video_bitrate_kbps: self.encode_bitrate.kbps(),
             srt_bitrate_kbps: self.srt_bitrate.as_ref().and_then(|m| m.kbps()),
-            recording: self.recording,
+            recording: self.proxy_recording || self.hq_recording,
+            proxy_recording: self.proxy_recording,
+            hq_recording: self.hq_recording,
             srt: self.srt,
-            recording_path: self.recording_path.clone(),
+            // Backward compat: HQ path wins, otherwise fall back to the proxy path.
+            recording_path: self
+                .hq_recording_path
+                .clone()
+                .or_else(|| self.proxy_recording_path.clone()),
+            proxy_recording_path: self.proxy_recording_path.clone(),
+            hq_recording_path: self.hq_recording_path.clone(),
             srt_url: self.srt_url.clone(),
             last_error: self.last_error.clone(),
             nvenc_slots_used,

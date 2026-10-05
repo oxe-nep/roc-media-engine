@@ -77,7 +77,7 @@ pub fn router(
         .layer(TraceLayer::new_for_http())
 }
 
-/// Background ticker: honor recording schedules.
+/// Background ticker: honor recording schedules (HQ recording only; proxy is manual).
 pub fn spawn_schedule_ticker(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -89,7 +89,7 @@ pub fn spawn_schedule_ticker(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
-                if now >= sched.start_at && now < sched.stop_at && !ch.recording {
+                if now >= sched.start_at && now < sched.stop_at && !ch.hq_recording {
                     let meta = ui.rec_meta(id);
                     let name = if meta.name.is_empty() {
                         None
@@ -112,15 +112,16 @@ pub fn spawn_schedule_ticker(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
                             .to_string_lossy()
                             .into_owned()
                     };
-                    if let Err(e) = orch.start_recording(id, Some(path), name, Some(meta.category))
+                    if let Err(e) =
+                        orch.start_hq_recording(id, Some(path), name, Some(meta.category))
                     {
                         tracing::warn!(channel = id, error = %e, "schedule start failed");
                     } else {
                         ui.mark_recording_started(id);
                         tracing::info!(channel = id, "schedule started recording");
                     }
-                } else if now >= sched.stop_at && ch.recording {
-                    if let Err(e) = orch.stop_recording(id) {
+                } else if now >= sched.stop_at && ch.hq_recording {
+                    if let Err(e) = orch.stop_hq_recording(id) {
                         tracing::warn!(channel = id, error = %e, "schedule stop failed");
                     } else {
                         ui.mark_recording_stopped(id);

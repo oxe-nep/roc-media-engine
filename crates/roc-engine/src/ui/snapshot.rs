@@ -1,10 +1,10 @@
 use chrono::Utc;
-use roc_pipelines::ChannelStatus;
+use roc_pipelines::{ChannelStatus, RecordingRole};
 use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::orchestrator::Orchestrator;
-use crate::ui::state::UiState;
+use crate::ui::state::{RecMeta, UiState};
 
 #[derive(Debug, Serialize)]
 pub struct MeterLevels {
@@ -64,18 +64,68 @@ pub fn stream_json(orch: &Orchestrator, _ui: &UiState, id: u32) -> Option<Value>
     }))
 }
 
-pub fn recording_json(orch: &Orchestrator, ui: &UiState, id: u32) -> Value {
-    let ch = orch.channel(id).ok();
-    let meta = ui.rec_meta(id);
-    let recording = ch.as_ref().map(|c| c.recording).unwrap_or(false);
-    let mut elapsed = 0.0;
-    let mut started_at: Option<String> = None;
+/// One REC role (`proxy` / `hq`) as exposed under `recording_json`.
+struct RoleRec {
+    recording: bool,
+    file_path: Option<String>,
+    elapsed_sec: f64,
+    started_at: Option<String>,
+}
+
+fn role_rec(ch: Option<&roc_pipelines::ChannelSnapshot>, meta: &RecMeta, role: RecordingRole) -> RoleRec {
+    let (recording, file_path) = match (ch, role) {
+        (Some(c), RecordingRole::Proxy) => (c.proxy_recording, c.proxy_recording_path.clone()),
+        (Some(c), RecordingRole::Hq) => (c.hq_recording, c.hq_recording_path.clone()),
+        (None, _) => (false, None),
+    };
+    let mut elapsed_sec = 0.0;
+    let mut started_at = None;
     if recording {
-        if let Some(t) = meta.started_at {
-            elapsed = (Utc::now() - t).num_milliseconds() as f64 / 1000.0;
+        if let Some(t) = meta.started_at_for(role) {
+            elapsed_sec = (Utc::now() - t).num_milliseconds() as f64 / 1000.0;
             started_at = Some(t.to_rfc3339());
         }
     }
+    RoleRec {
+        recording,
+        file_path: if recording { file_path } else { None },
+        elapsed_sec,
+        started_at,
+    }
+}
+
+fn role_json(r: &RoleRec) -> Value {
+    json!({
+        "status": if r.recording { "recording" } else { "idle" },
+        "file_path": r.file_path,
+        "elapsed_sec": r.elapsed_sec,
+        "started_at": r.started_at,
+        "encoding": r.recording,
+    })
+}
+
+/// Recording state for one channel.
+///
+/// Top-level fields keep the legacy single-REC shape (`status`, `file_path`,
+/// `elapsed_sec`, `encoding`) and report HQ first, then proxy. Nested `proxy` /
+/// `hq` objects carry the per-role state for dual recording.
+pub fn recording_json(orch: &Orchestrator, ui: &UiState, id: u32) -> Value {
+    let ch = orch.channel(id).ok();
+    let meta = ui.rec_meta(id);
+    let proxy = role_rec(ch.as_ref(), &meta, RecordingRole::Proxy);
+    let hq = role_rec(ch.as_ref(), &meta, RecordingRole::Hq);
+    let recording = proxy.recording || hq.recording;
+
+    // Legacy top-level values: HQ wins when both run, otherwise whichever is active.
+    let primary = if hq.recording { &hq } else { &proxy };
+    let elapsed = if recording { primary.elapsed_sec } else { 0.0 };
+    let started_at = if recording { primary.started_at.clone() } else { None };
+    let file_path = if recording {
+        primary.file_path.clone()
+    } else {
+        None
+    };
+
     let schedule = meta.schedule.as_ref().map(|s| {
         let now = Utc::now();
         let phase = if now < s.start_at {
@@ -96,9 +146,8 @@ pub fn recording_json(orch: &Orchestrator, ui: &UiState, id: u32) -> Value {
             .map(|c| c.name.clone())
             .unwrap_or_else(|| format!("Channel {id}"))
     } else {
-        meta.name
+        meta.name.clone()
     };
-    let file_path = ch.as_ref().and_then(|c| c.recording_path.clone());
     let bitrate = ch.as_ref().and_then(|c| c.video_bitrate_kbps).unwrap_or(0.0);
     json!({
         "id": id,
@@ -111,6 +160,8 @@ pub fn recording_json(orch: &Orchestrator, ui: &UiState, id: u32) -> Value {
         "bitrate_kbps": bitrate,
         "encoding": recording,
         "schedule": schedule,
+        "proxy": role_json(&proxy),
+        "hq": role_json(&hq),
     })
 }
 

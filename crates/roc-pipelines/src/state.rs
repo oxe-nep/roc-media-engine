@@ -16,6 +16,27 @@ impl Default for ChannelStatus {
     }
 }
 
+/// Which file recording a request targets. A channel can record both at once.
+///
+/// - `Proxy`: always the encoded bitstream from tee `e` (encode preset codec) → `.mp4`.
+/// - `Hq`: the record preset — mezz from raw tee `t`, otherwise encoded from tee `e`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingRole {
+    Proxy,
+    Hq,
+}
+
+impl RecordingRole {
+    /// Short tag used in GStreamer element names and logs (`proxy` / `hq`).
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Proxy => "proxy",
+            Self::Hq => "hq",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelSnapshot {
     pub id: u32,
@@ -31,9 +52,21 @@ pub struct ChannelSnapshot {
     /// Live SRT MPEG-TS bitrate (kbps) while SRT branch is attached.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub srt_bitrate_kbps: Option<f64>,
+    /// True when either the proxy or the HQ recording is active (backward compat).
     pub recording: bool,
+    /// Proxy recording (encoded tee `e` → .mp4) is active.
+    #[serde(default)]
+    pub proxy_recording: bool,
+    /// HQ recording (record preset: mezz from raw tee or encoded) is active.
+    #[serde(default)]
+    pub hq_recording: bool,
     pub srt: bool,
+    /// HQ file path if HQ is recording, otherwise the proxy path (backward compat).
     pub recording_path: Option<String>,
+    #[serde(default)]
+    pub proxy_recording_path: Option<String>,
+    #[serde(default)]
+    pub hq_recording_path: Option<String>,
     pub srt_url: Option<String>,
     pub last_error: Option<String>,
     pub nvenc_slots_used: usize,
