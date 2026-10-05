@@ -550,7 +550,7 @@ export interface PlayoutDevice {
 export interface PlayoutClient {
   id: number;
   name: string;
-	status: "stopped" | "waiting" | "running" | "paused";
+	status: "stopped" | "waiting" | "running" | "paused" | "error";
   device: string;
   device_label?: string;
   format_code: string;

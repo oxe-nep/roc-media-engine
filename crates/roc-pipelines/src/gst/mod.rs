@@ -63,13 +63,12 @@ fn playout_seek_pipeline(pipeline: &gstreamer::Pipeline, position_sec: f64) -> R
     } else {
         0
     };
-    let ok = pipeline.seek_simple(
-        gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
-        gstreamer::ClockTime::from_nseconds(ns),
-    );
-    if !ok {
-        bail!("seek to {position_sec:.3}s failed");
-    }
+    pipeline
+        .seek_simple(
+            gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
+            gstreamer::ClockTime::from_nseconds(ns),
+        )
+        .map_err(|e| anyhow!("seek to {position_sec:.3}s failed: {e}"))?;
     Ok(())
 }
 
@@ -677,6 +676,7 @@ impl PipelineBackend for GstBackend {
     }
 
     fn set_playout_file_control(&self, client_id: &str, control: &PlayoutFileControl) -> Result<()> {
+        use gstreamer::prelude::*;
         let mut map = self.playout.lock();
         let Some(p) = map.get_mut(client_id) else {
             return Ok(());
