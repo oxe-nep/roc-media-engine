@@ -572,12 +572,15 @@ fn playout_stereo_decode(compressed: bool) -> &'static str {
     }
 }
 
-/// File/SRT audio → DeckLink: up to 4 stereo pairs interleaved as 8ch (encode layout).
+/// File/SRT audio → DeckLink: up to 4 stereo pairs folded to 8ch (encode layout).
+///
+/// `interleave` only accepts mono pads, so each stereo track is split then folded.
 fn build_playout_audio(pairs: usize, compressed: bool, asink: &str) -> String {
     let pairs = pairs.clamp(1, 4);
     let dec = playout_stereo_decode(compressed);
     let q = "queue max-size-buffers=0 max-size-bytes=0 max-size-time=0";
     let stereo = "audio/x-raw,format=S16LE,channels=2,rate=48000,layout=interleaved";
+    let mono = "audio/x-raw,format=S16LE,channels=1,rate=48000,layout=interleaved";
     let out8 = "audio/x-raw,format=S16LE,channels=8,rate=48000,layout=interleaved";
     let meter = format!(
         "a. ! queue max-size-buffers=8 leaky=downstream ! \
@@ -592,11 +595,16 @@ fn build_playout_audio(pairs: usize, compressed: bool, asink: &str) -> String {
              {meter}"
         );
     }
-    let mut parts = Vec::with_capacity(pairs + 2);
+    let mut parts = Vec::with_capacity(pairs * 3 + 2);
     parts.push("interleave name=i".to_string());
     for n in 0..pairs {
+        let left = n * 2;
+        let right = left + 1;
         parts.push(format!(
-            "d. ! {q} ! {dec} ! {stereo} ! i.sink_{n}"
+            "d. ! {q} ! {dec} ! audioconvert ! audioresample ! {stereo} ! \
+             deinterleave name=di{n} \
+             di{n}.src_0 ! queue ! {mono} ! i.sink_{left} \
+             di{n}.src_1 ! queue ! {mono} ! i.sink_{right}"
         ));
     }
     parts.push(format!(

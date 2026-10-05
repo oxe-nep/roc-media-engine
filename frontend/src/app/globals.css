@@ -3113,22 +3113,23 @@ body:has(.preview-window-root) .container {
 .decode-body {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 11px;
   min-width: 0;
   flex: 1;
-  padding: 10px 12px 10px;
+  padding: 12px 14px 12px;
 }
 
 .decode-head {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 5px;
   min-width: 0;
+  padding-bottom: 2px;
 }
 
 .decode-card .card-name {
-  font-size: 0.88rem;
-  line-height: 1.25;
+  font-size: 0.9rem;
+  line-height: 1.35;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3136,6 +3137,7 @@ body:has(.preview-window-root) .container {
 
 .decode-card .card-meta {
   font-size: 0.72rem;
+  line-height: 1.35;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3147,6 +3149,7 @@ body:has(.preview-window-root) .container {
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
+  margin-bottom: 2px;
 }
 
 .decode-card .transport {
@@ -3171,6 +3174,7 @@ body:has(.preview-window-root) .container {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  padding-top: 4px;
 }
 
 .decode-stage-spacer {
