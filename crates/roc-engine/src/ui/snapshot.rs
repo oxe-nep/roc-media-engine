@@ -259,6 +259,9 @@ pub fn playout_json(orch: &Orchestrator, ui: &UiState) -> Vec<Value> {
         } else {
             meta.port
         };
+        let duration_sec = p.duration_sec.or(meta.duration_sec);
+        let elapsed_sec = p.position_sec.unwrap_or(0.0);
+        let remain_sec = (duration_sec.unwrap_or(0.0) - elapsed_sec).max(0.0);
         out.push(json!({
             "id": num_id,
             "name": if meta.name.is_empty() { p.name.clone() } else { meta.name.clone() },
@@ -274,13 +277,9 @@ pub fn playout_json(orch: &Orchestrator, ui: &UiState) -> Vec<Value> {
             "loop": meta.loop_file,
             "mark_in_sec": meta.mark_in_sec,
             "mark_out_sec": meta.mark_out_sec,
-            "duration_sec": p.duration_sec.or(meta.duration_sec),
-            "elapsed_sec": p.position_sec.unwrap_or(0.0),
-            "remain_sec": {
-                let dur = p.duration_sec.or(meta.duration_sec).unwrap_or(0.0);
-                let pos = p.position_sec.unwrap_or(0.0);
-                (dur - pos).max(0.0)
-            },
+            "duration_sec": duration_sec,
+            "elapsed_sec": elapsed_sec,
+            "remain_sec": remain_sec,
             "mode": if meta.mode == "listener" { "listener" } else { "caller" },
             "port": port,
             "target": meta.target,
