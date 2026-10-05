@@ -1088,7 +1088,12 @@ impl ChannelPipeline {
         self.srt_bitrate = None;
         if self.srt {
             if let Some(uri) = self.srt_url.as_deref().map(normalize_srt_uri_for_gst) {
-                if let Err(err) = arm_srt_appsink_gate(self.id, &pipeline, &uri, 1) {
+                if let Err(err) = arm_srt_appsink_gate(
+                    self.id,
+                    &pipeline,
+                    &uri,
+                    aac_stereo_pairs(self.preset.audio_channels),
+                ) {
                     let _ = pipeline.set_state(gstreamer::State::Null);
                     return Err(err).context(format!("SRT appsink gate ch{}", self.id));
                 }
@@ -1225,8 +1230,15 @@ impl ChannelPipeline {
             return Ok(());
         }
         // Hot-attach publish path only — REC / UDP / preview keep running.
+        // Wait for all program AAC ES (4 when preset is 8ch) before opening the
+        // MediaMTX gate, otherwise receivers lock onto a stereo-only first PMT.
         disarm_srt_appsink_gate(self.id, &pipeline);
-        arm_srt_appsink_gate(self.id, &pipeline, &gst_url, 1)
+        arm_srt_appsink_gate(
+            self.id,
+            &pipeline,
+            &gst_url,
+            aac_stereo_pairs(self.preset.audio_channels),
+        )
             .context("SRT appsink gate")?;
         let meter = BitrateMeter::new();
         if let Some(src) = pipeline.by_name(&format!("srt_out_{}", self.id)) {
