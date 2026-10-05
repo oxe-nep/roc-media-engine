@@ -1347,7 +1347,7 @@ async fn put_tc_loop(
     let mut meta = st.ui.tc(id);
     let prev_source = meta.source.clone();
     let prev_udp = meta.udp_port;
-    if let Some(s) = body.source {
+    if let Some(ref s) = body.source {
         meta.source = if s.eq_ignore_ascii_case("external") {
             "external".into()
         } else {
