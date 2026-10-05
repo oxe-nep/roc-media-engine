@@ -1146,16 +1146,6 @@ impl ChannelPipeline {
         Ok(())
     }
 
-    /// Backward-compatible alias: `start_recording` = HQ start.
-    pub fn start_recording(&mut self, path: &str) -> Result<()> {
-        self.start_hq_recording(path)
-    }
-
-    /// Backward-compatible alias: `stop_recording` = HQ stop.
-    pub fn stop_recording(&mut self) -> Result<()> {
-        self.stop_hq_recording()
-    }
-
     /// Proxy REC: encoded tee `e` → encode-preset parser → mp4mux (.mp4).
     pub fn start_proxy_recording(&mut self, path: &str) -> Result<()> {
         if self.pipeline.is_none() {

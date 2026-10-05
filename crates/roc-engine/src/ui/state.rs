@@ -309,16 +309,6 @@ impl UiState {
         self.persist();
     }
 
-    /// Backward-compatible: marks the HQ recording as started.
-    pub fn mark_recording_started(&self, id: u32) {
-        self.mark_recording_started_role(id, RecordingRole::Hq);
-    }
-
-    /// Backward-compatible: marks the HQ recording as stopped.
-    pub fn mark_recording_stopped(&self, id: u32) {
-        self.mark_recording_stopped_role(id, RecordingRole::Hq);
-    }
-
     pub fn mark_recording_started_role(&self, id: u32, role: RecordingRole) {
         let mut g = self.inner.lock();
         let e = g.recordings.entry(id).or_default();

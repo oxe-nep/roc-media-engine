@@ -8,8 +8,7 @@ use parking_lot::Mutex;
 use roc_config::{Config, EncodePreset};
 use roc_devices::DeviceProbeReport;
 use roc_pipelines::{
-    ChannelSnapshot, PipelineBackend, PlayoutSnapshot, RecordingRole, WorkflowKind,
-    WorkflowSnapshot,
+    ChannelSnapshot, PipelineBackend, PlayoutSnapshot, RecordingRole,
 };
 
 fn stamp_now() -> String {
@@ -56,12 +55,6 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
-    /// File extension for the channel's current *record* preset (.mp4 / .mxf).
-    /// Same as `recording_ext_for(id, RecordingRole::Hq)`.
-    pub fn recording_ext(&self, id: u32) -> &'static str {
-        self.recording_ext_for(id, RecordingRole::Hq)
-    }
-
     /// File extension for a REC role. Proxy is always the encoded bitstream in
     /// an MP4 container; HQ follows the channel's record preset (.mp4 / .mxf).
     pub fn recording_ext_for(&self, id: u32, role: RecordingRole) -> &'static str {
@@ -379,10 +372,6 @@ impl Orchestrator {
         self.backend.add_webrtc_ice(id, sdp_mline_index, candidate)
     }
 
-    pub fn stop_webrtc_preview(&self, id: u32) -> Result<()> {
-        self.backend.stop_webrtc_preview(id)
-    }
-
     pub fn stop_webrtc_preview_session(&self, id: u32, session_id: &str) -> Result<()> {
         self.backend.stop_webrtc_preview_session(id, session_id)
     }
@@ -460,13 +449,5 @@ impl Orchestrator {
             .into_iter()
             .find(|p| p.id == client_id)
             .context("playout snapshot missing after stop")
-    }
-
-    pub fn set_workflow(&self, channel_id: u32, kind: WorkflowKind, active: bool) -> Result<()> {
-        self.backend.set_workflow(channel_id, kind, active)
-    }
-
-    pub fn list_workflows(&self) -> Vec<WorkflowSnapshot> {
-        self.backend.list_workflows()
     }
 }
