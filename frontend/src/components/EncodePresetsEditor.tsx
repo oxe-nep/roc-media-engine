@@ -15,6 +15,7 @@ import {
   isMezzCodec,
   isNvencCodec,
   isProxyPreset,
+  isRecPreset,
   type PresetEditorKind,
 } from "@/lib/presetRoles";
 
@@ -214,13 +215,10 @@ export default function EncodePresetsEditor({
 
   const visiblePresets = useMemo(() => {
     if (kind === "proxy") return presets.filter(isProxyPreset);
-    // REC editor: show mezz + NVENC (all), but list mezz first.
-    return [...presets].sort((a, b) => {
-      const am = isMezzCodec(a.video_codec) ? 0 : 1;
-      const bm = isMezzCodec(b.video_codec) ? 0 : 1;
-      if (am !== bm) return am - bm;
-      return a.label.localeCompare(b.label);
-    });
+    // REC editor: mezz / HQ file presets only (no live proxy NVENC set).
+    return presets
+      .filter(isRecPreset)
+      .sort((a, b) => a.label.localeCompare(b.label));
   }, [presets, kind]);
 
   const formMezz = isMezzCodec(form.video_codec);

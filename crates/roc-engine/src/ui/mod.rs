@@ -26,6 +26,7 @@ use crate::ui::auth::{require_api_key, ApiKey};
 use crate::ui::playout_media::MediaStore;
 use crate::ui::state::UiState;
 use crate::ui::sysmetrics::Collector as SysCollector;
+use roc_pipelines::RecordingRole;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -77,7 +78,7 @@ pub fn router(
         .layer(TraceLayer::new_for_http())
 }
 
-/// Background ticker: honor recording schedules (HQ recording only; proxy is manual).
+/// Background ticker: honor recording schedules for armed PROXY and/or HQ roles.
 pub fn spawn_schedule_ticker(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -89,49 +90,133 @@ pub fn spawn_schedule_ticker(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
-                if now >= sched.start_at && now < sched.stop_at && !ch.hq_recording {
+
+                if now >= sched.start_at && now < sched.stop_at {
                     let meta = ui.rec_meta(id);
                     let name = if meta.name.is_empty() {
                         None
                     } else {
                         Some(meta.name.clone())
                     };
-                    // Build path under UI recordings root.
-                    let path = {
-                        let root = ui.recordings_dir();
-                        let cat = meta.category.clone();
-                        let _ = std::fs::create_dir_all(root.join(&cat));
-                        let stamp = now.format("%Y%m%d_%H%M%S");
-                        let label = name
-                            .clone()
-                            .unwrap_or_else(|| format!("ch{id}"))
-                            .replace(' ', "_");
-                        let ext = orch.recording_ext(id);
-                        root.join(&cat)
-                            .join(format!("{label}_ch{id}_{stamp}.{ext}"))
-                            .to_string_lossy()
-                            .into_owned()
-                    };
-                    if let Err(e) =
-                        orch.start_hq_recording(id, Some(path), name, Some(meta.category))
-                    {
-                        tracing::warn!(channel = id, error = %e, "schedule start failed");
-                    } else {
-                        ui.mark_recording_started(id);
-                        tracing::info!(channel = id, "schedule started recording");
+                    let stamp = now.format("%Y%m%d_%H%M%S").to_string();
+                    let label = name
+                        .clone()
+                        .unwrap_or_else(|| format!("ch{id}"))
+                        .replace(' ', "_");
+
+                    if sched.arm_hq && !ch.hq_recording {
+                        let path = schedule_recording_path(
+                            &ui,
+                            &orch,
+                            id,
+                            RecordingRole::Hq,
+                            &meta.category,
+                            &label,
+                            &stamp,
+                        );
+                        match orch.start_hq_recording(
+                            id,
+                            Some(path),
+                            name.clone(),
+                            Some(meta.category.clone()),
+                        ) {
+                            Ok(_) => {
+                                ui.mark_recording_started_role(id, RecordingRole::Hq);
+                                tracing::info!(channel = id, "schedule started HQ recording");
+                            }
+                            Err(e) => {
+                                tracing::warn!(channel = id, error = %e, "schedule HQ start failed");
+                            }
+                        }
                     }
-                } else if now >= sched.stop_at && ch.hq_recording {
-                    if let Err(e) = orch.stop_hq_recording(id) {
-                        tracing::warn!(channel = id, error = %e, "schedule stop failed");
-                    } else {
-                        ui.mark_recording_stopped(id);
+
+                    if sched.arm_proxy && !ch.proxy_recording {
+                        let path = schedule_recording_path(
+                            &ui,
+                            &orch,
+                            id,
+                            RecordingRole::Proxy,
+                            &meta.category,
+                            &label,
+                            &stamp,
+                        );
+                        match orch.start_proxy_recording(
+                            id,
+                            Some(path),
+                            name.clone(),
+                            Some(meta.category.clone()),
+                        ) {
+                            Ok(_) => {
+                                ui.mark_recording_started_role(id, RecordingRole::Proxy);
+                                tracing::info!(channel = id, "schedule started proxy recording");
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    channel = id,
+                                    error = %e,
+                                    "schedule proxy start failed"
+                                );
+                            }
+                        }
+                    }
+                } else if now >= sched.stop_at {
+                    let mut still_recording = false;
+
+                    if sched.arm_hq && ch.hq_recording {
+                        match orch.stop_hq_recording(id) {
+                            Ok(_) => {
+                                ui.mark_recording_stopped_role(id, RecordingRole::Hq);
+                                tracing::info!(channel = id, "schedule stopped HQ recording");
+                            }
+                            Err(e) => {
+                                tracing::warn!(channel = id, error = %e, "schedule HQ stop failed");
+                                still_recording = true;
+                            }
+                        }
+                    }
+
+                    if sched.arm_proxy && ch.proxy_recording {
+                        match orch.stop_proxy_recording(id) {
+                            Ok(_) => {
+                                ui.mark_recording_stopped_role(id, RecordingRole::Proxy);
+                                tracing::info!(channel = id, "schedule stopped proxy recording");
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    channel = id,
+                                    error = %e,
+                                    "schedule proxy stop failed"
+                                );
+                                still_recording = true;
+                            }
+                        }
+                    }
+
+                    if !still_recording {
                         ui.clear_schedule(id);
-                        tracing::info!(channel = id, "schedule stopped recording");
+                        tracing::info!(channel = id, "schedule cleared");
                     }
                 }
             }
         }
     });
+}
+
+fn schedule_recording_path(
+    ui: &UiState,
+    orch: &Orchestrator,
+    id: u32,
+    role: RecordingRole,
+    category: &str,
+    label: &str,
+    stamp: &str,
+) -> String {
+    let root = ui.recordings_dir();
+    let _ = std::fs::create_dir_all(root.join(category));
+    root.join(category)
+        .join(orch.recording_file_name(id, role, label, stamp))
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Fix unused import warning if Response unused in some builds.

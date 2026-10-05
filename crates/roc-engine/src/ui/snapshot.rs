@@ -139,6 +139,8 @@ pub fn recording_json(orch: &Orchestrator, ui: &UiState, id: u32) -> Value {
             "start_at": s.start_at.to_rfc3339(),
             "stop_at": s.stop_at.to_rfc3339(),
             "phase": phase,
+            "arm_proxy": s.arm_proxy,
+            "arm_hq": s.arm_hq,
         })
     });
     let name = if meta.name.is_empty() {

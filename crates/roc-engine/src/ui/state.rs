@@ -93,6 +93,16 @@ pub struct RecSchedule {
     pub stop_at: DateTime<Utc>,
     #[serde(default)]
     pub phase: Option<String>,
+    /// Arm PROXY recording for this schedule window.
+    #[serde(default)]
+    pub arm_proxy: bool,
+    /// Arm HQ recording for this schedule window (default true for legacy schedules).
+    #[serde(default = "default_true")]
+    pub arm_hq: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -269,13 +279,22 @@ impl UiState {
         self.persist();
     }
 
-    pub fn set_schedule(&self, id: u32, start: DateTime<Utc>, stop: DateTime<Utc>) {
+    pub fn set_schedule(
+        &self,
+        id: u32,
+        start: DateTime<Utc>,
+        stop: DateTime<Utc>,
+        arm_proxy: bool,
+        arm_hq: bool,
+    ) {
         let mut g = self.inner.lock();
         let e = g.recordings.entry(id).or_default();
         e.schedule = Some(RecSchedule {
             start_at: start,
             stop_at: stop,
             phase: Some("pending".into()),
+            arm_proxy,
+            arm_hq,
         });
         drop(g);
         self.persist();
@@ -315,13 +334,7 @@ impl UiState {
         if let Some(e) = g.recordings.get_mut(&id) {
             match role {
                 RecordingRole::Proxy => e.started_at_proxy = None,
-                RecordingRole::Hq => {
-                    e.started_at_hq = None;
-                    // Schedules drive HQ only.
-                    if let Some(s) = e.schedule.as_mut() {
-                        s.phase = None;
-                    }
-                }
+                RecordingRole::Hq => e.started_at_hq = None,
             }
         }
     }

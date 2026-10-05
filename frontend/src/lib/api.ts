@@ -157,6 +157,10 @@ export interface RecordingSchedule {
   start_at: string;
   stop_at: string;
   phase?: "pending" | "waiting" | "active";
+  /** When true, schedule starts/stops proxy recording. */
+  arm_proxy?: boolean;
+  /** When true, schedule starts/stops HQ recording. Defaults to true. */
+  arm_hq?: boolean;
 }
 
 export interface RecordingRoleInfo {
@@ -251,10 +255,16 @@ export async function setRecordingSchedule(
   id: number,
   startAt: string,
   stopAt: string,
+  arms?: { arm_proxy?: boolean; arm_hq?: boolean },
 ): Promise<RecordingInfo> {
   const res = await apiFetch(`/api/recordings/${id}/schedule`, {
     method: "PUT",
-    body: JSON.stringify({ start_at: startAt, stop_at: stopAt }),
+    body: JSON.stringify({
+      start_at: startAt,
+      stop_at: stopAt,
+      arm_proxy: arms?.arm_proxy ?? false,
+      arm_hq: arms?.arm_hq ?? true,
+    }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

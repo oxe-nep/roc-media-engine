@@ -300,6 +300,14 @@ async fn set_rec_category(
 struct ScheduleBody {
     start_at: DateTime<Utc>,
     stop_at: DateTime<Utc>,
+    #[serde(default)]
+    arm_proxy: bool,
+    #[serde(default = "default_arm_hq")]
+    arm_hq: bool,
+}
+
+fn default_arm_hq() -> bool {
+    true
 }
 
 async fn set_schedule(
@@ -310,7 +318,11 @@ async fn set_schedule(
     if body.stop_at <= body.start_at {
         return Err(UiError::bad("stop_at must be after start_at"));
     }
-    st.ui.set_schedule(id, body.start_at, body.stop_at);
+    if !body.arm_proxy && !body.arm_hq {
+        return Err(UiError::bad("arm at least proxy or hq"));
+    }
+    st.ui
+        .set_schedule(id, body.start_at, body.stop_at, body.arm_proxy, body.arm_hq);
     Ok(Json(snapshot::recording_json(
         st.orch.as_ref(),
         st.ui.as_ref(),

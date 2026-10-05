@@ -55,8 +55,12 @@ function formatSchedBadge(sch: RecordingSchedule): string {
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
   };
   const range = `${hm(sch.start_at)}–${hm(sch.stop_at)}`;
-  if (sch.phase === "waiting") return `SCHED wait · ${range}`;
-  return `SCHED ${range}`;
+  const arms: string[] = [];
+  if (sch.arm_proxy) arms.push("PROXY");
+  if (sch.arm_hq ?? true) arms.push("HQ");
+  const armLabel = arms.length ? arms.join("+") : "HQ";
+  if (sch.phase === "waiting") return `SCHED ${armLabel} wait · ${range}`;
+  return `SCHED ${armLabel} · ${range}`;
 }
 
 export default function StreamGrid() {
@@ -220,12 +224,12 @@ export default function StreamGrid() {
                     <div className="thumb-badges">
                       {proxyRecOn && (
                         <div className="rec-badge" title="Proxy recording">
-                          PROXY · {formatElapsed(rec?.proxy?.elapsed_sec)}
+                          REC PROXY · {formatElapsed(rec?.proxy?.elapsed_sec)}
                         </div>
                       )}
                       {hqRecOn && (
                         <div className="rec-badge" title="HQ recording">
-                          HQ · {formatElapsed(rec?.hq?.elapsed_sec)}
+                          REC HQ · {formatElapsed(rec?.hq?.elapsed_sec)}
                         </div>
                       )}
                       {srtOn && (
@@ -313,7 +317,7 @@ export default function StreamGrid() {
                               : `Start proxy recording (${proxyLabel || "proxy"})`
                         }
                       >
-                        {proxyRecBusy[s.id] ? "…" : "PROXY"}
+                        {proxyRecBusy[s.id] ? "…" : "REC PROXY"}
                       </button>
                       <button
                         type="button"
@@ -328,7 +332,7 @@ export default function StreamGrid() {
                               : `Start HQ recording (${recLabel || "HQ"})`
                         }
                       >
-                        {hqRecBusy[s.id] ? "…" : "HQ"}
+                        {hqRecBusy[s.id] ? "…" : "REC HQ"}
                       </button>
                       <button
                         type="button"

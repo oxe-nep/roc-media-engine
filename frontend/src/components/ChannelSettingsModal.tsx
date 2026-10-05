@@ -23,7 +23,7 @@ import {
   isCaptureOn,
 } from "@/lib/api";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
-import { isProxyPreset } from "@/lib/presetRoles";
+import { isProxyPreset, isRecPreset } from "@/lib/presetRoles";
 
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
@@ -78,6 +78,8 @@ export default function ChannelSettingsModal({
   const [srtPassDirty, setSrtPassDirty] = useState(false);
   const [schedStart, setSchedStart] = useState("");
   const [schedStop, setSchedStop] = useState("");
+  const [schedArmProxy, setSchedArmProxy] = useState(true);
+  const [schedArmHq, setSchedArmHq] = useState(true);
   const [schedBusy, setSchedBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [logsOpen, setLogsOpen] = useState(false);
@@ -92,7 +94,7 @@ export default function ChannelSettingsModal({
   const channelId = stream?.id;
   const srtStreaming = srt?.status === "streaming";
   const proxyPresets = presets.filter(isProxyPreset);
-  const recPresets = presets;
+  const recPresets = presets.filter(isRecPreset);
 
   // Hydrate once when the modal opens for a channel — not on every 1s poll.
   useEffect(() => {
@@ -100,7 +102,12 @@ export default function ChannelSettingsModal({
     const nextName = recording?.name || `ch${channelId}`;
     const nextCategory = recording?.category || "_unsorted";
     const nextProxy = stream.encode_preset || "";
-    const nextRec = stream.record_preset || stream.encode_preset || "";
+    const nextRecRaw = stream.record_preset || stream.encode_preset || "";
+    const hqIds = new Set(presets.filter(isRecPreset).map((p) => p.id));
+    const nextRec =
+      (nextRecRaw && hqIds.has(nextRecRaw) && nextRecRaw) ||
+      presets.find(isRecPreset)?.id ||
+      nextRecRaw;
     setName(nextName);
     setCategory(nextCategory);
     setProxyPreset(nextProxy);
@@ -119,10 +126,14 @@ export default function ChannelSettingsModal({
     if (recording?.schedule) {
       setSchedStart(toLocalInput(recording.schedule.start_at));
       setSchedStop(toLocalInput(recording.schedule.stop_at));
+      setSchedArmProxy(recording.schedule.arm_proxy ?? false);
+      setSchedArmHq(recording.schedule.arm_hq ?? true);
     } else {
       const d = defaultScheduleInputs();
       setSchedStart(d.start);
       setSchedStop(d.stop);
+      setSchedArmProxy(true);
+      setSchedArmHq(true);
     }
 
     fetchSrt(channelId)
@@ -303,7 +314,13 @@ export default function ChannelSettingsModal({
       if (!(stop.getTime() > start.getTime())) {
         throw new Error("Stop must be after start");
       }
-      await setRecordingSchedule(stream.id, start.toISOString(), stop.toISOString());
+      if (!schedArmProxy && !schedArmHq) {
+        throw new Error("Arm at least PROXY or HQ");
+      }
+      await setRecordingSchedule(stream.id, start.toISOString(), stop.toISOString(), {
+        arm_proxy: schedArmProxy,
+        arm_hq: schedArmHq,
+      });
       onSaved();
     } catch (e) {
       setError(String(e));
@@ -320,6 +337,8 @@ export default function ChannelSettingsModal({
       const d = defaultScheduleInputs();
       setSchedStart(d.start);
       setSchedStop(d.stop);
+      setSchedArmProxy(true);
+      setSchedArmHq(true);
       onSaved();
     } catch (e) {
       setError(String(e));
@@ -409,7 +428,7 @@ export default function ChannelSettingsModal({
           </label>
 
           <label className="presets-field">
-            <span>REC preset</span>
+            <span>HQ / REC preset</span>
             <select
               value={recPreset}
               onChange={(e) => setRecPreset(e.target.value)}
@@ -450,7 +469,8 @@ export default function ChannelSettingsModal({
             </span>
           </div>
           <p className="channel-settings-hint">
-            One-shot record window. If there is no signal at start, recording waits until signal or stop.
+            One-shot record window. Arm PROXY and/or HQ — if there is no signal at start,
+            recording waits until signal or stop.
           </p>
           <div className="channel-settings-form">
             <label className="presets-field">
@@ -471,6 +491,26 @@ export default function ChannelSettingsModal({
                 disabled={schedBusy}
               />
             </label>
+            <div className="channel-settings-arms" role="group" aria-label="Schedule arms">
+              <label className="channel-settings-arm">
+                <input
+                  type="checkbox"
+                  checked={schedArmProxy}
+                  onChange={(e) => setSchedArmProxy(e.target.checked)}
+                  disabled={schedBusy}
+                />
+                <span>Arm PROXY</span>
+              </label>
+              <label className="channel-settings-arm">
+                <input
+                  type="checkbox"
+                  checked={schedArmHq}
+                  onChange={(e) => setSchedArmHq(e.target.checked)}
+                  disabled={schedBusy}
+                />
+                <span>Arm HQ</span>
+              </label>
+            </div>
           </div>
           <div className="channel-settings-actions">
             <button type="button" className="badge" onClick={clearSchedule} disabled={schedBusy || !recording?.schedule}>

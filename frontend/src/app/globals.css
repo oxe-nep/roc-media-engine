@@ -1101,6 +1101,30 @@ html {
   line-height: 1.35;
 }
 
+.channel-settings-arms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 4px 0 2px;
+}
+
+.channel-settings-arm {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.72rem;
+  font-weight: 650;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.channel-settings-arm input {
+  width: 0.95rem;
+  height: 0.95rem;
+  accent-color: #c83a2e;
+}
+
 .channel-settings-lock {
   margin-bottom: 10px;
   padding: 8px 10px;
@@ -1666,18 +1690,19 @@ html {
 .rec-btn {
   flex-shrink: 0;
   height: 1.7rem;
-  min-width: 3.35rem;
-  padding: 0 8px;
+  min-width: 4.6rem;
+  padding: 0 7px;
   border-radius: 5px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(255, 255, 255, 0.04);
-  font-size: 0.62rem;
+  font-size: 0.58rem;
   font-weight: 800;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   cursor: pointer;
   transition: var(--transition);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .rec-btn:disabled {
