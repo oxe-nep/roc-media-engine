@@ -83,20 +83,6 @@ pub fn build_launch_opts(
         .with_context(|| format!("playout {client_id} not in config"))?;
 
     let snap = orch.list_channels().into_iter().find(|c| c.id == id);
-    let input_mode = snap
-        .as_ref()
-        .and_then(|s| s.locked_mode.clone())
-        .filter(|m| !m.is_empty() && m != "auto")
-        .or_else(|| {
-            ch.mode
-                .clone()
-                .filter(|m| !m.is_empty() && !m.eq_ignore_ascii_case("auto"))
-        })
-        .unwrap_or_else(|| "1080p50".into());
-
-    // OUT must match IN (1080i in → 1080i DeckLink + SRT). Do not map via playout
-    // format_code (that path historically forced progressive for decode).
-    let output_mode = input_mode.clone();
 
     if ch.device.trim().is_empty() {
         bail!("encode channel {id} has no DeckLink device");
@@ -104,6 +90,42 @@ pub fn build_launch_opts(
     if play.device.trim().is_empty() {
         bail!("decode {id} has no DeckLink device");
     }
+
+    // Prefer live probe so OUT/SRT match the actual IN (locked_mode is cleared when
+    // encode stops for exclusive TC). Fall back to last lock / config / 1080i50.
+    let input_mode = match roc_pipelines::probe_input_format(&ch.device, 4000) {
+        Ok(fmt) => {
+            tracing::info!(
+                channel = id,
+                mode = %fmt.mode,
+                format = %fmt.summary(),
+                "TC probed input format"
+            );
+            fmt.mode
+        }
+        Err(err) => {
+            let fallback = snap
+                .as_ref()
+                .and_then(|s| s.locked_mode.clone())
+                .filter(|m| !m.is_empty() && m != "auto")
+                .or_else(|| {
+                    ch.mode
+                        .clone()
+                        .filter(|m| !m.is_empty() && !m.eq_ignore_ascii_case("auto"))
+                })
+                .unwrap_or_else(|| "1080i50".into());
+            tracing::warn!(
+                channel = id,
+                error = %err,
+                mode = %fallback,
+                "TC input probe failed — using fallback mode"
+            );
+            fallback
+        }
+    };
+
+    // OUT must match IN (1080i in → 1080i DeckLink + SRT).
+    let output_mode = input_mode.clone();
 
     let preset_id = snap
         .as_ref()
