@@ -318,9 +318,6 @@ async fn set_schedule(
     if body.stop_at <= body.start_at {
         return Err(UiError::bad("stop_at must be after start_at"));
     }
-    if !body.arm_proxy && !body.arm_hq {
-        return Err(UiError::bad("arm at least proxy or hq"));
-    }
     st.ui
         .set_schedule(id, body.start_at, body.stop_at, body.arm_proxy, body.arm_hq);
     Ok(Json(snapshot::recording_json(

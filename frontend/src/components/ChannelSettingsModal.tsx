@@ -302,9 +302,6 @@ export default function ChannelSettingsModal({
     if (!(stop.getTime() > start.getTime())) {
       throw new Error("Stop must be after start");
     }
-    if (!armProxy && !armHq) {
-      throw new Error("Arm at least PROXY or HQ");
-    }
     await setRecordingSchedule(stream.id, start.toISOString(), stop.toISOString(), {
       arm_proxy: armProxy,
       arm_hq: armHq,
@@ -312,18 +309,31 @@ export default function ChannelSettingsModal({
     onSaved();
   };
 
+  const clearScheduleState = () => {
+    const d = defaultScheduleInputs();
+    setSchedStart(d.start);
+    setSchedStop(d.stop);
+    setSchedArmProxy(false);
+    setSchedArmHq(false);
+  };
+
   const toggleScheduleArm = async (role: "proxy" | "hq") => {
     const nextProxy = role === "proxy" ? !schedArmProxy : schedArmProxy;
     const nextHq = role === "hq" ? !schedArmHq : schedArmHq;
-    if (!nextProxy && !nextHq) {
-      setError("Arm at least PROXY or HQ");
-      return;
-    }
     setSchedBusy(true);
     setError(null);
     try {
       if (role === "proxy") setSchedArmProxy(nextProxy);
       else setSchedArmHq(nextHq);
+
+      // Both disarmed = clear schedule (same as Clear).
+      if (!nextProxy && !nextHq) {
+        await clearRecordingSchedule(stream.id);
+        clearScheduleState();
+        onSaved();
+        return;
+      }
+
       await persistSchedule(nextProxy, nextHq);
     } catch (e) {
       // Revert optimistic toggle on failure.
@@ -340,11 +350,7 @@ export default function ChannelSettingsModal({
     setError(null);
     try {
       await clearRecordingSchedule(stream.id);
-      const d = defaultScheduleInputs();
-      setSchedStart(d.start);
-      setSchedStop(d.stop);
-      setSchedArmProxy(false);
-      setSchedArmHq(false);
+      clearScheduleState();
       onSaved();
     } catch (e) {
       setError(String(e));
