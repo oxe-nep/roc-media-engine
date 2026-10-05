@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use roc_pipelines::{
-    tc_sink_mode, TcLoopLaunchOpts, TcLoopPosition, TcLoopSnapshot, TcLoopSource, TcLoopStatus,
+    TcLoopLaunchOpts, TcLoopPosition, TcLoopSnapshot, TcLoopSource, TcLoopStatus,
 };
 use serde_json::{json, Value};
 
@@ -15,6 +15,7 @@ pub fn effective_udp_port(meta: &TcMeta, id: u32) -> u16 {
 
 pub fn tc_info_json(id: u32, meta: &TcMeta, live: Option<&TcLoopSnapshot>) -> Value {
     let udp = effective_udp_port(meta, id);
+    let (x, y) = meta.resolved_xy();
     if let Some(s) = live {
         return json!({
             "id": id,
@@ -30,6 +31,8 @@ pub fn tc_info_json(id: u32, meta: &TcMeta, live: Option<&TcLoopSnapshot>) -> Va
             "fontsize": s.fontsize,
             "opacity": s.opacity,
             "position": s.position.as_str(),
+            "x": s.x,
+            "y": s.y,
             "error": s.error,
             "timecode": s.timecode,
         });
@@ -43,6 +46,8 @@ pub fn tc_info_json(id: u32, meta: &TcMeta, live: Option<&TcLoopSnapshot>) -> Va
         "fontsize": meta.fontsize,
         "opacity": meta.opacity,
         "position": meta.position,
+        "x": x,
+        "y": y,
         "error": if meta.enabled { Value::String("TC not running".into()) } else { Value::Null },
         "timecode": Value::Null,
     })
@@ -89,12 +94,9 @@ pub fn build_launch_opts(
         })
         .unwrap_or_else(|| "1080p50".into());
 
-    let format_code = play
-        .format_code
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "Hp50".into());
-    let output_mode = tc_sink_mode(&format_code);
+    // OUT must match IN (1080i in → 1080i DeckLink + SRT). Do not map via playout
+    // format_code (that path historically forced progressive for decode).
+    let output_mode = input_mode.clone();
 
     if ch.device.trim().is_empty() {
         bail!("encode channel {id} has no DeckLink device");
@@ -103,6 +105,20 @@ pub fn build_launch_opts(
         bail!("decode {id} has no DeckLink device");
     }
 
+    let preset_id = snap
+        .as_ref()
+        .map(|s| s.encode_preset.as_str())
+        .or(ch.encode_preset.as_deref())
+        .unwrap_or("");
+    let preset = orch
+        .list_presets()
+        .into_iter()
+        .find(|(pid, _)| !preset_id.is_empty() && pid == preset_id)
+        .or_else(|| orch.list_presets().into_iter().next())
+        .map(|(_, p)| p)
+        .context("no encode/proxy preset configured")?;
+
+    let (x, y) = meta.resolved_xy();
     Ok(TcLoopLaunchOpts {
         input_device: ch.device.clone(),
         output_device: play.device.clone(),
@@ -110,9 +126,12 @@ pub fn build_launch_opts(
         output_mode,
         source: TcLoopSource::parse(&meta.source),
         udp_port: effective_udp_port(meta, id),
-        fontsize: meta.fontsize.clamp(24, 256),
+        fontsize: meta.fontsize.clamp(12, 200),
         opacity: meta.opacity.clamp(0.15, 1.0),
-        position: TcLoopPosition::parse(&meta.position),
+        position: TcLoopPosition::nearest(x, y),
+        x,
+        y,
+        preset,
         hls_dir,
     })
 }

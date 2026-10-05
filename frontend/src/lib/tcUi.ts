@@ -16,8 +16,8 @@ export function tcSourceStatusLabel(source?: TcLoopSource): string {
 /** Card footer status: source prefix + timecode / state. */
 export function tcCardStatusMeta(tc?: TcLoopInfo, live?: boolean): string {
   const src = tcSourceStatusLabel(tc?.source);
-  const code = tc?.timecode?.trim();
-  const hasCode = !!code && code !== "--:--:--";
+  const code = normalizeHms(tc?.timecode);
+  const hasCode = !!code;
 
   if (live && hasCode) return `${src} · ${code}`;
   if (hasCode && tcIsActive(tc)) return `${src} · ${code}`;
@@ -27,6 +27,17 @@ export function tcCardStatusMeta(tc?: TcLoopInfo, live?: boolean): string {
   if (tc?.status === "error") return `${src} · err`;
   if (tcIsActive(tc)) return `${src} · …`;
   return "Off";
+}
+
+/** Keep HH:MM:SS only (drop frames if present). */
+function normalizeHms(raw?: string): string | null {
+  const s = raw?.trim();
+  if (!s || s === "--:--:--") return null;
+  const parts = s.split(/[:;.]/);
+  if (parts.length < 3) return s;
+  const [h, m, sec] = parts;
+  if (!/^\d{1,2}$/.test(h) || !/^\d{1,2}$/.test(m) || !/^\d{1,2}$/.test(sec)) return s;
+  return `${h.padStart(2, "0")}:${m.padStart(2, "0")}:${sec.padStart(2, "0")}`;
 }
 
 export function tcSourceLabel(

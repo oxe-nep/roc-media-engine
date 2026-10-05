@@ -220,19 +220,30 @@ pub struct TcMeta {
     pub opacity: f64,
     #[serde(default = "default_tc_position")]
     pub position: String,
+    /// Normalized overlay anchor (0 = left/top … 1 = right/bottom).
+    #[serde(default = "default_tc_x")]
+    pub x: f64,
+    #[serde(default = "default_tc_y")]
+    pub y: f64,
 }
 
 fn default_tc_source() -> String {
     "tod".into()
 }
 fn default_tc_fontsize() -> u32 {
-    96
+    48
 }
 fn default_tc_opacity() -> f64 {
     0.9
 }
 fn default_tc_position() -> String {
     "top_left".into()
+}
+fn default_tc_x() -> f64 {
+    0.04
+}
+fn default_tc_y() -> f64 {
+    0.04
 }
 
 impl Default for TcMeta {
@@ -244,6 +255,8 @@ impl Default for TcMeta {
             fontsize: default_tc_fontsize(),
             opacity: default_tc_opacity(),
             position: default_tc_position(),
+            x: default_tc_x(),
+            y: default_tc_y(),
         }
     }
 }
@@ -255,6 +268,11 @@ impl TcMeta {
         } else {
             9300 + channel_id as u16
         }
+    }
+
+    /// Resolve x/y — clamped freeform anchor.
+    pub fn resolved_xy(&self) -> (f64, f64) {
+        (self.x.clamp(0.0, 1.0), self.y.clamp(0.0, 1.0))
     }
 }
 

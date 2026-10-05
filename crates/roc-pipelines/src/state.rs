@@ -204,6 +204,37 @@ impl TcLoopPosition {
             _ => Self::TopLeft,
         }
     }
+
+    /// Default normalized top-left anchor for a corner/center preset.
+    pub fn default_xy(self) -> (f64, f64) {
+        match self {
+            Self::TopLeft => (0.04, 0.04),
+            Self::TopRight => (0.72, 0.04),
+            Self::Center => (0.38, 0.44),
+            Self::BottomLeft => (0.04, 0.86),
+            Self::BottomRight => (0.72, 0.86),
+        }
+    }
+
+    /// Nearest preset for a freeform (x, y) — used for legacy `position` field.
+    pub fn nearest(x: f64, y: f64) -> Self {
+        let pts = [
+            Self::TopLeft,
+            Self::TopRight,
+            Self::Center,
+            Self::BottomLeft,
+            Self::BottomRight,
+        ];
+        pts.into_iter()
+            .min_by(|a, b| {
+                let (ax, ay) = a.default_xy();
+                let (bx, by) = b.default_xy();
+                let da = (ax - x).hypot(ay - y);
+                let db = (bx - x).hypot(by - y);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(Self::TopLeft)
+    }
 }
 
 impl TcLoopSource {
@@ -232,11 +263,27 @@ pub struct TcLoopSnapshot {
     pub fontsize: u32,
     pub opacity: f64,
     pub position: TcLoopPosition,
+    /// Normalized overlay anchor (0 = left/top, 1 = right/bottom).
+    #[serde(default = "default_tc_x")]
+    pub x: f64,
+    #[serde(default = "default_tc_y")]
+    pub y: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timecode: Option<String>,
-    /// Peak levels for TC preview meters (playout bus).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_peaks: Option<Vec<f64>>,
+    /// SRT publish armed on the TC proxy encode path.
+    #[serde(default)]
+    pub srt: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_bitrate_kbps: Option<f64>,
+}
+
+fn default_tc_x() -> f64 {
+    0.04
+}
+fn default_tc_y() -> f64 {
+    0.04
 }

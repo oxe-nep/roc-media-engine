@@ -46,16 +46,20 @@ fn drain_playout_bus_error(pipeline: &gstreamer::Pipeline) -> Option<String> {
     last
 }
 
-fn apply_playout_level(peaks: &mut [f64; 2], s: &gstreamer::StructureRef) {
+fn apply_level_peaks(peaks: &mut [f64], s: &gstreamer::StructureRef) {
     let Ok(arr) = s.get::<gstreamer::glib::ValueArray>("peak") else {
         return;
     };
-    for (i, val) in arr.iter().enumerate().take(2) {
+    for (i, val) in arr.iter().enumerate().take(peaks.len()) {
         let Ok(db) = val.get::<f64>() else {
             continue;
         };
         peaks[i] = if db.is_finite() { db.max(-90.0) } else { -90.0 };
     }
+}
+
+fn apply_playout_level(peaks: &mut [f64; 2], s: &gstreamer::StructureRef) {
+    apply_level_peaks(peaks, s);
 }
 
 fn poll_tc_runtime(rt: &mut TcLoopRuntime) {
@@ -80,7 +84,7 @@ fn poll_tc_runtime(rt: &mut TcLoopRuntime) {
             MessageView::Element(el) => {
                 let Some(s) = el.structure() else { continue };
                 if s.name() == "level" {
-                    apply_playout_level(&mut rt.audio_peaks, s);
+                    apply_level_peaks(&mut rt.audio_peaks, s);
                     rt.last_level_at = Some(std::time::Instant::now());
                 }
             }
@@ -89,7 +93,7 @@ fn poll_tc_runtime(rt: &mut TcLoopRuntime) {
     }
     if let Some(at) = rt.last_level_at {
         if at.elapsed() > std::time::Duration::from_millis(500) {
-            rt.audio_peaks = [-90.0; 2];
+            rt.audio_peaks = [-90.0; 8];
         }
     }
 }
@@ -121,9 +125,13 @@ fn tc_runtime_snapshot(id: u32, rt: &TcLoopRuntime) -> TcLoopSnapshot {
         fontsize: rt.fontsize,
         opacity: rt.opacity,
         position: rt.position,
+        x: rt.x,
+        y: rt.y,
         error: rt.last_error.clone(),
         timecode,
         audio_peaks: Some(rt.audio_peaks.to_vec()),
+        srt: rt.srt,
+        srt_bitrate_kbps: rt.srt_bitrate.as_ref().and_then(|m| m.kbps()),
     }
 }
 
@@ -136,12 +144,83 @@ fn wall_clock_hms() -> String {
     // Local offset is host TZ; for burn-in display we use UTC+local via libc is overkill —
     // clockoverlay itself uses local TZ; API timecode is approximate wall UTC for cards.
     let tod = secs % 86_400;
-    format!(
-        "{:02}:{:02}:{:02}",
-        tod / 3600,
-        (tod % 3600) / 60,
-        tod % 60
-    )
+    let h = tod / 3600;
+    let m = (tod % 3600) / 60;
+    let s = tod % 60;
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
+fn start_tc_srt(rt: &mut TcLoopRuntime, channel_id: u32, url: &str) -> Result<()> {
+    use gstreamer::prelude::*;
+    let pipeline = rt
+        .pipeline
+        .as_ref()
+        .ok_or_else(|| anyhow!("TC not running"))?
+        .clone();
+    if pipeline.by_name("srt_in").is_none() {
+        bail!("TC SRT appsink missing");
+    }
+    let gst_url = capture::normalize_srt_uri_for_gst(url);
+    if rt.srt {
+        if let Some(sink) = pipeline.by_name(&format!("srt_sink_{channel_id}")) {
+            sink.set_property("uri", &gst_url);
+            tracing::info!(channel_id, %gst_url, "updated TC SRT sink URI");
+        }
+        return Ok(());
+    }
+    capture::disarm_srt_appsink_gate(channel_id, &pipeline);
+    capture::arm_srt_appsink_gate(channel_id, &pipeline, &gst_url, rt.aac_pairs.max(1))
+        .context("TC SRT appsink gate")?;
+    let meter = self::bitrate::BitrateMeter::new();
+    if let Some(src) = pipeline.by_name(&format!("srt_out_{channel_id}")) {
+        if let Some(pad) = src.static_pad("src") {
+            let _ = meter.attach_probe(&pad);
+        }
+    }
+    rt.srt_bitrate = Some(meter);
+    rt.srt = true;
+    tracing::info!(channel_id, %url, gst_uri = %gst_url, "TC SRT publish attached");
+    Ok(())
+}
+
+fn stop_tc_srt(rt: &mut TcLoopRuntime, channel_id: u32) {
+    if !rt.srt {
+        return;
+    }
+    if let Some(pipeline) = rt.pipeline.as_ref() {
+        capture::disarm_srt_appsink_gate(channel_id, pipeline);
+    }
+    rt.srt = false;
+    rt.srt_bitrate = None;
+    tracing::info!(channel_id, "TC SRT publish detached");
+}
+
+fn start_tc_webrtc(
+    rt: &mut TcLoopRuntime,
+    channel_id: u32,
+    pair: u8,
+    signal_tx: crate::PreviewSignalTx,
+) -> Result<String> {
+    stop_tc_webrtc(rt);
+    let pipeline = rt
+        .pipeline
+        .as_ref()
+        .ok_or_else(|| anyhow!("TC not running"))?
+        .clone();
+    let preview =
+        preview_webrtc::WebRtcPreview::attach(&pipeline, channel_id, pair, signal_tx)?;
+    let sid = preview.session_id.clone();
+    rt.webrtc_preview = Some(preview);
+    Ok(sid)
+}
+
+fn stop_tc_webrtc(rt: &mut TcLoopRuntime) {
+    let Some(preview) = rt.webrtc_preview.take() else {
+        return;
+    };
+    if let Some(pipeline) = rt.pipeline.as_ref() {
+        preview.detach(pipeline);
+    }
 }
 
 fn playout_seek_pipeline(
@@ -371,11 +450,18 @@ struct TcLoopRuntime {
     fontsize: u32,
     opacity: f64,
     position: crate::TcLoopPosition,
+    x: f64,
+    y: f64,
     last_error: Option<String>,
-    audio_peaks: [f64; 2],
+    audio_peaks: [f64; 8],
     last_level_at: Option<std::time::Instant>,
     pipeline: Option<gstreamer::Pipeline>,
     udp_stop: Option<Arc<AtomicBool>>,
+    /// AAC stereo pairs in MPEG-TS (for SRT PMT gate).
+    aac_pairs: usize,
+    srt: bool,
+    srt_bitrate: Option<self::bitrate::BitrateMeter>,
+    webrtc_preview: Option<preview_webrtc::WebRtcPreview>,
 }
 
 impl GstBackend {
@@ -538,6 +624,18 @@ impl PipelineBackend for GstBackend {
 
     fn start_srt(&self, channel_id: u32, url: &str) -> Result<()> {
         let _gst = self.gst_op.lock();
+        // TC burn-in owns SRT when its proxy encode pipeline is running.
+        {
+            let mut tc = self.tc_loops.lock();
+            if let Some(rt) = tc.get_mut(&channel_id) {
+                if matches!(
+                    rt.status,
+                    TcLoopStatus::Running | TcLoopStatus::Restarting
+                ) {
+                    return start_tc_srt(rt, channel_id, url);
+                }
+            }
+        }
         let mut map = self.channels.lock();
         let pipe = map
             .get_mut(&channel_id)
@@ -547,6 +645,20 @@ impl PipelineBackend for GstBackend {
 
     fn stop_srt(&self, channel_id: u32) -> Result<()> {
         let _gst = self.gst_op.lock();
+        {
+            let mut tc = self.tc_loops.lock();
+            if let Some(rt) = tc.get_mut(&channel_id) {
+                if rt.srt
+                    || matches!(
+                        rt.status,
+                        TcLoopStatus::Running | TcLoopStatus::Restarting
+                    )
+                {
+                    stop_tc_srt(rt, channel_id);
+                    return Ok(());
+                }
+            }
+        }
         let mut map = self.channels.lock();
         let pipe = map
             .get_mut(&channel_id)
@@ -570,6 +682,22 @@ impl PipelineBackend for GstBackend {
                 }
             }
         }
+        {
+            let mut tc = self.tc_loops.lock();
+            for (id, rt) in tc.iter_mut() {
+                if *id != channel_id {
+                    stop_tc_webrtc(rt);
+                }
+            }
+            if let Some(rt) = tc.get_mut(&channel_id) {
+                if matches!(
+                    rt.status,
+                    TcLoopStatus::Running | TcLoopStatus::Restarting
+                ) {
+                    return start_tc_webrtc(rt, channel_id, pair, signal_tx);
+                }
+            }
+        }
         let mut map = self.channels.lock();
         let pipe = map
             .get_mut(&channel_id)
@@ -579,6 +707,14 @@ impl PipelineBackend for GstBackend {
 
     fn set_webrtc_answer(&self, channel_id: u32, sdp: &str) -> Result<()> {
         let _gst = self.gst_op.lock();
+        {
+            let map = self.tc_loops.lock();
+            if let Some(rt) = map.get(&channel_id) {
+                if let Some(p) = rt.webrtc_preview.as_ref() {
+                    return p.set_remote_answer(sdp);
+                }
+            }
+        }
         let map = self.channels.lock();
         let pipe = map
             .get(&channel_id)
@@ -588,6 +724,15 @@ impl PipelineBackend for GstBackend {
 
     fn add_webrtc_ice(&self, channel_id: u32, sdp_mline_index: u32, candidate: &str) -> Result<()> {
         let _gst = self.gst_op.lock();
+        {
+            let map = self.tc_loops.lock();
+            if let Some(rt) = map.get(&channel_id) {
+                if let Some(p) = rt.webrtc_preview.as_ref() {
+                    p.add_ice_candidate(sdp_mline_index, candidate);
+                    return Ok(());
+                }
+            }
+        }
         let map = self.channels.lock();
         let pipe = map
             .get(&channel_id)
@@ -597,6 +742,12 @@ impl PipelineBackend for GstBackend {
 
     fn stop_webrtc_preview(&self, channel_id: u32) -> Result<()> {
         let _gst = self.gst_op.lock();
+        {
+            let mut tc = self.tc_loops.lock();
+            if let Some(rt) = tc.get_mut(&channel_id) {
+                stop_tc_webrtc(rt);
+            }
+        }
         let mut map = self.channels.lock();
         if let Some(pipe) = map.get_mut(&channel_id) {
             pipe.stop_webrtc_preview();
@@ -606,6 +757,17 @@ impl PipelineBackend for GstBackend {
 
     fn stop_webrtc_preview_session(&self, channel_id: u32, session_id: &str) -> Result<()> {
         let _gst = self.gst_op.lock();
+        {
+            let mut tc = self.tc_loops.lock();
+            if let Some(rt) = tc.get_mut(&channel_id) {
+                if let Some(p) = rt.webrtc_preview.as_ref() {
+                    if p.session_id == session_id {
+                        stop_tc_webrtc(rt);
+                        return Ok(());
+                    }
+                }
+            }
+        }
         let mut map = self.channels.lock();
         if let Some(pipe) = map.get_mut(&channel_id) {
             pipe.stop_webrtc_preview_session(session_id);
@@ -941,13 +1103,16 @@ impl PipelineBackend for GstBackend {
         // Tear down any previous TC on this channel.
         {
             let mut map = self.tc_loops.lock();
-            if let Some(old) = map.remove(&channel_id) {
+            if let Some(mut old) = map.remove(&channel_id) {
+                stop_tc_webrtc(&mut old);
+                stop_tc_srt(&mut old, channel_id);
                 if let Some(flag) = &old.udp_stop {
                     flag.store(true, Ordering::SeqCst);
                 }
                 if let Some(p) = old.pipeline {
                     let _ = p.set_state(gstreamer::State::Null);
                 }
+                let _ = self.nvenc_used.fetch_sub(1, Ordering::SeqCst);
             }
         }
 
@@ -989,6 +1154,8 @@ impl PipelineBackend for GstBackend {
             bail!("{err}");
         }
 
+        let aac_pairs = crate::describe::aac_stereo_pairs(opts.preset.audio_channels);
+        self.nvenc_used.fetch_add(1, Ordering::SeqCst);
         self.tc_loops.lock().insert(
             channel_id,
             TcLoopRuntime {
@@ -999,11 +1166,17 @@ impl PipelineBackend for GstBackend {
                 fontsize: opts.fontsize,
                 opacity: opts.opacity,
                 position: opts.position,
+                x: opts.x,
+                y: opts.y,
                 last_error: None,
-                audio_peaks: [-90.0; 2],
+                audio_peaks: [-90.0; 8],
                 last_level_at: None,
                 pipeline: Some(pipeline),
                 udp_stop,
+                aac_pairs,
+                srt: false,
+                srt_bitrate: None,
+                webrtc_preview: None,
             },
         );
         self.workflows
@@ -1017,12 +1190,15 @@ impl PipelineBackend for GstBackend {
         let _gst = self.gst_op.lock();
         let mut map = self.tc_loops.lock();
         if let Some(mut rt) = map.remove(&channel_id) {
+            stop_tc_webrtc(&mut rt);
+            stop_tc_srt(&mut rt, channel_id);
             if let Some(flag) = rt.udp_stop.take() {
                 flag.store(true, Ordering::SeqCst);
             }
             if let Some(p) = rt.pipeline.take() {
                 let _ = p.set_state(gstreamer::State::Null);
             }
+            let _ = self.nvenc_used.fetch_sub(1, Ordering::SeqCst);
         }
         if let Some(entry) = self.workflows.lock().get_mut(&channel_id) {
             if matches!(entry.0, WorkflowKind::Timecode) {

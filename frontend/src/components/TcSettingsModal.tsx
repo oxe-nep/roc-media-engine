@@ -17,6 +17,10 @@ type Props = {
   onSaved: () => void;
 };
 
+const DEFAULT_X = 0.04;
+const DEFAULT_Y = 0.04;
+const DEFAULT_FONT = 48;
+
 export default function TcSettingsModal({ open, channelId, onClose, onSaved }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,9 +28,11 @@ export default function TcSettingsModal({ open, channelId, onClose, onSaved }: P
   const [tcStatus, setTcStatus] = useState<"off" | "running" | "restarting" | "error">("off");
   const [tcSource, setTcSource] = useState<TcLoopSource>("tod");
   const [tcUdpPort, setTcUdpPort] = useState(0);
-  const [tcFontSize, setTcFontSize] = useState(96);
+  const [tcFontSize, setTcFontSize] = useState(DEFAULT_FONT);
   const [tcOpacity, setTcOpacity] = useState(0.9);
   const [tcPosition, setTcPosition] = useState<TcLoopPosition>("top_left");
+  const [tcX, setTcX] = useState(DEFAULT_X);
+  const [tcY, setTcY] = useState(DEFAULT_Y);
   const [tcError, setTcError] = useState("");
   const [tcApplyMsg, setTcApplyMsg] = useState<string | null>(null);
 
@@ -45,9 +51,11 @@ export default function TcSettingsModal({ open, channelId, onClose, onSaved }: P
         setTcStatus(tc.status);
         setTcSource(tc.source === "external" ? "external" : "tod");
         setTcUdpPort(tc.udp_port || defaultTcUdpPort(channelId));
-        setTcFontSize(tc.fontsize || 96);
+        setTcFontSize(tc.fontsize || DEFAULT_FONT);
         setTcOpacity(tc.opacity ?? 0.9);
         setTcPosition(tc.position || "top_left");
+        setTcX(typeof tc.x === "number" ? tc.x : DEFAULT_X);
+        setTcY(typeof tc.y === "number" ? tc.y : DEFAULT_Y);
         setTcError(tc.error || "");
       })
       .catch((e) => setError(String(e)));
@@ -76,14 +84,18 @@ export default function TcSettingsModal({ open, channelId, onClose, onSaved }: P
         fontsize: tcFontSize,
         opacity: tcOpacity,
         position: tcPosition,
+        x: tcX,
+        y: tcY,
       });
       setTcEnabled(!!tc.enabled);
       setTcStatus(tc.status);
       setTcSource(tc.source === "external" ? "external" : "tod");
       setTcUdpPort(tc.udp_port || defaultTcUdpPort(channelId));
-      setTcFontSize(tc.fontsize || 96);
+      setTcFontSize(tc.fontsize || DEFAULT_FONT);
       setTcOpacity(tc.opacity ?? 0.9);
       setTcPosition(tc.position || "top_left");
+      setTcX(typeof tc.x === "number" ? tc.x : tcX);
+      setTcY(typeof tc.y === "number" ? tc.y : tcY);
       setTcError(tc.error || "");
 
       if (tc.enabled) {
@@ -159,7 +171,7 @@ export default function TcSettingsModal({ open, channelId, onClose, onSaved }: P
                         />
                         <span className="workflow-option-text">
                           <strong>Time Of Day</strong>
-                          <span className="workflow-option-hint">Host clock</span>
+                          <span className="workflow-option-hint">Host clock · HH:MM:SS</span>
                         </span>
                       </label>
                       <label className={`workflow-option${tcSource === "external" ? " active" : ""}`}>
@@ -172,7 +184,7 @@ export default function TcSettingsModal({ open, channelId, onClose, onSaved }: P
                         />
                         <span className="workflow-option-text">
                           <strong>UDP Input</strong>
-                          <span className="workflow-option-hint">External LTC</span>
+                          <span className="workflow-option-hint">External · HH:MM:SS</span>
                         </span>
                       </label>
                     </div>
@@ -193,13 +205,14 @@ export default function TcSettingsModal({ open, channelId, onClose, onSaved }: P
                     </label>
                   )}
                   <label className="presets-field">
-                    <span>Font size</span>
+                    <span>Font size ({tcFontSize} px on 1080)</span>
                     <input
-                      type="number"
-                      min={12}
-                      max={200}
+                      type="range"
+                      min={16}
+                      max={120}
+                      step={1}
                       value={tcFontSize}
-                      onChange={(e) => setTcFontSize(Number(e.target.value) || 96)}
+                      onChange={(e) => setTcFontSize(Number(e.target.value) || DEFAULT_FONT)}
                       disabled={busy}
                     />
                   </label>
@@ -215,22 +228,50 @@ export default function TcSettingsModal({ open, channelId, onClose, onSaved }: P
                       disabled={busy}
                     />
                   </label>
-                  <label className="presets-field">
-                    <span>Position</span>
-                    <select
-                      value={tcPosition}
-                      onChange={(e) => setTcPosition(e.target.value as TcLoopPosition)}
-                      disabled={busy}
-                    >
-                      <option value="top_left">Top left</option>
-                      <option value="top_right">Top right</option>
-                      <option value="center">Center</option>
-                      <option value="bottom_left">Bottom left</option>
-                      <option value="bottom_right">Bottom right</option>
-                    </select>
-                  </label>
+                  <div className="presets-field">
+                    <span>
+                      Position ({Math.round(tcX * 100)}%, {Math.round(tcY * 100)}%)
+                    </span>
+                    <div className="tc-xy-sliders">
+                      <label className="tc-xy-slider">
+                        <span>X</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={Math.round(tcX * 100)}
+                          disabled={busy}
+                          onChange={(e) => setTcX(Number(e.target.value) / 100)}
+                        />
+                      </label>
+                      <label className="tc-xy-slider">
+                        <span>Y</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={Math.round(tcY * 100)}
+                          disabled={busy}
+                          onChange={(e) => setTcY(Number(e.target.value) / 100)}
+                        />
+                      </label>
+                    </div>
+                  </div>
                 </div>
-                <TcPositionPreview position={tcPosition} fontsize={tcFontSize} opacity={tcOpacity} />
+                <TcPositionPreview
+                  x={tcX}
+                  y={tcY}
+                  fontsize={tcFontSize}
+                  opacity={tcOpacity}
+                  disabled={busy}
+                  onMove={(nx, ny) => {
+                    setTcX(nx);
+                    setTcY(ny);
+                  }}
+                  onSnap={(pos) => setTcPosition(pos)}
+                />
               </div>
             </div>
             {tcError && tcStatus === "error" && (

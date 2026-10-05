@@ -1,22 +1,31 @@
 "use client";
 
 import { useState } from "react";
-import { updateTcLoop } from "@/lib/api";
+import { startSrt, stopSrt, updateTcLoop } from "@/lib/api";
 import { tcCardStatusMeta, tcIsActive, tcPreviewHasSignal, tcSourceLabel } from "@/lib/tcUi";
 import { showTcCard } from "@/lib/workflow";
 import { sortByChannelId } from "@/lib/sortChannels";
 import { useWorkflows } from "@/hooks/useWorkflows";
 import { useDashboard } from "@/hooks/useDashboard";
-import HlsPreview from "@/components/HlsPreview";
+import Thumbnail from "@/components/Thumbnail";
 import AudioMeters from "@/components/AudioMeters";
 import ListenButton from "@/components/ListenButton";
+import PreviewModal from "@/components/PreviewModal";
 import TcSettingsModal from "@/components/TcSettingsModal";
 
+function formatBitrate(kbps?: number): string {
+  if (kbps == null || !Number.isFinite(kbps) || kbps <= 0) return "…";
+  if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mb/s`;
+  return `${Math.round(kbps)} kb/s`;
+}
+
 export default function TcGrid() {
-  const { loading, streams, tcById } = useDashboard();
+  const { loading, streams, tcById, srtById } = useDashboard();
   const [cardError, setCardError] = useState<Record<number, string>>({});
   const [busy, setBusy] = useState<Record<number, boolean>>({});
+  const [srtBusy, setSrtBusy] = useState<Record<number, boolean>>({});
   const [listenPair, setListenPair] = useState<Record<number, number | null>>({});
+  const [preview, setPreview] = useState<{ id: number; pair: number } | null>(null);
   const [settingsId, setSettingsId] = useState<number | null>(null);
   const { workflows } = useWorkflows();
 
@@ -56,6 +65,19 @@ export default function TcGrid() {
     }
   };
 
+  const toggleSrt = async (id: number) => {
+    setSrtBusy((b) => ({ ...b, [id]: true }));
+    clearCardError(id);
+    try {
+      if (srtById[id]?.status === "streaming") await stopSrt(id);
+      else await startSrt(id);
+    } catch (e) {
+      setCardError((prev) => ({ ...prev, [id]: String(e) }));
+    } finally {
+      setSrtBusy((b) => ({ ...b, [id]: false }));
+    }
+  };
+
   if (!loading && channelIds.length === 0) {
     return null;
   }
@@ -76,6 +98,7 @@ export default function TcGrid() {
               const tc = tcById[s.id];
               const tcOn = tcIsActive(tc);
               const tcLive = tcPreviewHasSignal(tc);
+              const srtOn = srtById[s.id]?.status === "streaming";
               const listenAt = listenPair[s.id] ?? null;
               const tslText = s.tsl_text?.trim();
               const actionError = cardError[s.id];
@@ -94,18 +117,43 @@ export default function TcGrid() {
                   className={`card-panel ${s.status}${tcOn ? " tc-active" : ""}${tcLive ? " tc-live" : ""}`}
                 >
                   <div className="card-stage">
-                    <AudioMeters channelId={s.id} bus="playout">
-                    <div className="card-thumb">
-                      <HlsPreview
+                    <AudioMeters channelId={s.id} bus="playout" silent={!tcLive}>
+                    <div
+                      className="card-thumb"
+                      role="button"
+                      tabIndex={tcOn ? 0 : -1}
+                      onClick={() => tcOn && setPreview({ id: s.id, pair: listenAt ?? 0 })}
+                      onKeyDown={(e) => {
+                        if (!tcOn) return;
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setPreview({ id: s.id, pair: listenAt ?? 0 });
+                        }
+                      }}
+                      title={tcOn ? "Open preview" : undefined}
+                    >
+                      <Thumbnail
+                        id={s.id}
                         active={tcOn}
-                        listenPair={listenAt}
-                        playlistPath={`/hls/playout/${s.id}/preview.m3u8`}
-                        sessionKey={`${s.id}-${tc?.status ?? "off"}-${tcOn ? "on" : "off"}`}
+                        lostSignal={!tcLive && tcOn}
+                        path={`/thumb/playout/${s.id}`}
                       />
                       {tslText && tcOn && (
                         <div className="thumb-tsl-overlay">
                           <div className="tsl-badge" title={`TSL ${s.tsl_index ?? s.id}`}>
                             {tslText}
+                          </div>
+                        </div>
+                      )}
+                      {srtOn && (
+                        <div className="thumb-badges">
+                          <div
+                            className={`stream-badge${srtById[s.id]?.sending ? "" : " waiting"}`}
+                            title={srtById[s.id]?.publish_url || "SRT"}
+                          >
+                            {srtById[s.id]?.sending
+                              ? `SRT · ${formatBitrate(srtById[s.id]?.bitrate_kbps)}`
+                              : "SRT …"}
                           </div>
                         </div>
                       )}
@@ -148,10 +196,26 @@ export default function TcGrid() {
                             {busy[s.id] ? "…" : "START"}
                           </button>
                         )}
+                        <button
+                          type="button"
+                          className={`stream-btn ${srtOn ? "streaming" : "idle"}`}
+                          onClick={() => toggleSrt(s.id)}
+                          disabled={srtBusy[s.id] || (!tcLive && !srtOn)}
+                          title={
+                            srtOn
+                              ? srtById[s.id]?.publish_url || "Stop SRT"
+                              : "Start SRT (burned-in proxy)"
+                          }
+                        >
+                          {srtBusy[s.id] ? "…" : "SRT"}
+                        </button>
                         {tcLive && (
                           <ListenButton
                             pair={listenAt}
-                            onChange={(p) => setListenPair((prev) => ({ ...prev, [s.id]: p }))}
+                            onChange={(p) => {
+                              setListenPair((prev) => ({ ...prev, [s.id]: p }));
+                              if (p != null) setPreview({ id: s.id, pair: p });
+                            }}
                           />
                         )}
                         <button
@@ -190,6 +254,16 @@ export default function TcGrid() {
         channelId={settingsId}
         onClose={() => setSettingsId(null)}
         onSaved={() => {}}
+      />
+
+      <PreviewModal
+        open={preview != null}
+        channelId={preview?.id ?? 0}
+        channelName={
+          preview ? streams.find((x) => x.id === preview.id)?.name || `TC ${preview.id}` : ""
+        }
+        initialPair={preview?.pair ?? 0}
+        onClose={() => setPreview(null)}
       />
     </section>
   );

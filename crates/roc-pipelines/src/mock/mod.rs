@@ -566,9 +566,13 @@ impl PipelineBackend for MockBackend {
                 fontsize: opts.fontsize,
                 opacity: opts.opacity,
                 position: opts.position,
+                x: opts.x,
+                y: opts.y,
                 error: None,
                 timecode: Some("12:00:00".into()),
-                audio_peaks: Some(vec![-90.0, -90.0]),
+                audio_peaks: Some(vec![-90.0; 8]),
+                srt: false,
+                srt_bitrate_kbps: None,
             },
         );
         self.workflows

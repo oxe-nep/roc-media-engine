@@ -130,7 +130,7 @@ fn arm_mezz_pts_reset(video_identity: &gstreamer::Element, frame_duration_ns: u6
 /// userspace and only pushing approved buffers matches how we must control the
 /// first bytes MediaMTX locks on. HydraSRT avoids this by never remuxing; we
 /// still encode, so the gate stays.
-fn arm_srt_appsink_gate(
+pub(crate) fn arm_srt_appsink_gate(
     channel: u32,
     pipeline: &gstreamer::Pipeline,
     srt_uri: &str,
@@ -293,7 +293,7 @@ fn arm_srt_appsink_gate(
 
 /// Drop appsrc→srtsink and clear appsink callbacks so TS keeps flowing to UDP
 /// while SRT is idle (appsink drops with max-buffers).
-fn disarm_srt_appsink_gate(channel: u32, pipeline: &gstreamer::Pipeline) {
+pub(crate) fn disarm_srt_appsink_gate(channel: u32, pipeline: &gstreamer::Pipeline) {
     use gstreamer::prelude::*;
     use gstreamer_app::{AppSink, AppSinkCallbacks};
 
@@ -669,7 +669,7 @@ fn ts_ready_for_mediamtx(
 
 /// Go/FFmpeg `OutputURL` puts `latency` in **microseconds**; GStreamer/libsrt URI
 /// expects **milliseconds**. Values > 8000 are treated as µs (same heuristic as Go).
-fn normalize_srt_uri_for_gst(raw: &str) -> String {
+pub(crate) fn normalize_srt_uri_for_gst(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     while let Some(i) = rest.find("latency=") {

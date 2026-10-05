@@ -31,7 +31,7 @@ pub struct PlayoutLaunchOpts {
     pub audio_compressed: bool,
 }
 
-/// DeckLink IN → TC overlay → DeckLink OUT (+ HLS preview).
+/// DeckLink IN → TC overlay → DeckLink OUT + proxy encode (SRT/WebRTC/JPEG).
 #[derive(Debug, Clone)]
 pub struct TcLoopLaunchOpts {
     pub input_device: String,
@@ -47,6 +47,11 @@ pub struct TcLoopLaunchOpts {
     pub fontsize: u32,
     pub opacity: f64,
     pub position: crate::TcLoopPosition,
+    /// Normalized X/Y of text top-left (0..=1). Used with absolute overlay alignment.
+    pub x: f64,
+    pub y: f64,
+    /// Proxy encode preset (NVENC → MPEG-TS for SRT / WebRTC).
+    pub preset: EncodePreset,
     pub hls_dir: Option<String>,
 }
 
@@ -340,6 +345,17 @@ impl EncodeFamily {
 /// force `byte-stream` so `repeat-sequence-header` is honored (ignored for avc/hvc1)
 /// and MPEG-TS players get in-band parameter sets on every IDR.
 fn nvenc_chain(video_codec: &str, preset: &str, bitrate_kbit: u64, gop: u32) -> String {
+    nvenc_chain_ex(video_codec, preset, bitrate_kbit, gop, false)
+}
+
+/// `interlaced`: keep field structure for TC burn-in (1080i in → 1080i SRT).
+fn nvenc_chain_ex(
+    video_codec: &str,
+    preset: &str,
+    bitrate_kbit: u64,
+    gop: u32,
+    interlaced: bool,
+) -> String {
     let family = encode_family(video_codec);
     let enc = family.encoder_element();
     let parse = family.parse_element();
@@ -349,12 +365,22 @@ fn nvenc_chain(video_codec: &str, preset: &str, bitrate_kbit: u64, gop: u32) -> 
         EncodeFamily::H264 => " bframes=0",
         EncodeFamily::Hevc => "",
     };
+    // nvh264enc/nvh265enc: interlaced-encoding preserves fields for SRT when IN is i.
+    let interlaced_prop = if interlaced {
+        " interlaced-encoding=true"
+    } else {
+        ""
+    };
     format!(
         "videoconvert ! video/x-raw,format=NV12 ! cudaupload ! \
          {enc} preset={preset} bitrate={bitrate_kbit} gop-size={gop} \
-         zerolatency=true aud=true repeat-sequence-header=true{bframes} ! \
+         zerolatency=true aud=true repeat-sequence-header=true{bframes}{interlaced_prop} ! \
          {caps} ! {parse} config-interval=-1"
     )
+}
+
+fn gst_mode_is_interlaced(mode: &str) -> bool {
+    mode.to_ascii_lowercase().chars().any(|c| c == 'i')
 }
 
 fn decklink_video_sink(device: &str, mode: &str) -> String {
@@ -741,22 +767,6 @@ pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
     )
 }
 
-fn tc_overlay_halign(pos: crate::TcLoopPosition) -> &'static str {
-    match pos {
-        crate::TcLoopPosition::TopLeft | crate::TcLoopPosition::BottomLeft => "left",
-        crate::TcLoopPosition::TopRight | crate::TcLoopPosition::BottomRight => "right",
-        crate::TcLoopPosition::Center => "center",
-    }
-}
-
-fn tc_overlay_valign(pos: crate::TcLoopPosition) -> &'static str {
-    match pos {
-        crate::TcLoopPosition::TopLeft | crate::TcLoopPosition::TopRight => "top",
-        crate::TcLoopPosition::BottomLeft | crate::TcLoopPosition::BottomRight => "bottom",
-        crate::TcLoopPosition::Center => "center",
-    }
-}
-
 fn tc_overlay_color(opacity: f64) -> u32 {
     let a = ((opacity.clamp(0.15, 1.0) * 255.0).round() as u32).min(255);
     // AARRGGBB — white text
@@ -764,21 +774,24 @@ fn tc_overlay_color(opacity: f64) -> u32 {
 }
 
 fn tc_overlay_element(opts: &TcLoopLaunchOpts) -> String {
-    let font = opts.fontsize.clamp(24, 256);
-    let ha = tc_overlay_halign(opts.position);
-    let va = tc_overlay_valign(opts.position);
+    // Pixel size on the video frame (Pango `px`) — matches UI fontsize / FFmpeg drawtext.
+    let font = opts.fontsize.clamp(12, 200);
+    let x = opts.x.clamp(0.0, 1.0);
+    let y = opts.y.clamp(0.0, 1.0);
     let color = tc_overlay_color(opts.opacity);
-    let font_desc = format!("Sans Bold {font}");
+    let font_desc = format!("Sans Bold {font}px");
+    // Absolute placement: xpos/ypos are 0..=1 of the frame (top-left of the text layout).
+    // TOD: clockoverlay is always HH:MM:SS (no frames). External: textoverlay updated as HH:MM:SS.
     match opts.source {
         crate::TcLoopSource::Tod => format!(
             "clockoverlay name=tc_overlay font-desc=\"{font_desc}\" \
-             halignment={ha} valignment={va} shaded-background=true \
-             draw-shadow=false color={color}"
+             halignment=absolute valignment=absolute xpos={x:.4} ypos={y:.4} \
+             shaded-background=true draw-shadow=false color={color}"
         ),
         crate::TcLoopSource::External => format!(
             "textoverlay name=tc_text text=\"--:--:--\" font-desc=\"{font_desc}\" \
-             halignment={ha} valignment={va} shaded-background=true \
-             draw-shadow=false color={color}"
+             halignment=absolute valignment=absolute xpos={x:.4} ypos={y:.4} \
+             shaded-background=true draw-shadow=false color={color}"
         ),
     }
 }
@@ -805,38 +818,88 @@ fn tc_sink_geometry(mode: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// Build TC burn-in: DeckLink IN → overlay → DeckLink OUT + HLS preview.
+/// Build TC burn-in: DeckLink IN → overlay → OUT + JPEG + NVENC proxy (SRT gate).
+///
+/// **Format fidelity:** OUT (DeckLink) and SRT match IN mode (e.g. 1080i50→1080i50).
+/// No deinterlace on the main path — only the JPEG thumb branch deinterlaces.
 pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
     let src = decklink_src(&opts.input_device, &opts.input_mode);
     let overlay = tc_overlay_element(opts);
-    let out_mode = if opts.output_mode.trim().is_empty() {
-        "1080p50"
-    } else {
-        opts.output_mode.trim()
+    // Prefer explicit output_mode, but default to the same as input (not playout progressive).
+    let out_mode = {
+        let o = opts.output_mode.trim();
+        let i = opts.input_mode.trim();
+        if !o.is_empty() && !o.eq_ignore_ascii_case("auto") {
+            o
+        } else if !i.is_empty() && !i.eq_ignore_ascii_case("auto") {
+            i
+        } else {
+            "1080p50"
+        }
     };
+    let interlaced = gst_mode_is_interlaced(out_mode);
     let (height, fr) = tc_sink_geometry(out_mode);
     let vsink = decklink_video_sink(&opts.output_device, out_mode);
     let asink = decklink_audio_sink(&opts.output_device);
     let in_num = decklink_device_number(&opts.input_device);
 
-    let preview = if let Some(dir) = &opts.hls_dir {
-        let _ = std::fs::create_dir_all(dir);
-        let seg = format!("{dir}/pv%05d.ts");
-        let playlist = format!("{dir}/listen_0.m3u8");
-        let thumb = format!("{dir}/thumb%05d.jpg");
+    let live_codec = live_nvenc_codec(&opts.preset);
+    let bitrate_kbit = live_nvenc_bitrate_kbit(&opts.preset);
+    let gop = live_nvenc_gop(&opts.preset);
+    let nv_preset = live_nvenc_preset(&opts.preset);
+    let family = encode_family(live_codec);
+    let parse = family.parse_element();
+    let bs = family.byte_stream_caps();
+    let enc = nvenc_chain_ex(live_codec, nv_preset, bitrate_kbit, gop, interlaced);
+
+    let aac_bps = parse_bitrate(&opts.preset.audio_bitrate)
+        .unwrap_or(192_000)
+        .clamp(64_000, 320_000);
+    let pairs = aac_stereo_pairs(opts.preset.audio_channels);
+    let aac = mpegts_program_aac(
+        "tc",
+        aac_bps,
+        pairs,
+        &[AacMuxOut {
+            mux_name: "tsmux",
+            valve_prefix: None,
+        }],
+        false,
+    );
+
+    let srt_appsink = "queue name=q_srt max-size-buffers=8 max-size-time=0 max-size-bytes=0 \
+         leaky=downstream ! \
+         appsink name=srt_in emit-signals=true sync=false async=false \
+         max-buffers=8 drop=true";
+
+    // OUT: same geometry/interlace as IN. Avoid videorate on interlaced (destroys fields).
+    let out_branch = if interlaced {
         format!(
-            "v. ! queue max-size-buffers=8 leaky=downstream ! \
-               videoconvert ! videoscale ! videorate skip-to-first=true ! \
-               video/x-raw,width=640,height=360,framerate=10/1 ! \
-               x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=20 bframes=0 ! \
-               video/x-h264,profile=baseline ! h264parse config-interval=-1 ! \
-               hlssink2 name=hls_l0 location=\"{seg}\" playlist-location=\"{playlist}\" \
-               target-duration=1 max-files=6 playlist-length=6 \
-             v. ! queue max-size-buffers=2 leaky=downstream ! \
-               videoconvert ! videoscale ! videorate skip-to-first=true ! \
+            "v. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
+               videoconvert ! \
+               video/x-raw,format=UYVY,width=1920,height={height},framerate={fr},\
+               interlace-mode=interleaved ! \
+               {vsink}"
+        )
+    } else {
+        format!(
+            "v. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
+               videoscale ! videorate skip-to-first=true ! \
+               video/x-raw,format=UYVY,width=1920,height={height},framerate={fr} ! \
+               {vsink}"
+        )
+    };
+
+    let thumb = if let Some(dir) = &opts.hls_dir {
+        let _ = std::fs::create_dir_all(dir);
+        let loc = format!("{dir}/thumb%05d.jpg");
+        // Thumb only: deinterlace so JPEG is progressive 1 fps.
+        format!(
+            "v. ! queue max-size-buffers=2 leaky=downstream ! \
+               deinterlace mode=auto ! videoconvert ! videoscale ! videorate skip-to-first=true ! \
                video/x-raw,width=640,height=360,framerate=1/1 ! \
                jpegenc quality=80 idct-method=float ! \
-               multifilesink location=\"{thumb}\" max-files=1 next-file=buffer \
+               multifilesink location=\"{loc}\" max-files=1 next-file=buffer \
                post-messages=false sync=false async=false"
         )
     } else {
@@ -845,20 +908,21 @@ pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
 
     format!(
         "{src} ! \
-           deinterlace mode=auto ! videoconvert ! {overlay} ! tee name=v \
-         v. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
-           videoscale ! videorate skip-to-first=true ! \
-           video/x-raw,format=UYVY,width=1920,height={height},framerate={fr} ! \
-           {vsink} \
+           videoconvert ! {overlay} ! tee name=v \
+         {out_branch} \
+         v. ! queue ! {enc} ! tee name=e \
+         e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
+           mpegtsmux name=tsmux alignment=7 ! {srt_appsink} \
+         e. ! queue leaky=downstream ! fakesink sync=false \
          decklinkaudiosrc device-number={in_num} channels=8 ! \
            audioconvert ! audio/x-raw,channels=8,rate=48000,layout=interleaved ! tee name=a \
          a. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
            audioconvert ! audio/x-raw,format=S16LE,channels=8,rate=48000,layout=interleaved ! \
            {asink} \
-         a. ! queue max-size-buffers=8 leaky=downstream ! \
-           level name=ameter interval=33000000 post-messages=true ! \
-           fakesink sync=false async=false \
-         {preview}"
+         {aac} \
+         {meter} \
+         {thumb}",
+        meter = meter_branch(),
     )
 }
 
@@ -1002,5 +1066,47 @@ mod tests {
         assert!(hevc.contains("stream-format=byte-stream"));
         assert!(!hevc.contains("bframes="));
         assert!(hevc.contains("h265parse config-interval=-1"));
+    }
+
+    #[test]
+    fn tc_loop_preserves_interlaced_in_to_out() {
+        let mut preset = EncodePreset {
+            label: "Proxy".into(),
+            video_codec: "nvh264enc".into(),
+            video_bitrate: "8M".into(),
+            video_maxrate: None,
+            video_bufsize: None,
+            video_preset: "low-latency-hq".into(),
+            video_gop: 50,
+            audio_bitrate: "192k".into(),
+            audio_channels: 8,
+        };
+        preset.normalize_for_gst();
+        let launch = build_tc_loop_launch(&TcLoopLaunchOpts {
+            input_device: "DeckLink IP 100G (1)".into(),
+            output_device: "DeckLink IP 100G (2)".into(),
+            input_mode: "1080i50".into(),
+            output_mode: "1080i50".into(),
+            source: crate::TcLoopSource::Tod,
+            udp_port: 9301,
+            fontsize: 48,
+            opacity: 0.9,
+            position: crate::TcLoopPosition::TopLeft,
+            x: 0.04,
+            y: 0.04,
+            preset,
+            hls_dir: Some("/tmp/roc-tc".into()),
+        });
+        assert!(launch.contains("mode=1080i50"), "{launch}");
+        assert!(launch.contains("interlace-mode=interleaved"), "{launch}");
+        assert!(launch.contains("interlaced-encoding=true"), "{launch}");
+        assert!(launch.contains("appsink name=srt_in"), "{launch}");
+        assert!(launch.contains("tee name=e"), "{launch}");
+        // Exactly one deinterlace — JPEG thumb only; main path stays interlaced.
+        assert_eq!(
+            launch.matches("deinterlace").count(),
+            1,
+            "expected thumb-only deinterlace: {launch}"
+        );
     }
 }

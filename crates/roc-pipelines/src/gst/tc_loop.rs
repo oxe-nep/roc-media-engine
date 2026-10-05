@@ -1,4 +1,4 @@
-//! TC burn-in pipeline helpers (UDP external clock + textoverlay updates).
+//! TC burn-in helpers: UDP external clock → textoverlay (HH:MM:SS only).
 
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use gstreamer::prelude::*;
 
-/// Spawn a UDP listener that writes normalized timecode into `textoverlay` `text`.
+/// Spawn a UDP listener that writes normalized `HH:MM:SS` into `textoverlay` `text`.
 pub fn spawn_external_tc_updater(
     pipeline: &gstreamer::Pipeline,
     udp_port: u16,
@@ -42,14 +42,14 @@ pub fn spawn_external_tc_updater(
     Ok(())
 }
 
-/// Accept `HH:MM:SS` or `HH:MM:SS:FF` / `;` / `.` frame separators.
+/// Accept `HH:MM:SS` or `HH:MM:SS:FF` — always returns **HH:MM:SS** (frames dropped).
 pub fn normalize_timecode(s: &str) -> Option<String> {
     let s = s.trim();
     if s.is_empty() {
         return None;
     }
     let parts: Vec<&str> = s.split(|c| c == ':' || c == ';' || c == '.').collect();
-    if parts.len() < 3 || parts.len() > 4 {
+    if parts.len() < 3 {
         return None;
     }
     let h: u32 = parts[0].parse().ok()?;
@@ -57,13 +57,6 @@ pub fn normalize_timecode(s: &str) -> Option<String> {
     let sec: u32 = parts[2].parse().ok()?;
     if h > 99 || m > 59 || sec > 59 {
         return None;
-    }
-    if parts.len() == 4 {
-        let f: u32 = parts[3].parse().ok()?;
-        if f > 99 {
-            return None;
-        }
-        return Some(format!("{h:02}:{m:02}:{sec:02}:{f:02}"));
     }
     Some(format!("{h:02}:{m:02}:{sec:02}"))
 }
@@ -73,15 +66,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_tod_and_frames() {
+    fn strips_frames() {
         assert_eq!(normalize_timecode("9:05:01").as_deref(), Some("09:05:01"));
         assert_eq!(
             normalize_timecode("01:02:03:04").as_deref(),
-            Some("01:02:03:04")
+            Some("01:02:03")
         );
         assert_eq!(
             normalize_timecode("01:02:03;12").as_deref(),
-            Some("01:02:03:12")
+            Some("01:02:03")
         );
         assert!(normalize_timecode("nope").is_none());
     }

@@ -171,9 +171,15 @@ pub fn recording_json(orch: &Orchestrator, ui: &UiState, id: u32) -> Value {
 
 pub fn srt_json(orch: &Orchestrator, ui: &UiState, id: u32) -> Value {
     let ch = orch.channel(id).ok();
+    let tc = orch.tc_loop_snapshot(id);
     let s = ui.srt(id);
-    let streaming = ch.as_ref().map(|c| c.srt).unwrap_or(false);
-    let br = ch.as_ref().and_then(|c| c.srt_bitrate_kbps).unwrap_or(0.0);
+    let streaming = ch.as_ref().map(|c| c.srt).unwrap_or(false)
+        || tc.as_ref().map(|t| t.srt).unwrap_or(false);
+    let br = ch
+        .as_ref()
+        .and_then(|c| c.srt_bitrate_kbps)
+        .or_else(|| tc.as_ref().and_then(|t| t.srt_bitrate_kbps))
+        .unwrap_or(0.0);
     let sending = streaming && br > 0.0;
     let port = if s.port == 0 { 9100 + id as u16 } else { s.port };
     json!({

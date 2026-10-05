@@ -80,6 +80,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/workflows", get(workflows_map))
         .route("/api/workflows/{id}", put(set_workflow_ui))
         .route("/thumb/{id}", get(thumb))
+        .route("/thumb/playout/{id}", get(thumb_playout))
 }
 
 async fn list_streams(State(st): State<AppState>) -> Json<Value> {
@@ -1317,6 +1318,10 @@ struct TcLoopBody {
     opacity: Option<f64>,
     #[serde(default)]
     position: Option<String>,
+    #[serde(default)]
+    x: Option<f64>,
+    #[serde(default)]
+    y: Option<f64>,
 }
 
 async fn get_tc_loop(
@@ -1351,16 +1356,36 @@ async fn put_tc_loop(
         meta.udp_port = p;
     }
     if let Some(f) = body.fontsize {
-        meta.fontsize = f.clamp(24, 256);
+        meta.fontsize = f.clamp(12, 200);
     }
     if let Some(o) = body.opacity {
         meta.opacity = o.clamp(0.15, 1.0);
     }
+    // Freeform x/y take precedence; legacy position snaps set x/y.
+    let mut xy_set = false;
+    if let Some(x) = body.x {
+        meta.x = x.clamp(0.0, 1.0);
+        xy_set = true;
+    }
+    if let Some(y) = body.y {
+        meta.y = y.clamp(0.0, 1.0);
+        xy_set = true;
+    }
     if let Some(p) = body.position {
         meta.position = match p.as_str() {
-            "bottom_right" | "bottom_left" | "top_right" | "top_left" | "center" => p,
+            "bottom_right" | "bottom_left" | "top_right" | "top_left" | "center" => p.clone(),
             _ => "top_left".into(),
         };
+        if !xy_set {
+            let (x, y) = roc_pipelines::TcLoopPosition::parse(&meta.position).default_xy();
+            meta.x = x;
+            meta.y = y;
+        }
+    }
+    if xy_set {
+        meta.position = roc_pipelines::TcLoopPosition::nearest(meta.x, meta.y)
+            .as_str()
+            .into();
     }
 
     let want = body.enabled.unwrap_or(meta.enabled);
@@ -1386,6 +1411,20 @@ async fn thumb(
     Path(id): Path<u32>,
 ) -> Result<Response, UiError> {
     let dir = st.hls_dir.join(id.to_string());
+    let path = newest_thumb(&dir).ok_or_else(|| UiError::not_found("thumb not found"))?;
+    let bytes = tokio::fs::read(&path).await.map_err(UiError::from)?;
+    Ok((
+        [(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "no-store")],
+        bytes,
+    )
+        .into_response())
+}
+
+async fn thumb_playout(
+    State(st): State<AppState>,
+    Path(id): Path<u32>,
+) -> Result<Response, UiError> {
+    let dir = st.hls_dir.join("playout").join(id.to_string());
     let path = newest_thumb(&dir).ok_or_else(|| UiError::not_found("thumb not found"))?;
     let bytes = tokio::fs::read(&path).await.map_err(UiError::from)?;
     Ok((

@@ -679,6 +679,9 @@ export interface TcLoopInfo {
   fontsize: number;
   opacity: number;
   position: TcLoopPosition;
+  /** Normalized overlay anchor 0..=1 (top-left of text). */
+  x?: number;
+  y?: number;
   error?: string;
   timecode?: string;
 }
@@ -690,6 +693,8 @@ export type TcLoopUpdateInput = {
   fontsize?: number;
   opacity?: number;
   position?: TcLoopPosition;
+  x?: number;
+  y?: number;
 };
 
 export async function fetchTcLoop(id: number): Promise<TcLoopInfo> {
