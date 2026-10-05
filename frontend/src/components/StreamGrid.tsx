@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   fetchEncodePresets,
   fetchLibraryCategories,
+  setRecordingCategory,
+  setRecordingName,
   startProxyRecording,
   stopProxyRecording,
   startHqRecording,
@@ -73,7 +75,17 @@ export default function StreamGrid() {
   const [srtBusy, setSrtBusy] = useState<Record<number, boolean>>({});
   const [preview, setPreview] = useState<{ id: number; pair: number } | null>(null);
   const [settingsId, setSettingsId] = useState<number | null>(null);
+  const [editingNameId, setEditingNameId] = useState<number | null>(null);
+  const [nameDraft, setNameDraft] = useState("");
+  const [metaBusy, setMetaBusy] = useState<Record<number, boolean>>({});
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const { workflows } = useWorkflows();
+
+  useEffect(() => {
+    if (editingNameId == null) return;
+    nameInputRef.current?.focus();
+    nameInputRef.current?.select();
+  }, [editingNameId]);
 
   useEffect(() => {
     const refreshPresets = () => {
@@ -131,6 +143,39 @@ export default function StreamGrid() {
       setError(String(e));
     } finally {
       setSrtBusy((b) => ({ ...b, [id]: false }));
+    }
+  };
+
+  const beginEditName = (id: number, current: string) => {
+    setEditingNameId(id);
+    setNameDraft(current);
+  };
+
+  const commitName = async (id: number) => {
+    const clean = nameDraft.trim() || `ch${id}`;
+    const prev = recordings[id]?.name || `ch${id}`;
+    setEditingNameId(null);
+    if (clean === prev) return;
+    setMetaBusy((b) => ({ ...b, [id]: true }));
+    try {
+      await setRecordingName(id, clean);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setMetaBusy((b) => ({ ...b, [id]: false }));
+    }
+  };
+
+  const changeCategory = async (id: number, next: string) => {
+    const prev = recordings[id]?.category || "_unsorted";
+    if (!next || next === prev) return;
+    setMetaBusy((b) => ({ ...b, [id]: true }));
+    try {
+      await setRecordingCategory(id, next);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setMetaBusy((b) => ({ ...b, [id]: false }));
     }
   };
 
@@ -259,15 +304,55 @@ export default function StreamGrid() {
                     </span>
                     <div className="card-identity-text">
                       <div className="card-name-row">
-                        <span className="card-name" title={rec?.name || `ch${s.id}`}>
-                          {rec?.name || `ch${s.id}`}
-                        </span>
-                        <span
-                          className="card-category"
-                          title={cat === "_unsorted" ? "Unsorted" : cat}
+                        {editingNameId === s.id ? (
+                          <input
+                            ref={nameInputRef}
+                            className="card-name-input"
+                            value={nameDraft}
+                            disabled={metaBusy[s.id]}
+                            onChange={(e) => setNameDraft(e.target.value)}
+                            onBlur={() => commitName(s.id)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                (e.target as HTMLInputElement).blur();
+                              } else if (e.key === "Escape") {
+                                e.preventDefault();
+                                setEditingNameId(null);
+                              }
+                            }}
+                            aria-label="Channel name"
+                          />
+                        ) : (
+                          <button
+                            type="button"
+                            className="card-name card-name-edit"
+                            title="Click to rename"
+                            disabled={metaBusy[s.id]}
+                            onClick={() => beginEditName(s.id, rec?.name || `ch${s.id}`)}
+                          >
+                            {rec?.name || `ch${s.id}`}
+                          </button>
+                        )}
+                        <select
+                          className="card-category card-category-select"
+                          value={cat}
+                          disabled={metaBusy[s.id] || categories.length === 0}
+                          title="Change folder"
+                          aria-label="Category"
+                          onChange={(e) => changeCategory(s.id, e.target.value)}
                         >
-                          {cat === "_unsorted" ? "Unsorted" : cat}
-                        </span>
+                          {!categories.some((c) => c.name === cat) && (
+                            <option value={cat}>
+                              {cat === "_unsorted" ? "Unsorted" : cat}
+                            </option>
+                          )}
+                          {categories.map((c) => (
+                            <option key={c.name} value={c.name}>
+                              {c.name === "_unsorted" ? "Unsorted" : c.name}
+                            </option>
+                          ))}
+                        </select>
                       </div>
                       <div className="card-meta-row">
                         <span
