@@ -134,10 +134,14 @@ mod gst_probe {
         let fr = s.get::<gstreamer::Fraction>("framerate").ok()?;
         let fps_num = fr.numer();
         let fps_den = fr.denom();
+        let fps = fps_num as f64 / fps_den as f64;
         let interlaced = match s.get::<&str>("interlace-mode") {
             Ok("progressive") | Ok("progressive-frame") => false,
             Ok(_) => true,
-            Err(_) => false,
+            Err(_) => {
+                // DeckLink sometimes omits interlace-mode. Broadcast 1080@25 is almost always i50.
+                width == 1920 && height == 1080 && (fps - 25.0).abs() < 0.5
+            }
         };
         let mode = mode_from_geometry(width, height, fps_num, fps_den, interlaced)?.to_string();
         Some(InputFormat {
@@ -175,12 +179,29 @@ mod gst_probe {
         while std::time::Instant::now() < deadline {
             if let Some(caps) = pad.current_caps() {
                 if let Some(fmt) = format_from_caps(&caps) {
-                    // Prefer HD over the brief SD lock-on that DeckLink often emits first.
-                    if fmt.width >= 1280 {
-                        best = Some(fmt);
+                    // Prefer HD; if we ever see interlaced for the same geometry, keep that
+                    // (DeckLink often flickers progressive first on i50).
+                    let take = match &best {
+                        None => true,
+                        Some(prev) if fmt.width >= 1280 && prev.width < 1280 => true,
+                        Some(prev)
+                            if fmt.width == prev.width
+                                && fmt.height == prev.height
+                                && fmt.interlaced
+                                && !prev.interlaced =>
+                        {
+                            true
+                        }
+                        Some(prev) if fmt.width >= 1280 && prev.width >= 1280 => false,
+                        Some(_) => fmt.width >= 1280,
+                    };
+                    if take {
+                        best = Some(fmt.clone());
+                    }
+                    // Only stop early once we have a confident interlaced HD lock.
+                    if fmt.width >= 1280 && fmt.interlaced {
                         break;
                     }
-                    best = Some(fmt);
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(50));

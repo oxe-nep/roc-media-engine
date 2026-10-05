@@ -47,7 +47,7 @@ pub fn decklink_device_number(device: &str) -> u32 {
 }
 
 fn decklink_src(device: &str, mode: &str) -> String {
-    // Always lock to a concrete mode for the live graph (caller probes when config is `auto`).
+    // Prefer a concrete mode (caller probes when config is `auto`).
     // drop-no-signal-frames keeps the pipeline alive across brief ST 2110 gaps.
     let mode = if mode.trim().is_empty() || mode.eq_ignore_ascii_case("auto") {
         "1080p50" // last-resort fallback; prefer probe_input_format first

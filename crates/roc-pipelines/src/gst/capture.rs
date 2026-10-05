@@ -757,6 +757,10 @@ pub struct ChannelPipeline {
     webrtc_preview: Option<crate::gst::preview_webrtc::WebRtcPreview>,
     /// Avoid relaunch storms: last adapt attempt.
     last_adapt: Option<std::time::Instant>,
+    /// Last p↔i mode flip while waiting for signal (auto only).
+    last_signal_flip: Option<std::time::Instant>,
+    /// How many p↔i flips while waiting since last Running (cap to avoid relaunch storms).
+    signal_flip_attempts: u8,
     /// Peak dBFS per discrete channel (8). Updated from `level` bus messages.
     audio_peaks: [f64; 8],
     /// Live encoded bitstream rate (tee `e` sink probe).
@@ -824,6 +828,8 @@ impl ChannelPipeline {
             rec_branch: None,
             webrtc_preview: None,
             last_adapt: None,
+            last_signal_flip: None,
+            signal_flip_attempts: 0,
             audio_peaks: [-90.0; 8],
             encode_bitrate: BitrateMeter::new(),
             srt_bitrate: None,
@@ -972,7 +978,7 @@ impl ChannelPipeline {
         if !is_auto_mode(&self.configured_mode) {
             return Ok(self.configured_mode.clone());
         }
-        match probe_input_format(&self.device, 3500) {
+        match probe_input_format(&self.device, 5000) {
             Ok(fmt) => {
                 tracing::info!(
                     channel = self.id,
@@ -984,6 +990,8 @@ impl ChannelPipeline {
             }
             Err(err) => {
                 // No SDI/IP signal yet is normal on unused inputs after restart.
+                // Prefer i50 over p50 as cold-start fallback for broadcast plants that
+                // still run interlaced; live adapt / signal-flip will correct if wrong.
                 tracing::debug!(
                     channel = self.id,
                     error = %err,
@@ -1811,7 +1819,12 @@ impl ChannelPipeline {
         }
         match self.decklink_signal_present() {
             Some(false) => self.status = ChannelStatus::Waiting,
-            Some(true) | None => self.status = ChannelStatus::Running,
+            Some(true) | None => {
+                if self.status != ChannelStatus::Running {
+                    self.signal_flip_attempts = 0;
+                }
+                self.status = ChannelStatus::Running;
+            }
         }
     }
 
@@ -1824,6 +1837,49 @@ impl ChannelPipeline {
             cur == gstreamer::State::Playing
         };
         self.apply_signal_status(playing);
+
+        // Auto channels locked to the wrong scan (p50 vs i50) often sit in Waiting with
+        // signal=false. Flip a couple of times so a mis-probe can recover. Cap attempts so
+        // unused inputs don't relaunch forever.
+        let flip_to = if playing
+            && is_auto_mode(&self.configured_mode)
+            && self.status == ChannelStatus::Waiting
+            && self.decklink_signal_present() == Some(false)
+            && self.signal_flip_attempts < 2
+            && self
+                .last_signal_flip
+                .map(|t| t.elapsed() > std::time::Duration::from_secs(6))
+                .unwrap_or(true)
+            && self
+                .last_adapt
+                .map(|t| t.elapsed() > std::time::Duration::from_secs(6))
+                .unwrap_or(true)
+        {
+            match self.locked_mode.as_str() {
+                "1080p50" => Some("1080i50"),
+                "1080i50" => Some("1080p50"),
+                "1080p5994" => Some("1080i5994"),
+                "1080i5994" => Some("1080p5994"),
+                "1080p60" => Some("1080i60"),
+                "1080i60" => Some("1080p60"),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(mode) = flip_to {
+            tracing::warn!(
+                channel = self.id,
+                from = %self.locked_mode,
+                to = %mode,
+                attempt = self.signal_flip_attempts + 1,
+                "no signal — trying alternate scan mode"
+            );
+            self.last_signal_flip = Some(std::time::Instant::now());
+            self.signal_flip_attempts = self.signal_flip_attempts.saturating_add(1);
+            let _ = self.adapt_to_mode(mode);
+            return;
+        }
 
         let adapt_to = {
             if let Some(fmt) = self.read_live_format() {

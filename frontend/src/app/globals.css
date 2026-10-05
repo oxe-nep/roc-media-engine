@@ -2069,8 +2069,8 @@ html {
 }
 
 .preview-modal {
-  /* Hug the 16:9 stage — avoid a tall empty shell around the picture. */
-  width: min(1080px, calc(100vw - 24px));
+  /* Size to header + 16:9 stage; no tall empty shell. */
+  width: min(1120px, calc(100vw - 24px));
   height: auto;
   max-height: calc(100vh - 24px);
   display: flex;
@@ -2234,8 +2234,6 @@ body:has(.preview-window-root) .container {
   overflow: hidden;
   border-radius: 8px;
   background: #0a0a0a;
-  /* Cap picture height so the modal stays compact on large screens. */
-  max-height: min(62vh, calc(100vh - 140px));
 }
 
 .preview-modal-stage > .audio-meter {
@@ -2247,10 +2245,12 @@ body:has(.preview-window-root) .container {
 }
 
 .preview-modal-video-wrap {
+  /* Width-driven 16:9 — never fix height alone (that letterboxed the picture). */
+  width: min(1000px, calc(100vw - 160px), calc((100vh - 130px) * 16 / 9));
+  max-width: 100%;
   aspect-ratio: 16 / 9;
-  height: min(62vh, calc(100vh - 140px));
-  width: auto;
-  max-width: calc(100vw - 160px);
+  height: auto;
+  max-height: min(70vh, calc(100vh - 130px));
   min-width: 0;
   min-height: 0;
   position: relative;
