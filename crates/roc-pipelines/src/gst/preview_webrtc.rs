@@ -144,6 +144,29 @@ impl WebRtcPreview {
             .sync_state_with_parent()
             .context("sync webrtc branch")?;
 
+        // Wait until rtph264pay has real caps (profile-level-id / packetization-mode).
+        // Creating the offer too early yields H264 without fmtp → browsers show black video.
+        let vpay = branch
+            .by_name(&format!("vpay_{tag}"))
+            .ok_or_else(|| anyhow!("vpay missing"))?;
+        let vpay_src = vpay
+            .static_pad("src")
+            .ok_or_else(|| anyhow!("vpay src missing"))?;
+        let mut have_fmtp = false;
+        for _ in 0..75 {
+            if let Some(caps) = vpay_src.current_caps() {
+                let s = caps.to_string();
+                if s.contains("packetization-mode") || s.contains("profile-level-id") {
+                    have_fmtp = true;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !have_fmtp {
+            warn!(channel, "H264 RTP caps still missing fmtp fields before create-offer");
+        }
+
         // Do NOT wait on set-local-description inside this callback — that deadlocks
         // (create-offer promise never completes → UI shows "create-offer").
         let (offer_tx, offer_rx) = std::sync::mpsc::channel::<Result<String>>();
