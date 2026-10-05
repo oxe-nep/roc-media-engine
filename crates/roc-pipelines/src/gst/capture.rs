@@ -763,6 +763,8 @@ pub struct ChannelPipeline {
     signal_flip_attempts: u8,
     /// Peak dBFS per discrete channel (8). Updated from `level` bus messages.
     audio_peaks: [f64; 8],
+    /// Last time a `level` bus message updated `audio_peaks`.
+    last_level_at: Option<std::time::Instant>,
     /// Live encoded bitstream rate (tee `e` sink probe).
     encode_bitrate: BitrateMeter,
     /// Live SRT MPEG-TS rate (appsrc → srtsink), only while SRT is enabled.
@@ -831,6 +833,7 @@ impl ChannelPipeline {
             last_signal_flip: None,
             signal_flip_attempts: 0,
             audio_peaks: [-90.0; 8],
+            last_level_at: None,
             encode_bitrate: BitrateMeter::new(),
             srt_bitrate: None,
             preview_epoch: 0,
@@ -1090,6 +1093,7 @@ impl ChannelPipeline {
         self.srt = false;
         self.recording_path = None;
         self.audio_peaks = [-90.0; 8];
+        self.last_level_at = None;
         self.encode_bitrate.reset();
         self.srt_bitrate = None;
         Ok(())
@@ -1818,13 +1822,48 @@ impl ChannelPipeline {
             return;
         }
         match self.decklink_signal_present() {
-            Some(false) => self.status = ChannelStatus::Waiting,
-            Some(true) | None => {
-                if self.status != ChannelStatus::Running {
+            Some(false) => {
+                // Drop stale peaks immediately — DeckLink can stop posting `level`
+                // while the last dBFS values would otherwise stick in the UI.
+                if self.status != ChannelStatus::Waiting {
+                    self.audio_peaks = [-90.0; 8];
+                    self.last_level_at = None;
+                }
+                self.status = ChannelStatus::Waiting;
+            }
+            Some(true) => {
+                // Only clear flip budget after a real signal lock, not during relaunch
+                // where `signal` can flicker and reset the counter forever.
+                let relaunching = self
+                    .last_adapt
+                    .map(|t| t.elapsed() < std::time::Duration::from_secs(4))
+                    .unwrap_or(false);
+                if !relaunching {
                     self.signal_flip_attempts = 0;
                 }
                 self.status = ChannelStatus::Running;
             }
+            None => {
+                // Unknown source — keep previous status if already decided.
+                if self.status != ChannelStatus::Error {
+                    self.status = ChannelStatus::Running;
+                }
+            }
+        }
+    }
+
+    /// If `level` goes quiet (no posts), decay meters so silence / stalled audio
+    /// never shows a frozen peak from an earlier route.
+    fn decay_stale_peaks(&mut self) {
+        if self.status != ChannelStatus::Running {
+            return;
+        }
+        let stale = self
+            .last_level_at
+            .map(|t| t.elapsed() > std::time::Duration::from_millis(150))
+            .unwrap_or(false);
+        if stale {
+            self.audio_peaks = [-90.0; 8];
         }
     }
 
@@ -1837,6 +1876,7 @@ impl ChannelPipeline {
             cur == gstreamer::State::Playing
         };
         self.apply_signal_status(playing);
+        self.decay_stale_peaks();
 
         // Auto channels locked to the wrong scan (p50 vs i50) often sit in Waiting with
         // signal=false. Flip a couple of times so a mis-probe can recover. Cap attempts so
@@ -1868,7 +1908,7 @@ impl ChannelPipeline {
             None
         };
         if let Some(mode) = flip_to {
-            tracing::warn!(
+            tracing::info!(
                 channel = self.id,
                 from = %self.locked_mode,
                 to = %mode,
@@ -1960,6 +2000,7 @@ impl ChannelPipeline {
                     if let Some(s) = el.structure() {
                         if s.name() == "level" {
                             Self::apply_level_structure(&mut self.audio_peaks, s);
+                            self.last_level_at = Some(std::time::Instant::now());
                         }
                     }
                 }

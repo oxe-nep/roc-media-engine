@@ -11,7 +11,7 @@ use gstreamer::prelude::*;
 use gstreamer::{Bin, Element, GhostPad, Pad, Pipeline, Promise, State};
 use gstreamer_sdp::SDPMessage;
 use gstreamer_webrtc::{WebRTCSDPType, WebRTCSessionDescription};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::describe::stereo_pair_matrix;
 use crate::preview_sig::{PreviewSignal, PreviewSignalTx};
@@ -155,7 +155,7 @@ impl WebRtcPreview {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         if !have_fmtp {
-            warn!(channel, "H264 RTP caps still missing fmtp fields before create-offer");
+            tracing::debug!(channel, "H264 RTP caps still missing fmtp fields before create-offer");
         }
 
         // Do NOT wait on set-local-description inside this callback — that deadlocks.
