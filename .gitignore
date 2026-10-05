@@ -3,7 +3,7 @@
 .cargo-cache
 config.yaml
 recordings/
-preview/
+/preview/
 hls/
 .idea/
 .vscode/
