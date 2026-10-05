@@ -1391,7 +1391,7 @@ impl ChannelPipeline {
         Ok(())
     }
 
-    /// Stereo PCM into MXF — first pair via audioconvert (no parse-launch matrix).
+    /// Stereo PCM into MXF — first two channels via audioconvert.
     fn link_mezz_pcm(
         &self,
         pipeline: &gstreamer::Pipeline,
@@ -1399,7 +1399,6 @@ impl ChannelPipeline {
         mux: &gstreamer::Element,
         tag: &str,
     ) -> Result<(Vec<gstreamer::Pad>, Vec<gstreamer::Element>)> {
-        let matrix = stereo_pair_matrix(0);
         let queue_a = gstreamer::ElementFactory::make("queue")
             .name(format!("q_{tag}_pcm_{}", self.id))
             .property("max-size-buffers", 64u32)
@@ -1412,7 +1411,6 @@ impl ChannelPipeline {
             .name(format!("aconv_{tag}_{}", self.id))
             .build()
             .context("audioconvert")?;
-        let _ = aconv.set_property_from_str("mix-matrix", &matrix);
         let acaps = gstreamer::ElementFactory::make("capsfilter")
             .name(format!("acaps_{tag}_{}", self.id))
             .property(
