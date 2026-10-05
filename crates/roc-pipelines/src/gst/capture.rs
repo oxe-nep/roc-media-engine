@@ -907,7 +907,7 @@ impl ChannelPipeline {
 
     fn launch_locked(&mut self, locked: &str) -> Result<()> {
         let hls_base = std::env::var("ROC_MEDIA_HLS_DIR").unwrap_or_else(|_| {
-            "/opt/applications/roc-recording/backend/hls".into()
+            "/opt/applications/roc-media-engine/hls".into()
         });
         let hls_dir = format!("{hls_base}/{}", self.id);
         let _ = std::fs::create_dir_all(&hls_dir);

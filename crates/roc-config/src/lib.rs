@@ -43,7 +43,7 @@ fn default_preview_dir() -> PathBuf {
     PathBuf::from("./preview")
 }
 fn default_hls_dir() -> PathBuf {
-    PathBuf::from("/opt/applications/roc-recording/backend/hls")
+    PathBuf::from("/opt/applications/roc-media-engine/hls")
 }
 fn default_public_host() -> String {
     "127.0.0.1".into()

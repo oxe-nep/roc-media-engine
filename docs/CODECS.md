@@ -15,12 +15,24 @@ Spike:
   --output /tmp/roc-spike-hevc.mp4
 ```
 
-## Next (not yet wired)
+## Next implementation targets
+
+H.264/HEVC capture+REC+SRT is solid. Next mezz codecs (priority order):
 
 | Codec | Host status | Plan |
 |-------|-------------|------|
-| **DNxHD / VC-3** | `avenc_dnxhd` / `avdec_dnxhd` present via libav | Dedicated mezz preset (fixed bitrate profiles), MOV/MXF mux — **after** HEVC is stable in REC/SRT |
+| **DNxHD / VC-3** | `avenc_dnxhd` / `avdec_dnxhd` present via libav | Dedicated mezz preset (fixed bitrate profiles), MOV/MXF mux on REC branch |
+| **XAVC** | not wired yet | Probe host encoders (`avenc_*` / Sony XAVC profiles); mezz preset + compatible mux (MXF preferred) |
 | ProRes | not probed | Later if needed for Apple mezz |
 | AV1 NVENC | depends on GPU (P2000: unlikely) | Skip unless hardware supports |
 
-One thing at a time: land HEVC in encode presets + spike first; DNxHD as a separate Fas once H.264/H.265 capture+REC is solid.
+### Suggested land order
+
+1. Probe capture host: `gst-inspect-1.0 avenc_dnxhd`, list any XAVC-capable elements / ffmpeg wrappers
+2. Add encode presets (DNxHD profiles first) without breaking NVENC tee path — mezz may be a second encode branch or alternate REC branch
+3. Wire REC mux (MOV for DNxHD, MXF for XAVC/DNxHD as needed)
+4. UI preset picker already uses `/api/encode/presets` — register new ids there
+
+## Deferred audio
+
+Full 8ch AAC (4× pairs) on SRT/REC remains deferred until mezz codec path is chosen; stereo default stays.

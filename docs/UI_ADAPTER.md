@@ -6,7 +6,7 @@
 |-------|----------|
 | Backend | this repo (`roc-engine` on `:8080`) |
 | Frontend | [`frontend/`](../frontend/) (Next.js) |
-| Legacy Go | [`roc-recording`](../../roc-recording) — frozen reference |
+| Legacy Go | [`roc-recording`](../../roc-recording) — frozen reference only |
 
 ## Dev
 
@@ -25,9 +25,14 @@ cd frontend && cp .env.example .env.local && npm run dev
 
 - Engine systemd on capture host, bind `0.0.0.0:8080`
 - Frontend: [`deploy/k8s-frontend.yaml`](../deploy/k8s-frontend.yaml)
+  - Image: `ghcr.io/oxe-nep/roc-media-engine-frontend:latest`
+  - Resources: `roc-media-engine-*`
+- Public host: `recording.nepsweden.tech`
 - Do **not** run Go `roc-recording.service` (port conflict)
+
+See also [CUTOVER.md](CUTOVER.md).
 
 ## Still deferred
 
 - TC-loop + commentator/WebRTC on the engine (UI grids still present; engine returns empty stubs)
-- Dedicated GHCR image name (`roc-media-engine-frontend`) when ready
+- DNxHD / XAVC mezz codecs (see [CODECS.md](CODECS.md))

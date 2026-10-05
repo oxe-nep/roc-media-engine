@@ -1,13 +1,15 @@
 # roc-media-engine – k3s frontend
-# Keeps existing Service/Ingress names (recording.nepsweden.tech).
+# Public host kept: recording.nepsweden.tech
 # Image built by CI: ghcr.io/oxe-nep/roc-media-engine-frontend:latest
 # nginx proxies to BACKEND_HOST:BACKEND_PORT (engine on :8080).
 
 ---
+# Placeholder only — live cluster keeps API_KEY via kubectl; do not overwrite
+# an existing roc-media-engine-secrets with this example value.
 apiVersion: v1
 kind: Secret
 metadata:
-  name: roc-recording-secrets
+  name: roc-media-engine-secrets
 type: Opaque
 stringData:
   API_KEY: "change-me"
@@ -18,20 +20,20 @@ stringData:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: roc-recording-frontend
+  name: roc-media-engine-frontend
   labels:
-    app: roc-recording-frontend
+    app: roc-media-engine-frontend
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: roc-recording-frontend
+      app: roc-media-engine-frontend
   template:
     metadata:
       labels:
-        app: roc-recording-frontend
+        app: roc-media-engine-frontend
     spec:
       imagePullSecrets:
         - name: ghcr-creds
@@ -41,7 +43,7 @@ spec:
           imagePullPolicy: Always
           envFrom:
             - secretRef:
-                name: roc-recording-secrets
+                name: roc-media-engine-secrets
           ports:
             - name: http
               containerPort: 80
@@ -62,10 +64,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: roc-recording-frontend
+  name: roc-media-engine-frontend
 spec:
   selector:
-    app: roc-recording-frontend
+    app: roc-media-engine-frontend
   ports:
     - name: http
       port: 80
@@ -75,7 +77,7 @@ spec:
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
-  name: roc-recording-http
+  name: roc-media-engine-http
 spec:
   entryPoints:
     - web
@@ -83,7 +85,7 @@ spec:
     - match: Host(`recording.nepsweden.tech`)
       kind: Rule
       services:
-        - name: roc-recording-frontend
+        - name: roc-media-engine-frontend
           port: 80
       middlewares:
         - name: https-redirect
@@ -93,7 +95,7 @@ spec:
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
-  name: roc-recording-https
+  name: roc-media-engine-https
 spec:
   entryPoints:
     - websecure
@@ -101,7 +103,7 @@ spec:
     - match: Host(`recording.nepsweden.tech`)
       kind: Rule
       services:
-        - name: roc-recording-frontend
+        - name: roc-media-engine-frontend
           port: 80
   tls:
     certResolver: letsencrypt

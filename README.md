@@ -100,6 +100,8 @@ Caller mode (e.g. MediaMTX) is the same encode path — set the URL via
 | 3 Playout | SRT/file → DeckLink OUT |
 | 4–5 Workflows/UI | stubs + adapter manifest |
 
+Cutover from Go `roc-recording` (k8s names, paths, verify): [docs/CUTOVER.md](docs/CUTOVER.md).
+
 ## License
 
 MIT
