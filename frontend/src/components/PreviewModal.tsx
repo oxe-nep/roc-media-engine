@@ -279,7 +279,9 @@ export default function PreviewModal({
         <div className="preview-modal-stage">
           <AudioMeters channelId={channelId} bus="encode">
             <div className="preview-modal-video-wrap">
-              <video ref={videoRef} className="preview-modal-video" playsInline autoPlay />
+              <div className="preview-modal-video-frame">
+                <video ref={videoRef} className="preview-modal-video" playsInline autoPlay />
+              </div>
             </div>
           </AudioMeters>
         </div>

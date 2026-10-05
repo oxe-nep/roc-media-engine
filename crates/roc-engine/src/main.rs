@@ -94,7 +94,11 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("."));
 
     let backend = create_backend(&cfg);
-    let orch = Arc::new(Orchestrator::new(cfg.clone(), backend)?);
+    let orch = Arc::new(Orchestrator::new(
+        cfg.clone(),
+        backend,
+        args.config.clone(),
+    )?);
     let ui = Arc::new(UiState::load(
         &data_dir,
         cfg.public_host.clone(),

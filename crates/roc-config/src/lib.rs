@@ -231,6 +231,16 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Atomically rewrite `config.yaml` (presets / channel assignments).
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let yaml = serde_yaml::to_string(self).context("serialize config")?;
+        let tmp = path.with_extension("yaml.tmp");
+        fs::write(&tmp, yaml).with_context(|| format!("write {}", tmp.display()))?;
+        fs::rename(&tmp, path).with_context(|| format!("rename {}", path.display()))?;
+        Ok(())
+    }
+
     pub fn example() -> Self {
         Self {
             bind: default_bind(),

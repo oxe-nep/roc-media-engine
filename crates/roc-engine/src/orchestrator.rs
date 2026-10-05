@@ -47,8 +47,10 @@ fn sanitize_category(raw: &str) -> String {
 
 pub struct Orchestrator {
     pub cfg: Config,
+    /// Path to `config.yaml` — presets / channel assignments are written back here.
+    config_path: PathBuf,
     backend: Arc<dyn PipelineBackend>,
-    /// Runtime encode presets (seeded from YAML; mutable via API for Go sync).
+    /// Runtime encode presets (seeded from YAML; mutable via API).
     presets: Mutex<HashMap<String, EncodePreset>>,
 }
 
@@ -81,7 +83,11 @@ impl Orchestrator {
         roc_config::recording_extension(&codec)
     }
 
-    pub fn new(cfg: Config, backend: Arc<dyn PipelineBackend>) -> Result<Self> {
+    pub fn new(
+        cfg: Config,
+        backend: Arc<dyn PipelineBackend>,
+        config_path: PathBuf,
+    ) -> Result<Self> {
         for ch in &cfg.channels {
             let encode = cfg.preset_for_channel(ch)?;
             let record = cfg.record_preset_for_channel(ch)?;
@@ -90,9 +96,36 @@ impl Orchestrator {
         let presets = Mutex::new(cfg.encode_presets.clone());
         Ok(Self {
             cfg,
+            config_path,
             backend,
             presets,
         })
+    }
+
+    /// Persist runtime presets + per-channel proxy/REC selection into config.yaml.
+    fn persist_config(&self) {
+        let mut cfg = match Config::load(&self.config_path) {
+            Ok(c) => c,
+            Err(err) => {
+                // Fall back to in-memory cfg so we still write something useful.
+                tracing::warn!(error = %err, "reload config for persist failed — using memory copy");
+                self.cfg.clone()
+            }
+        };
+        cfg.encode_presets = self.presets.lock().clone();
+        for snap in self.backend.list_channels() {
+            if let Some(ch) = cfg.channels.iter_mut().find(|c| c.id == snap.id) {
+                ch.encode_preset = Some(snap.encode_preset.clone());
+                ch.record_preset = Some(snap.record_preset.clone());
+            }
+        }
+        if let Err(err) = cfg.save(&self.config_path) {
+            tracing::error!(
+                path = %self.config_path.display(),
+                error = %err,
+                "failed to persist config.yaml (presets will be lost on restart)"
+            );
+        }
     }
 
     pub fn list_presets(&self) -> Vec<(String, EncodePreset)> {
@@ -151,6 +184,7 @@ impl Orchestrator {
                 }
             }
         }
+        self.persist_config();
         Ok(preset)
     }
 
@@ -159,14 +193,17 @@ impl Orchestrator {
         if id.is_empty() {
             bail!("preset id is required");
         }
-        let mut map = self.presets.lock();
-        if !map.contains_key(id) {
-            bail!("encode preset `{id}` not found");
+        {
+            let mut map = self.presets.lock();
+            if !map.contains_key(id) {
+                bail!("encode preset `{id}` not found");
+            }
+            if map.len() <= 1 {
+                bail!("cannot delete the last encode preset");
+            }
+            map.remove(id);
         }
-        if map.len() <= 1 {
-            bail!("cannot delete the last encode preset");
-        }
-        map.remove(id);
+        self.persist_config();
         Ok(())
     }
 
@@ -282,6 +319,7 @@ impl Orchestrator {
             .with_context(|| format!("encode preset `{preset_id}` not found"))?;
         self.backend
             .apply_encode_preset(id, preset_id, &preset)?;
+        self.persist_config();
         self.backend.channel_snapshot(id)
     }
 
@@ -294,6 +332,7 @@ impl Orchestrator {
             .with_context(|| format!("record preset `{preset_id}` not found"))?;
         self.backend
             .apply_record_preset(id, preset_id, &preset)?;
+        self.persist_config();
         self.backend.channel_snapshot(id)
     }
 
