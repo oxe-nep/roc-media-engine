@@ -44,6 +44,18 @@ fn drain_playout_bus_error(pipeline: &gstreamer::Pipeline) -> Option<String> {
     last
 }
 
+fn apply_playout_level(peaks: &mut [f64; 2], s: &gstreamer::StructureRef) {
+    let Ok(arr) = s.get::<gstreamer::glib::ValueArray>("peak") else {
+        return;
+    };
+    for (i, val) in arr.iter().enumerate().take(2) {
+        let Ok(db) = val.get::<f64>() else {
+            continue;
+        };
+        peaks[i] = if db.is_finite() { db.max(-90.0) } else { -90.0 };
+    }
+}
+
 fn poll_playout_runtime(p: &mut PlayoutRuntime) {
     use gstreamer::prelude::*;
     use gstreamer::MessageView;
@@ -69,6 +81,17 @@ fn poll_playout_runtime(p: &mut PlayoutRuntime) {
                 tracing::info!(client = %p.name, "playout EOS");
                 p.status = ChannelStatus::Stopped;
             }
+            MessageView::Element(el) => {
+                if let Some(s) = el.structure() {
+                    if s.name() == "level" {
+                        apply_playout_level(&mut p.audio_peaks, s);
+                        p.last_level_at = Some(std::time::Instant::now());
+                        if matches!(p.status, ChannelStatus::Waiting) {
+                            p.status = ChannelStatus::Running;
+                        }
+                    }
+                }
+            }
             MessageView::StateChanged(sc) => {
                 if sc.current() == gstreamer::State::Playing
                     && matches!(p.status, ChannelStatus::Waiting)
@@ -77,6 +100,11 @@ fn poll_playout_runtime(p: &mut PlayoutRuntime) {
                 }
             }
             _ => {}
+        }
+    }
+    if let Some(at) = p.last_level_at {
+        if at.elapsed() > std::time::Duration::from_millis(500) {
+            p.audio_peaks = [-90.0; 2];
         }
     }
 }
@@ -101,6 +129,8 @@ struct PlayoutRuntime {
     source: Option<String>,
     format_code: Option<String>,
     last_error: Option<String>,
+    audio_peaks: [f64; 2],
+    last_level_at: Option<std::time::Instant>,
     pipeline: Option<gstreamer::Pipeline>,
 }
 
@@ -377,10 +407,39 @@ impl PipelineBackend for GstBackend {
         use crate::resolve_playout_format_code;
 
         let format_code = resolve_playout_format_code(client.format_code.as_deref(), source);
+        let num_id = client
+            .id
+            .strip_prefix("decode-")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        let hls_base = std::env::var("ROC_MEDIA_HLS_DIR").unwrap_or_else(|_| {
+            "/opt/applications/roc-media-engine/hls".into()
+        });
+        let hls_dir = if num_id > 0 {
+            let dir = format!("{hls_base}/playout/{num_id}");
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for ent in rd.flatten() {
+                    let name = ent.file_name();
+                    let n = name.to_string_lossy();
+                    if n.ends_with(".m3u8")
+                        || n.ends_with(".ts")
+                        || n.starts_with("thumb")
+                        || n.starts_with("pv")
+                    {
+                        let _ = std::fs::remove_file(ent.path());
+                    }
+                }
+            }
+            Some(dir)
+        } else {
+            None
+        };
         let launch = build_playout_launch(&PlayoutLaunchOpts {
             source: source.to_string(),
             device: client.device.clone(),
             format_code: format_code.clone(),
+            hls_dir,
         });
         tracing::info!(%launch, client_id = %client.id, %format_code, "starting playout pipeline");
         let pipeline = gstreamer::parse::launch(&launch)
@@ -427,6 +486,8 @@ impl PipelineBackend for GstBackend {
                 source: Some(source.to_string()),
                 format_code: Some(format_code),
                 last_error: None,
+                audio_peaks: [-90.0; 2],
+                last_level_at: None,
                 pipeline: Some(pipeline),
             },
         );
@@ -494,6 +555,7 @@ impl PipelineBackend for GstBackend {
                 source: p.source.clone(),
                 format_code: p.format_code.clone(),
                 last_error: p.last_error.clone(),
+                audio_peaks: Some(p.audio_peaks.to_vec()),
             })
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));

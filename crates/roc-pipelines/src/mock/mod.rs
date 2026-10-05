@@ -457,6 +457,7 @@ impl PipelineBackend for MockBackend {
                 source: p.source.clone(),
                 format_code: p.format_code.clone(),
                 last_error: p.last_error.clone(),
+                audio_peaks: None,
             })
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));

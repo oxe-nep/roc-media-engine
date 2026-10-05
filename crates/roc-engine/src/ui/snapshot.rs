@@ -325,10 +325,10 @@ pub fn meters_maps(orch: &Orchestrator) -> (serde_json::Map<String, Value>, serd
         if num_id == 0 {
             continue;
         }
-        // Real peaks land with the playout GST meter tee; silence until then.
+        let m = from_peaks(p.audio_peaks.as_deref());
         play.insert(
             num_id.to_string(),
-            json!({"l": -90.0, "r": -90.0, "channels": silence_peaks()}),
+            serde_json::to_value(m).unwrap_or(json!({"l": -90.0, "r": -90.0, "channels": silence_peaks()})),
         );
     }
     (enc, play)

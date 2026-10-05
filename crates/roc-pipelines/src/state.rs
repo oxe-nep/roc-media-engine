@@ -100,6 +100,9 @@ pub struct PlayoutSnapshot {
     #[serde(default)]
     pub format_code: Option<String>,
     pub last_error: Option<String>,
+    /// Peak levels in dBFS for playout stereo (−90 = silence).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_peaks: Option<Vec<f64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

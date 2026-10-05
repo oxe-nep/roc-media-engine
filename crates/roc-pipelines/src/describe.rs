@@ -23,6 +23,8 @@ pub struct PlayoutLaunchOpts {
     pub source: String,
     pub device: String,
     pub format_code: String,
+    /// When set, write `listen_0.m3u8` + JPEG thumb under this directory.
+    pub hls_dir: Option<String>,
 }
 
 /// Map `"DeckLink IP 100G (1)"` / `"1"` / `"0"` → DeckLink `device-number` (0-based).
@@ -589,19 +591,54 @@ pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
         _ => ("1080", "50/1"),
     };
 
+    let preview = if let Some(dir) = &opts.hls_dir {
+        let _ = std::fs::create_dir_all(dir);
+        let seg = format!("{dir}/pv%05d.ts");
+        let playlist = format!("{dir}/listen_0.m3u8");
+        let thumb = format!("{dir}/thumb%05d.jpg");
+        format!(
+            "v. ! queue max-size-buffers=2 leaky=downstream ! \
+               videoconvert ! videoscale ! videorate skip-to-first=true ! \
+               video/x-raw,width=640,height=360,framerate=10/1 ! \
+               x264enc tune=zerolatency speed-preset=ultrafast bitrate=800 key-int-max=20 bframes=0 ! \
+               video/x-h264,profile=baseline ! h264parse config-interval=-1 ! \
+               hlssink2 name=hls_l0 location=\"{seg}\" playlist-location=\"{playlist}\" \
+               target-duration=1 max-files=6 playlist-length=6 \
+             a. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=200000000 ! \
+               audioconvert ! audioresample ! \
+               audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved ! \
+               voaacenc bitrate=128000 ! aacparse ! hls_l0.audio \
+             v. ! queue max-size-buffers=2 leaky=downstream ! \
+               videoconvert ! videoscale ! videorate skip-to-first=true ! \
+               video/x-raw,width=640,height=360,framerate=1/1 ! \
+               jpegenc quality=80 idct-method=float ! \
+               multifilesink location=\"{thumb}\" max-files=1 next-file=buffer \
+               post-messages=false sync=false async=false"
+        )
+    } else {
+        String::new()
+    };
+
     // Caps on demux pads are required: our MPEG-TS often exposes AAC before H.264,
     // so untyped `d.` can latch the audio pad onto the video branch → audio-only OUT.
     format!(
         "{src} \
          d. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
            video/x-h264 ! h264parse config-interval=-1 ! avdec_h264 ! \
-           videoconvert ! videoscale ! videorate skip-to-first=true ! \
+           videoconvert ! tee name=v \
+         v. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
+           videoscale ! videorate skip-to-first=true ! \
            video/x-raw,format=UYVY,width=1920,height={height},framerate={fr} ! \
            {vsink} \
          d. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
-           audio/mpeg ! aacparse ! avdec_aac ! audioconvert ! audioresample ! \
+           audio/mpeg ! aacparse ! avdec_aac ! audioconvert ! audioresample ! tee name=a \
+         a. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
            audio/x-raw,format=S16LE,channels=2,rate=48000 ! \
-           {asink}",
+           {asink} \
+         a. ! queue max-size-buffers=8 leaky=downstream ! \
+           level name=ameter interval=33000000 post-messages=true ! \
+           fakesink sync=false async=false \
+         {preview}",
         vsink = decklink_video_sink(&opts.device, mode),
         asink = decklink_audio_sink(&opts.device),
     )

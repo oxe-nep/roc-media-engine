@@ -414,6 +414,7 @@ impl Orchestrator {
                     source: None,
                     format_code: c.format_code.clone(),
                     last_error: None,
+                    audio_peaks: None,
                 });
             }
         }
