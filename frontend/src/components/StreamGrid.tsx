@@ -50,6 +50,14 @@ function shortSignalFormat(raw?: string): string | null {
   return raw;
 }
 
+/** e.g. `1080i50 · 10-bit` */
+function signalMetaLabel(format?: string, bitDepth?: number | null): string | null {
+  const fmt = shortSignalFormat(format);
+  if (!fmt) return null;
+  if (bitDepth === 8 || bitDepth === 10) return `${fmt} · ${bitDepth}-bit`;
+  return fmt;
+}
+
 function formatSchedBadge(sch: RecordingSchedule): string {
   const hm = (iso: string) => {
     const d = new Date(iso);
@@ -247,8 +255,20 @@ export default function StreamGrid() {
           const tslText = s.tsl_text?.trim();
           const proxyLabel = activePreset?.label || s.encode_preset || null;
           const recLabel =
-            activeRecPreset?.label || s.record_preset || s.encode_preset || null;
-          const signalLabel = shortSignalFormat(s.format);
+            s.mezz_label ||
+            activeRecPreset?.label ||
+            s.record_preset ||
+            s.encode_preset ||
+            null;
+          const signalLabel = signalMetaLabel(s.format, s.bit_depth);
+          const hqTitle =
+            s.mezz_label && activeRecPreset?.label && s.mezz_label !== activeRecPreset.label
+              ? `${activeRecPreset.label} → ${s.mezz_label}`
+              : recLabel || undefined;
+          const hqDownconvert8 =
+            s.bit_depth === 10 &&
+            !!s.mezz_label &&
+            !/x\b/i.test(s.mezz_label);
           const actionError = cardError[s.id];
           return (
             <div key={s.id} className={`card-panel ${s.status}`}>
@@ -395,7 +415,11 @@ export default function StreamGrid() {
                         </div>
                         <div
                           className="card-presets"
-                          title={`Proxy ${proxyLabel || "—"} · HQ ${recLabel || "—"}`}
+                          title={
+                            hqDownconvert8
+                              ? `Proxy ${proxyLabel || "—"} · HQ ${hqTitle || "—"} (10-bit source → 8-bit REC)`
+                              : `Proxy ${proxyLabel || "—"} · HQ ${hqTitle || "—"}`
+                          }
                         >
                           <span className="card-preset-line">
                             <span className="card-preset-role">Proxy</span>
@@ -403,7 +427,10 @@ export default function StreamGrid() {
                           </span>
                           <span className="card-preset-line">
                             <span className="card-preset-role">HQ</span>
-                            <span className="card-preset-value">{recLabel || "—"}</span>
+                            <span className="card-preset-value">
+                              {recLabel || "—"}
+                              {hqDownconvert8 ? " · →8" : ""}
+                            </span>
                           </span>
                         </div>
                       </div>

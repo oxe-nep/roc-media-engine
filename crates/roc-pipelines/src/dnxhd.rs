@@ -193,6 +193,7 @@ mod tests {
             fps_num: 25,
             fps_den: 1,
             interlaced: true,
+            bit_depth: 8,
         }
     }
 
@@ -204,6 +205,7 @@ mod tests {
             fps_num: 50,
             fps_den: 1,
             interlaced: true,
+            bit_depth: 8,
         }
     }
 
@@ -215,6 +217,7 @@ mod tests {
             fps_num: 50,
             fps_den: 1,
             interlaced: false,
+            bit_depth: 8,
         }
     }
 
@@ -226,6 +229,7 @@ mod tests {
             fps_num: 30000,
             fps_den: 1001,
             interlaced: true,
+            bit_depth: 8,
         }
     }
 

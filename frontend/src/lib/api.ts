@@ -12,6 +12,10 @@ export interface Stream {
   status: "running" | "waiting" | "stopped" | "error";
   error?: string;
   format?: string;
+  /** Source luma bit depth when known (8 or 10). */
+  bit_depth?: number | null;
+  /** Resolved HQ mezz OP for live signal, e.g. `DNxHD 185`. */
+  mezz_label?: string | null;
   encode_preset: string;
   /** Mezz/REC encode preset (falls back to encode_preset when unset). */
   record_preset?: string;

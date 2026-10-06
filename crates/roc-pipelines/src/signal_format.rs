@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+fn default_bit_depth() -> u8 {
+    8
+}
+
 /// Snapshot of what we believe the input is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputFormat {
@@ -11,6 +15,9 @@ pub struct InputFormat {
     pub fps_num: i32,
     pub fps_den: i32,
     pub interlaced: bool,
+    /// Luma bit depth from live caps (8 or 10). Defaults to 8 when unknown.
+    #[serde(default = "default_bit_depth")]
+    pub bit_depth: u8,
 }
 
 impl InputFormat {
@@ -32,8 +39,14 @@ impl InputFormat {
     pub fn detail(&self) -> String {
         let scan = if self.interlaced { "i" } else { "p" };
         format!(
-            "{}x{}{}{}/{} ({})",
-            self.width, self.height, scan, self.fps_num, self.fps_den, self.mode
+            "{}x{}{}{}/{} · {}-bit ({})",
+            self.width,
+            self.height,
+            scan,
+            self.fps_num,
+            self.fps_den,
+            self.bit_depth.max(8),
+            self.mode
         )
     }
 }
@@ -213,6 +226,30 @@ mod gst_probe {
                 width == 1920 && height == 1080 && (fps - 25.0).abs() < 0.5
             }
         };
+        let bit_depth = {
+            if let Ok(depth) = s.get::<i32>("bit-depth-luma") {
+                if depth >= 10 {
+                    10
+                } else if depth > 0 {
+                    depth as u8
+                } else {
+                    8
+                }
+            } else if let Ok(fmt) = s.get::<&str>("format") {
+                let f = fmt.to_ascii_uppercase();
+                if f.contains("V210")
+                    || f.contains("R210")
+                    || f.contains("P010")
+                    || f.contains("Y210")
+                {
+                    10
+                } else {
+                    8
+                }
+            } else {
+                8
+            }
+        };
         let mode = mode_from_geometry(width, height, fps_num, fps_den, interlaced)?.to_string();
         Some(InputFormat {
             mode,
@@ -221,6 +258,7 @@ mod gst_probe {
             fps_num,
             fps_den,
             interlaced,
+            bit_depth,
         })
     }
 
@@ -569,6 +607,7 @@ mod tests {
             fps_num: 25,
             fps_den: 1,
             interlaced: true,
+            bit_depth: 8,
         };
         assert_eq!(playout_sink_mode_from_input(&fmt), "1080p50");
     }

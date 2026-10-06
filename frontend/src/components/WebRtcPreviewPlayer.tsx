@@ -40,7 +40,8 @@ export default function WebRtcPreviewPlayer({
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const { streams, tcById } = useDashboard();
-  const channelStatus = streams.find((s) => s.id === channelId)?.status;
+  const stream = streams.find((s) => s.id === channelId);
+  const channelStatus = stream?.status;
   const tc = tcById[channelId];
   // Exclusive TC stops encode capture but still has proxy tee `e` for WebRTC/SRT.
   const tcPreviewReady =
@@ -52,6 +53,21 @@ export default function WebRtcPreviewPlayer({
       ? tc?.status !== "running"
       : channelStatus === "waiting";
   const meterBus = tcPreviewReady ? "playout" : "encode";
+
+  const signalBits = (() => {
+    const raw = stream?.format?.trim();
+    if (!raw) return null;
+    const paren = raw.match(/\(([^)]+)\)\s*$/);
+    const fmt = (paren?.[1] || raw).trim();
+    const depth = stream?.bit_depth;
+    if (depth === 8 || depth === 10) return `${fmt} · ${depth}-bit`;
+    return fmt;
+  })();
+  const mezzHint = stream?.mezz_label?.trim() || null;
+  const mezzDownconvert8 =
+    stream?.bit_depth === 10 &&
+    !!mezzHint &&
+    !/x\b/i.test(mezzHint);
   const [pair, setPair] = useState(initialPair);
   const [session, setSession] = useState(0);
   const [status, setStatus] = useState("Connecting…");
@@ -326,6 +342,22 @@ export default function WebRtcPreviewPlayer({
           >
             {statusLabel}
           </span>
+          {signalBits && !encodeOff && (
+            <span
+              className="preview-modal-signal"
+              title={
+                mezzHint
+                  ? mezzDownconvert8
+                    ? `HQ → ${mezzHint} (10-bit source downconverted to 8-bit)`
+                    : `HQ → ${mezzHint}`
+                  : undefined
+              }
+            >
+              {signalBits}
+              {mezzHint ? ` · ${mezzHint}` : ""}
+              {mezzDownconvert8 ? " · → 8-bit" : ""}
+            </span>
+          )}
         </div>
         <div className="preview-modal-actions">
           <div className="preview-pair-pills" role="group" aria-label="Audio pair">

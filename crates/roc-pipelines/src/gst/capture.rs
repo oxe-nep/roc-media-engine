@@ -1346,6 +1346,11 @@ impl ChannelPipeline {
 
     /// Best-effort bit depth from live DeckLink caps (8 if unknown).
     fn source_bit_depth(&self) -> u8 {
+        if let Some(fmt) = self.detected.as_ref() {
+            if fmt.bit_depth >= 8 {
+                return fmt.bit_depth;
+            }
+        }
         let Some(pipeline) = self.pipeline.as_ref() else {
             return 8;
         };
@@ -1378,6 +1383,28 @@ impl ChannelPipeline {
             }
         }
         8
+    }
+
+    /// Preview label for the HQ mezz OP given live signal + record preset (e.g. `DNxHD 185`).
+    fn mezz_label_for_signal(&self) -> Option<String> {
+        let fmt = self.detected.as_ref()?;
+        let codec = self.record_preset.video_codec.to_ascii_lowercase();
+        if codec.contains("dnx") {
+            let hint = crate::parse_bitrate(&self.record_preset.video_bitrate);
+            let class_src = if !self.record_preset.video_preset.trim().is_empty() {
+                self.record_preset.video_preset.as_str()
+            } else {
+                self.record_preset.label.as_str()
+            };
+            let class = crate::DnxhdClass::parse(class_src, hint);
+            return crate::resolve_dnxhd(fmt, class)
+                .ok()
+                .map(|op| op.label);
+        }
+        if codec.contains("xavc") {
+            return Some("XAVC Intra HD".into());
+        }
+        None
     }
 
     /// Audio settings for a REC role. Proxy follows the live/proxy encode preset;
@@ -1640,6 +1667,15 @@ impl ChannelPipeline {
                     self.source_bit_depth()
                 );
             }
+            if class.bits() == 8 && self.source_bit_depth() >= 10 {
+                tracing::warn!(
+                    channel = self.id,
+                    class = class.as_str(),
+                    source_bits = self.source_bit_depth(),
+                    "DNxHD {}: 10-bit source will be recorded as 8-bit (Y42B). Use HQX to keep 10-bit.",
+                    class.as_str()
+                );
+            }
             let frame_duration_ns = 1_000_000_000u64
                 .saturating_mul(op.fps_den as u64)
                 .saturating_div(op.fps_num as u64)
@@ -1652,6 +1688,7 @@ impl ChannelPipeline {
                 interlaced = op.interlaced,
                 fps = %format!("{}/{}", op.fps_num, op.fps_den),
                 raw_format = op.raw_format,
+                source_bits = self.source_bit_depth(),
                 "DNxHD operating point resolved from live signal"
             );
             (op.video_caps(), op.bitrate, op.label, frame_duration_ns)
@@ -2382,6 +2419,8 @@ impl ChannelPipeline {
                 Some(self.locked_mode.clone())
             },
             input_format: self.detected.as_ref().map(|f| f.summary()),
+            bit_depth: self.detected.as_ref().map(|f| f.bit_depth.max(8)),
+            mezz_label: self.mezz_label_for_signal(),
             audio_peaks: Some(self.audio_peaks.to_vec()),
             preview_epoch: self.preview_epoch,
         }

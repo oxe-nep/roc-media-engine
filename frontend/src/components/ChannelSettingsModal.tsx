@@ -506,6 +506,14 @@ export default function ChannelSettingsModal({
                 </option>
               ))}
             </select>
+            {stream?.mezz_label ? (
+              <span className="channel-settings-hint">
+                Live signal → {stream.mezz_label}
+                {stream.bit_depth === 8 || stream.bit_depth === 10
+                  ? ` · source ${stream.bit_depth}-bit`
+                  : ""}
+              </span>
+            ) : null}
           </label>
         </div>
 

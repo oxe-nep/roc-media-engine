@@ -153,6 +153,8 @@ impl MockBackend {
             configured_mode: "auto".into(),
             locked_mode: Some("mock".into()),
             input_format: Some("1920x1080p50/1 (mock)".into()),
+            bit_depth: Some(8),
+            mezz_label: None,
             audio_peaks: Some(vec![-90.0; 8]),
             preview_epoch: 0,
         }

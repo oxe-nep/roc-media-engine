@@ -17,7 +17,7 @@ Capture graph:
 
 | Preset | Codec | Container | Notes |
 |--------|-------|-----------|--------|
-| `dnxhd_sq` / `dnxhd_hq` / `dnxhd_hqx` | `avenc_dnxhd` | `.mxf` (`mxfmux`) | Class selects SQ/HQ/HQX; **bitrate + scan follow live signal** (e.g. 1080i50 HQ → 185 Mbps interlaced). Tap is **pre-deinterlace** `raw`. HQX needs a real 10-bit source (`v210`). |
+| `dnxhd_sq` / `dnxhd_hq` / `dnxhd_hqx` | `avenc_dnxhd` | `.mxf` (`mxfmux`) | Class selects SQ/HQ/HQX; **bitrate + scan follow live signal** (e.g. 1080i50 HQ → 185 Mbps interlaced). Tap is **pre-deinterlace** `raw`. HQX needs a real 10-bit source (`v210`). 10-bit source + SQ/HQ quietly downconverts to 8-bit (`Y42B`). MediaInfo may label HQ as “220” (NTSC family name) even when the OP is **185**. |
 | `dnxhd_145` / `dnxhd_185` | same | `.mxf` | Legacy ids → SQ / HQ |
 | `xavc_intra_hd` | `x264enc` High 4:2:2 Intra | `.mxf` (`mxfmux`) | Open-source XAVC Intra HD **approximation** (not Sony Class 100) |
 

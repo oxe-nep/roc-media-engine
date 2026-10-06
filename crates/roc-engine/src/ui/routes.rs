@@ -567,9 +567,9 @@ async fn encode_options() -> Json<Value> {
                 "id": "avenc_dnxhd",
                 "label": "DNxHD (mezz REC)",
                 "presets": [
-                    {"id": "sq", "label": "SQ — 8-bit (120 @ i50 / 240 @ p50)"},
-                    {"id": "hq", "label": "HQ — 8-bit (185 @ i50 / 365 @ p50)"},
-                    {"id": "hqx", "label": "HQX — 10-bit (i50/p50; requires 10-bit source)"}
+                    {"id": "sq", "label": "SQ (8-bit)"},
+                    {"id": "hq", "label": "HQ (8-bit)"},
+                    {"id": "hqx", "label": "HQX (10-bit)"}
                 ]
             },
             {

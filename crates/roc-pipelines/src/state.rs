@@ -81,6 +81,12 @@ pub struct ChannelSnapshot {
     /// Last detected input format summary (from live caps).
     #[serde(default)]
     pub input_format: Option<String>,
+    /// Source luma bit depth (8 or 10) when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bit_depth: Option<u8>,
+    /// Resolved mezz operating point for the current signal + HQ preset, e.g. `DNxHD 185`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mezz_label: Option<String>,
     /// Peak levels in dBFS for up to 8 discrete channels (−90 = silence).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_peaks: Option<Vec<f64>>,
