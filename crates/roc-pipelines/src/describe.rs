@@ -186,12 +186,14 @@ fn mpegts_program_aac(
             .valve_prefix
             .map(|p| format!("valve name={p}0 drop=true ! "))
             .unwrap_or_default();
+        // Named AAC tee so WebRTC preview can tap pair 0 without touching raw tee `a`.
         return format!(
             "a. ! {q} ! \
              audioconvert mix-matrix=\"{matrix}\" ! {aac_caps} ! \
              voaacenc bitrate={aac_bps} ! aacparse ! \
              capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts ! \
-             {valve}{mux}.",
+             tee name={name_prefix}_aac0 allow-not-linked=true \
+             {name_prefix}_aac0. ! {q} ! {valve}{mux}.",
             mux = out.mux_name,
         );
     }
@@ -205,7 +207,7 @@ fn mpegts_program_aac(
              audioconvert mix-matrix=\"{matrix}\" ! {aac_caps} ! \
              voaacenc bitrate={aac_bps} ! aacparse ! \
              capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts ! \
-             tee name={aac_tee}"
+             tee name={aac_tee} allow-not-linked=true"
         ));
         for out in outputs {
             // Non-leaky into both muxes so all AAC pads stay in the PMT.
@@ -235,14 +237,6 @@ fn meter_branch() -> &'static str {
     "a. ! queue name=ameter_q max-size-buffers=8 leaky=downstream ! \
      level name=ameter interval=33000000 post-messages=true ! \
      fakesink name=ameter_sink sync=false async=false"
-}
-
-/// Always-linked WebRTC audio tap. Preview rewires `wpv_avalve` → opus instead of
-/// requesting/releasing tee pads (that was killing card `ameter` after close).
-fn webrtc_audio_standby_branch() -> &'static str {
-    "a. ! queue name=wpv_aq max-size-buffers=4 leaky=downstream ! \
-     valve name=wpv_avalve drop=true ! \
-     fakesink name=wpv_asink sync=false async=false"
 }
 
 /// 1 fps JPEG thumbnail for the encode grid (`/thumb/{id}`).
@@ -637,7 +631,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
                  audioconvert ! audio/x-raw,channels=8,rate=48000,layout=interleaved ! \
                  tee name=a allow-not-linked=true"
             ),
-            format!("{} {}", meter_branch(), webrtc_audio_standby_branch()),
+            meter_branch().to_string(),
         )
     } else {
         (String::new(), String::new())
@@ -965,10 +959,8 @@ pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
            {asink} \
          {aac} \
          {meter} \
-         {wpv_a} \
          {thumb}",
         meter = meter_branch(),
-        wpv_a = webrtc_audio_standby_branch(),
     )
 }
 
