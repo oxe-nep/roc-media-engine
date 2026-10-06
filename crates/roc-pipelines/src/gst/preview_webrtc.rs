@@ -264,11 +264,19 @@ impl WebRtcPreview {
     }
 
     pub fn detach(self, pipeline: &Pipeline) {
-        // Isolate both valves from the preview bin BEFORE Null — never release tee pads.
-        cleanup_valves(pipeline, self.pair, &self.video_ghost, &self.audio_ghost);
-        let _ = self.branch.set_state(State::Null);
-        let _ = pipeline.remove(&self.branch);
-        info!(session = %self.session_id, "detached webrtc preview");
+        // Soft-close only: starve the taps. Do NOT unlink/Null/remove — that was
+        // flushing upstream into tee `a` and killing card ameter. The bin stays
+        // parked in the pipeline (dropped at capture stop with the parent).
+        if let Some(v) = pipeline.by_name(&format!("wpv_av{}", self.pair)) {
+            v.set_property("drop", true);
+        }
+        if let Some(v) = pipeline.by_name("wpv_vv") {
+            v.set_property("drop", true);
+        }
+        // Keep branch Playing+linked but starved. Forget Rust handles; GstObject
+        // ref on the pipeline holds the bin until capture teardown.
+        std::mem::forget(self.branch);
+        info!(session = %self.session_id, "parked webrtc preview (soft close)");
     }
 }
 
