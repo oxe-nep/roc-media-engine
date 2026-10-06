@@ -123,6 +123,39 @@ fn arm_mezz_pts_reset(video_identity: &gstreamer::Element, frame_duration_ns: u6
     });
 }
 
+/// Rebase PCM PTS/DTS to 0 from the first buffer after the A/V gate.
+/// Required for `qtmux` (ProRes .mov) which rejects drifting audio vs video.
+fn arm_mezz_audio_pts_reset(audio_identity: &gstreamer::Element) {
+    use gstreamer::{ClockTime, PadProbeReturn, PadProbeType};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let Some(pad) = audio_identity.static_pad("src") else {
+        return;
+    };
+    let base = Arc::new(AtomicU64::new(u64::MAX));
+    pad.add_probe(PadProbeType::BUFFER, move |_, info| {
+        let Some(buf) = info.buffer_mut() else {
+            return PadProbeReturn::Ok;
+        };
+        let buf = buf.make_mut();
+        let pts_ns = buf.pts().map(|t| t.nseconds()).unwrap_or(0);
+        let mut b = base.load(Ordering::SeqCst);
+        if b == u64::MAX {
+            base.store(pts_ns, Ordering::SeqCst);
+            b = pts_ns;
+        }
+        let out = pts_ns.saturating_sub(b);
+        buf.set_pts(ClockTime::from_nseconds(out));
+        if let Some(dts) = buf.dts() {
+            buf.set_dts(ClockTime::from_nseconds(dts.nseconds().saturating_sub(b)));
+        } else {
+            buf.set_dts(ClockTime::from_nseconds(out));
+        }
+        PadProbeReturn::Ok
+    });
+}
+
 /// Wire `appsink srt_in` → gated `appsrc` → `srtsink`.
 ///
 /// Pad-probe Drop was leaking poison BUFFER_LISTs (open-chunk dump was clean A/V
@@ -1975,7 +2008,9 @@ impl ChannelPipeline {
             pipeline.add_many([&queue_a, &abin_el, &id_a])?;
             queue_a.link(&abin_el).context("pcm queue→bin")?;
             abin_el.link(&id_a).context("pcm bin→identity")?;
-            id_a.link(mux).context("pcm→mxfmux")?;
+            id_a.link(mux).context("pcm→mezz mux")?;
+            // qtmux is strict about A/V timestamp domains after hot-attach.
+            arm_mezz_audio_pts_reset(&id_a);
 
             let tee_pad = a_tee
                 .request_pad_simple("src_%u")
