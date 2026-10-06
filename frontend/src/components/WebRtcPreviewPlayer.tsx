@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import AudioMeters from "@/components/AudioMeters";
-import { LISTEN_PAIRS } from "@/components/ListenButton";
+import { LISTEN_PAIRS } from "@/lib/listenPairs";
 import { useDashboard } from "@/hooks/useDashboard";
 import { mediaBase } from "@/lib/mediaBase";
 

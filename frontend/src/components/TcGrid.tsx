@@ -17,7 +17,6 @@ import { useWorkflows } from "@/hooks/useWorkflows";
 import { useDashboard } from "@/hooks/useDashboard";
 import Thumbnail from "@/components/Thumbnail";
 import AudioMeters from "@/components/AudioMeters";
-import ListenButton from "@/components/ListenButton";
 import PreviewModal from "@/components/PreviewModal";
 import TcSettingsModal from "@/components/TcSettingsModal";
 
@@ -33,7 +32,6 @@ export default function TcGrid() {
   const [busy, setBusy] = useState<Record<number, boolean>>({});
   const [srtBusy, setSrtBusy] = useState<Record<number, boolean>>({});
   const [metaBusy, setMetaBusy] = useState<Record<number, boolean>>({});
-  const [listenPair, setListenPair] = useState<Record<number, number | null>>({});
   const [preview, setPreview] = useState<{ id: number; pair: number } | null>(null);
   const [settingsId, setSettingsId] = useState<number | null>(null);
   const [presets, setPresets] = useState<EncodePreset[]>([]);
@@ -156,7 +154,6 @@ export default function TcGrid() {
               const tcOn = tcIsActive(tc);
               const tcLive = tcPreviewHasSignal(tc);
               const srtOn = srtById[s.id]?.status === "streaming";
-              const listenAt = listenPair[s.id] ?? null;
               const tslText = s.tsl_text?.trim();
               const actionError = cardError[s.id];
               const engineError = tc?.error?.trim() || "";
@@ -185,12 +182,12 @@ export default function TcGrid() {
                       className="card-thumb"
                       role="button"
                       tabIndex={tcOn ? 0 : -1}
-                      onClick={() => tcOn && setPreview({ id: s.id, pair: listenAt ?? 0 })}
+                      onClick={() => tcOn && setPreview({ id: s.id, pair: 0 })}
                       onKeyDown={(e) => {
                         if (!tcOn) return;
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
-                          setPreview({ id: s.id, pair: listenAt ?? 0 });
+                          setPreview({ id: s.id, pair: 0 });
                         }
                       }}
                       title={tcOn ? "Open preview" : undefined}
@@ -354,15 +351,6 @@ export default function TcGrid() {
                           </button>
                         </div>
                         <div className="card-actions-tools">
-                          {tcLive && (
-                            <ListenButton
-                              pair={listenAt}
-                              onChange={(p) => {
-                                setListenPair((prev) => ({ ...prev, [s.id]: p }));
-                                if (p != null) setPreview({ id: s.id, pair: p });
-                              }}
-                            />
-                          )}
                           <button
                             type="button"
                             className="badge settings-btn"

@@ -24,7 +24,6 @@ import { useDashboard } from "@/hooks/useDashboard";
 import Thumbnail from "@/components/Thumbnail";
 import PreviewModal from "@/components/PreviewModal";
 import AudioMeters from "@/components/AudioMeters";
-import ListenButton from "@/components/ListenButton";
 import ChannelSettingsModal from "@/components/ChannelSettingsModal";
 
 function formatElapsed(sec?: number): string {
@@ -484,18 +483,6 @@ export default function StreamGrid() {
                         </button>
                       </div>
                       <div className="card-actions-tools">
-                        {captureOn && (
-                          <ListenButton
-                            pair={preview?.id === s.id ? preview.pair : null}
-                            onChange={(p) => {
-                              if (p == null) {
-                                setPreview(null);
-                                return;
-                              }
-                              setPreview({ id: s.id, pair: p });
-                            }}
-                          />
-                        )}
                         <button
                           type="button"
                           className="badge settings-btn"
