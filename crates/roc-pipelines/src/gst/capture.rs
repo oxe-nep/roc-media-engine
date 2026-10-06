@@ -91,7 +91,14 @@ fn arm_av_gate_on_keyframe(video_identity: &gstreamer::Element, gate: std::sync:
 /// `identity single-segment` alone leaves PTS in the running domain and
 /// `mxfmux` aborts on `index_pos_diff`. Rewrite PTS/DTS from 0 with a fixed
 /// frame duration derived from caps (fallback 50 fps).
-fn arm_mezz_pts_reset(video_identity: &gstreamer::Element, frame_duration_ns: u64) {
+///
+/// When `video_pts_ns` is set (ProRes/`qtmux`), publish the rewritten PTS so
+/// PCM can be paced and not run ahead of a slow software encode.
+fn arm_mezz_pts_reset(
+    video_identity: &gstreamer::Element,
+    frame_duration_ns: u64,
+    video_pts_ns: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+) {
     use gstreamer::{ClockTime, PadProbeReturn, PadProbeType};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -118,14 +125,20 @@ fn arm_mezz_pts_reset(video_identity: &gstreamer::Element, frame_duration_ns: u6
         buf.set_pts(ClockTime::from_nseconds(out));
         buf.set_dts(ClockTime::from_nseconds(out));
         buf.set_duration(ClockTime::from_nseconds(frame_duration_ns));
+        if let Some(pub_pts) = video_pts_ns.as_ref() {
+            pub_pts.store(out, Ordering::SeqCst);
+        }
         let _ = b; // base kept for diagnostics if we switch back to delta mode
         PadProbeReturn::Ok
     });
 }
 
-/// Rebase PCM PTS/DTS to 0 from the first buffer after the A/V gate.
-/// Required for `qtmux` (ProRes .mov) which rejects drifting audio vs video.
-fn arm_mezz_audio_pts_reset(audio_identity: &gstreamer::Element) {
+/// Rebase PCM to 0 and optionally drop buffers that run ahead of video PTS.
+/// `qtmux` rejects audio that drifts ahead of a slower ProRes encode.
+fn arm_mezz_audio_pts_reset(
+    audio_identity: &gstreamer::Element,
+    video_pts_ns: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+) {
     use gstreamer::{ClockTime, PadProbeReturn, PadProbeType};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -134,6 +147,8 @@ fn arm_mezz_audio_pts_reset(audio_identity: &gstreamer::Element) {
         return;
     };
     let base = Arc::new(AtomicU64::new(u64::MAX));
+    // Allow a little lead so short PCM bursts don't starve; ~80 ms at 48 kHz.
+    const MAX_LEAD_NS: u64 = 80_000_000;
     pad.add_probe(PadProbeType::BUFFER, move |_, info| {
         let Some(buf) = info.buffer_mut() else {
             return PadProbeReturn::Ok;
@@ -146,6 +161,13 @@ fn arm_mezz_audio_pts_reset(audio_identity: &gstreamer::Element) {
             b = pts_ns;
         }
         let out = pts_ns.saturating_sub(b);
+        if let Some(vpts) = video_pts_ns.as_ref() {
+            let v = vpts.load(Ordering::SeqCst);
+            // Wait until video has produced at least one rewritten frame.
+            if v == u64::MAX || out > v.saturating_add(MAX_LEAD_NS) {
+                return PadProbeReturn::Drop;
+            }
+        }
         buf.set_pts(ClockTime::from_nseconds(out));
         if let Some(dts) = buf.dts() {
             buf.set_dts(ClockTime::from_nseconds(dts.nseconds().saturating_sub(b)));
@@ -1902,9 +1924,19 @@ impl ChannelPipeline {
         // Gate PCM until the first video buffer reaches post-encode identity so
         // mxfmux does not open on audio alone with a huge running PTS.
         let av_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // ProRes/qtmux: publish video PTS so PCM can be paced behind a slow encode.
+        let pace_audio = codec.contains("prores");
+        let video_pts_ns = if pace_audio {
+            // u64::MAX = no video frame yet (0 is a valid first PTS).
+            Some(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+                u64::MAX,
+            )))
+        } else {
+            None
+        };
         let audio_queue_prefix = format!("q_{tag}_pcm");
         if let Some(a_tee) = audio_tee {
-            match self.link_mezz_pcm(pipeline, &a_tee, &mux, tag) {
+            match self.link_mezz_pcm(pipeline, &a_tee, &mux, tag, video_pts_ns.clone()) {
                 Ok((a_pads, audio_els)) => {
                     for el in &audio_els {
                         if el.name().starts_with(&audio_queue_prefix) {
@@ -1931,8 +1963,8 @@ impl ChannelPipeline {
                 .context("sync_state_with_parent mezz record")?;
         }
 
-        // Force CFR timestamps into mxfmux (hot-attach skips a fresh segment).
-        arm_mezz_pts_reset(&id_v, frame_duration_ns);
+        // Force CFR timestamps into mxfmux/qtmux (hot-attach skips a fresh segment).
+        arm_mezz_pts_reset(&id_v, frame_duration_ns, video_pts_ns);
 
         if !branch.audio_tee_pads.is_empty() {
             // Intra codecs: every frame is a keyframe — first buffer opens the gate.
@@ -1966,7 +1998,7 @@ impl ChannelPipeline {
         Ok(())
     }
 
-    /// PCM into MXF — stereo pairs from the 8ch raw tee via mix-matrix.
+    /// PCM into mezz mux — stereo pairs from the 8ch raw tee via mix-matrix.
     /// `audio_channels >= 8` → four stereo PCM tracks (ch 1–2 … 7–8).
     fn link_mezz_pcm(
         &self,
@@ -1974,6 +2006,7 @@ impl ChannelPipeline {
         a_tee: &gstreamer::Element,
         mux: &gstreamer::Element,
         tag: &str,
+        video_pts_ns: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     ) -> Result<(Vec<gstreamer::Pad>, Vec<gstreamer::Element>)> {
         let pairs = if self.record_preset.audio_channels >= 8 {
             4
@@ -2010,7 +2043,7 @@ impl ChannelPipeline {
             abin_el.link(&id_a).context("pcm bin→identity")?;
             id_a.link(mux).context("pcm→mezz mux")?;
             // qtmux is strict about A/V timestamp domains after hot-attach.
-            arm_mezz_audio_pts_reset(&id_a);
+            arm_mezz_audio_pts_reset(&id_a, video_pts_ns.clone());
 
             let tee_pad = a_tee
                 .request_pad_simple("src_%u")
