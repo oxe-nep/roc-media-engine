@@ -10,7 +10,7 @@ import {
   type EncodePreset,
 } from "@/lib/api";
 import { isProxyPreset } from "@/lib/presetRoles";
-import { tcCardStatusMeta, tcIsActive, tcPreviewHasSignal, tcSourceLabel } from "@/lib/tcUi";
+import { tcCardStatusMeta, tcIsActive, tcPreviewHasSignal, tcSignalMetaLabel, tcSourceLabel } from "@/lib/tcUi";
 import { showTcCard } from "@/lib/workflow";
 import { sortByChannelId } from "@/lib/sortChannels";
 import { useWorkflows } from "@/hooks/useWorkflows";
@@ -166,6 +166,7 @@ export default function TcGrid() {
                 (activePreset && isProxyPreset(activePreset) ? activePreset.label : null) ||
                 s.encode_preset ||
                 null;
+              const signalLabel = tcSignalMetaLabel(tc);
               const numClass = tcLive
                 ? "running"
                 : tc?.status === "error"
@@ -277,18 +278,33 @@ export default function TcGrid() {
                               </button>
                             )}
                           </div>
+                          <div className="card-meta-row">
+                            <span
+                              className="card-meta"
+                              title={
+                                tcOn
+                                  ? !tcLive
+                                    ? signalLabel
+                                      ? `No signal (last: ${signalLabel})`
+                                      : "No signal"
+                                    : tc?.format || tc?.mode || undefined
+                                  : undefined
+                              }
+                            >
+                              {!tcOn ? (
+                                <span className="card-meta-item">—</span>
+                              ) : !tcLive ? (
+                                <span className="card-meta-item card-meta-waiting">No signal</span>
+                              ) : signalLabel ? (
+                                <span className="card-meta-item card-meta-format">{signalLabel}</span>
+                              ) : (
+                                <span className="card-meta-item">—</span>
+                              )}
+                            </span>
+                          </div>
                           <div
                             className="card-meta"
-                            title={
-                              tcOn
-                                ? [
-                                    tcSourceLabel(tc?.source, tc?.udp_port, s.id),
-                                    tc?.format || tc?.mode,
-                                  ]
-                                    .filter(Boolean)
-                                    .join(" · ")
-                                : undefined
-                            }
+                            title={tcOn ? tcSourceLabel(tc?.source, tc?.udp_port, s.id) : undefined}
                           >
                             <span className="card-meta-item card-meta-tc">{tcCardStatusMeta(tc, tcLive)}</span>
                           </div>

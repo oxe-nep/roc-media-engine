@@ -35,22 +35,25 @@ export function tcFormatLooksInterlaced(raw?: string): boolean {
   return false;
 }
 
-/** Card footer status: source + format + timecode / state. */
+/** Card footer: source + timecode / state (format is shown on its own row). */
 export function tcCardStatusMeta(tc?: TcLoopInfo, live?: boolean): string {
   const src = tcSourceStatusLabel(tc?.source);
-  const fmt = shortTcFormat(tc?.format || tc?.mode);
   const code = normalizeHms(tc?.timecode);
-  const head = fmt ? `${src} · ${fmt}` : src;
   const hasCode = !!code;
 
-  if (live && hasCode) return `${head} · ${code}`;
-  if (hasCode && tcIsActive(tc)) return `${head} · ${code}`;
+  if (live && hasCode) return `${src} · ${code}`;
+  if (hasCode && tcIsActive(tc)) return `${src} · ${code}`;
 
-  if (live) return head;
-  if (tc?.status === "restarting") return `${head} · …`;
-  if (tc?.status === "error") return `${head} · err`;
-  if (tcIsActive(tc)) return `${head} · …`;
+  if (live) return src;
+  if (tc?.status === "restarting") return `${src} · …`;
+  if (tc?.status === "error") return `${src} · err`;
+  if (tcIsActive(tc)) return `${src} · …`;
   return "Off";
+}
+
+/** Signal format for the blue meta row (same style as encode cards). */
+export function tcSignalMetaLabel(tc?: TcLoopInfo): string | null {
+  return shortTcFormat(tc?.format || tc?.mode);
 }
 
 /** Keep HH:MM:SS only (drop frames if present). */
