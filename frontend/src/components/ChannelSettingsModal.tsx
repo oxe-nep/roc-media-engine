@@ -23,7 +23,7 @@ import {
   isCaptureOn,
 } from "@/lib/api";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
-import { isProxyPreset, isRecPreset } from "@/lib/presetRoles";
+import { formatPresetLabel, isProresCodec, isProxyPreset, isRecPreset } from "@/lib/presetRoles";
 
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
@@ -502,10 +502,15 @@ export default function ChannelSettingsModal({
             >
               {recPresets.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.label}
+                  {formatPresetLabel(p)}
                 </option>
               ))}
             </select>
+            {recPresets.find((p) => p.id === recPreset && isProresCodec(p.video_codec)) ? (
+              <span className="channel-settings-hint">
+                ProRes is experimental on this host (CPU encode) — prefer DNxHD for reliable mezz.
+              </span>
+            ) : null}
             {stream?.mezz_label ? (
               <span className="channel-settings-hint">
                 Live signal → {stream.mezz_label}

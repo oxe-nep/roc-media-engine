@@ -112,21 +112,20 @@ export default function PresetHelpModal({ open, kind, onClose }: Props) {
                 is blocked.
               </p>
 
-              <h3>ProRes — pick a profile</h3>
+              <h3>ProRes — experimental</h3>
               <p>
                 ProRes writes a QuickTime <strong>.mov</strong> from the progressive tee (interlace
                 is deinterlaced first). Choose Proxy / LT / 422 / HQ — bitrate follows the profile,
-                not a free Mbps slider. This is a <strong>CPU</strong> encode on the capture host.
+                not a free Mbps slider. This is a <strong>CPU</strong> encode on the capture host
+                and is marked <strong>experimental</strong> until the host is upgraded — prefer{" "}
+                <strong>DNxHD</strong> for reliable mezz today.
               </p>
               <ul className="preset-help-list">
                 <li>
-                  <strong>Proxy / LT</strong> — preferred for live 1080p50; usually keeps realtime.
+                  <strong>Proxy / LT</strong> — lightest profiles; still may stall under load.
                 </li>
                 <li>
-                  <strong>422</strong> — normal edit mezz when the host can keep up.
-                </li>
-                <li>
-                  <strong>HQ</strong> — heaviest; may drop frames if the CPU cannot sustain the rate.
+                  <strong>422 / HQ</strong> — heavier; expect frame drops on current hardware.
                 </li>
               </ul>
             </>

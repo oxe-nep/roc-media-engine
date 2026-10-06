@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import {
+  formatPresetLabel,
   isMezzCodec,
   isNvencCodec,
   isProxyPreset,
@@ -573,7 +574,7 @@ export default function EncodePresetsEditor({
           {visiblePresets.map((p) => (
             <div key={p.id} className={`presets-row ${editingId === p.id ? "active" : ""}`}>
               <button type="button" className="presets-row-main" onClick={() => startEdit(p)}>
-                <span className="presets-row-label">{p.label}</span>
+                <span className="presets-row-label">{formatPresetLabel(p)}</span>
                 <span className="presets-row-meta">
                   {p.id} · {presetListMeta(p)}
                 </span>
@@ -760,7 +761,7 @@ export default function EncodePresetsEditor({
             ) : formProres ? (
               <>
                 MOV · ProRes {proresProfileLabel(proresProfile)} · progressive from live ·{" "}
-                {audioMeta}
+                {audioMeta} · experimental (CPU)
               </>
             ) : (
               <>

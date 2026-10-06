@@ -1,8 +1,20 @@
 /** Shared encode-preset helpers for Proxy vs REC editors and channel selectors. */
 
+export function isProresCodec(codec: string): boolean {
+  return codec.toLowerCase().includes("prores");
+}
+
 export function isMezzCodec(codec: string): boolean {
   const c = codec.toLowerCase();
-  return c.includes("dnx") || c.includes("prores");
+  return c.includes("dnx") || isProresCodec(c);
+}
+
+/** Display label — ProRes is CPU/NFS-sensitive on current hardware. */
+export function formatPresetLabel(p: { id?: string; label: string; video_codec: string }): string {
+  const base = (p.label || p.id || "").trim() || "preset";
+  if (!isProresCodec(p.video_codec)) return base;
+  if (/experimental/i.test(base)) return base;
+  return `${base} · experimental`;
 }
 
 export function isNvencCodec(codec: string): boolean {

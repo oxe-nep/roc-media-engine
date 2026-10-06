@@ -18,6 +18,7 @@ import {
   isCaptureOn,
 } from "@/lib/api";
 import { showEncodeCard } from "@/lib/workflow";
+import { formatPresetLabel } from "@/lib/presetRoles";
 import { sortByChannelId } from "@/lib/sortChannels";
 import { useWorkflows } from "@/hooks/useWorkflows";
 import { useDashboard } from "@/hooks/useDashboard";
@@ -253,16 +254,24 @@ export default function StreamGrid() {
           const hasSignal = s.status === "running";
           const tslText = s.tsl_text?.trim();
           const proxyLabel = activePreset?.label || s.encode_preset || null;
+          const recPresetLabel = activeRecPreset
+            ? formatPresetLabel(activeRecPreset)
+            : null;
+          const mezzLabel = s.mezz_label?.trim()
+            ? /prores/i.test(s.mezz_label) && !/experimental/i.test(s.mezz_label)
+              ? `${s.mezz_label} · experimental`
+              : s.mezz_label
+            : null;
           const recLabel =
-            s.mezz_label ||
-            activeRecPreset?.label ||
+            mezzLabel ||
+            recPresetLabel ||
             s.record_preset ||
             s.encode_preset ||
             null;
           const signalLabel = signalMetaLabel(s.format, s.bit_depth);
           const hqTitle =
-            s.mezz_label && activeRecPreset?.label && s.mezz_label !== activeRecPreset.label
-              ? `${activeRecPreset.label} → ${s.mezz_label}`
+            mezzLabel && recPresetLabel && mezzLabel !== recPresetLabel
+              ? `${recPresetLabel} → ${mezzLabel}`
               : recLabel || undefined;
           const hqDownconvert8 =
             s.bit_depth === 10 &&

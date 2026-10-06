@@ -503,7 +503,7 @@ fn default_presets() -> std::collections::HashMap<String, EncodePreset> {
     m.insert(
         "prores_proxy".into(),
         EncodePreset {
-            label: "ProRes Proxy".into(),
+            label: "ProRes Proxy (experimental)".into(),
             video_codec: "avenc_prores_ks".into(),
             video_bitrate: "45M".into(),
             video_maxrate: None,
@@ -517,7 +517,7 @@ fn default_presets() -> std::collections::HashMap<String, EncodePreset> {
     m.insert(
         "prores_lt".into(),
         EncodePreset {
-            label: "ProRes LT".into(),
+            label: "ProRes LT (experimental)".into(),
             video_codec: "avenc_prores_ks".into(),
             video_bitrate: "102M".into(),
             video_maxrate: None,
@@ -531,7 +531,7 @@ fn default_presets() -> std::collections::HashMap<String, EncodePreset> {
     m.insert(
         "prores_422".into(),
         EncodePreset {
-            label: "ProRes 422".into(),
+            label: "ProRes 422 (experimental)".into(),
             video_codec: "avenc_prores_ks".into(),
             video_bitrate: "147M".into(),
             video_maxrate: None,
@@ -545,7 +545,7 @@ fn default_presets() -> std::collections::HashMap<String, EncodePreset> {
     m.insert(
         "prores_hq".into(),
         EncodePreset {
-            label: "ProRes HQ".into(),
+            label: "ProRes HQ (experimental)".into(),
             video_codec: "avenc_prores_ks".into(),
             video_bitrate: "220M".into(),
             video_maxrate: None,

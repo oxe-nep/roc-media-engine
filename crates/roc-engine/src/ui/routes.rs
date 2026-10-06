@@ -629,7 +629,7 @@ async fn encode_options() -> Json<Value> {
             },
             {
                 "id": "avenc_prores_ks",
-                "label": "ProRes (mezz REC)",
+                "label": "ProRes (mezz REC, experimental)",
                 "presets": [
                     {"id": "proxy", "label": "Proxy"},
                     {"id": "lt", "label": "LT"},

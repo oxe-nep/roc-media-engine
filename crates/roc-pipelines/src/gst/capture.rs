@@ -870,7 +870,8 @@ pub struct PendingRecordDetach {
 impl PendingRecordDetach {
     /// Wait for filesink EOS. On timeout returns `Err` (caller should still `finish`).
     pub fn wait_eos(&self) -> Result<()> {
-        match self.rx.recv_timeout(std::time::Duration::from_millis(15000)) {
+        // ProRes/qtmux drain over NFS can exceed 15s after a long encode.
+        match self.rx.recv_timeout(std::time::Duration::from_millis(45000)) {
             Ok(()) => {
                 tracing::info!(
                     channel = self.channel_id,
@@ -1222,6 +1223,10 @@ impl ChannelPipeline {
         self.pipeline = Some(pipeline);
         self.status = ChannelStatus::Waiting;
         self.last_error = None;
+        // Grace period before p↔i "no signal" flip. Cold start used to leave
+        // `last_adapt` unset so the first poll flipped immediately while DeckLink
+        // `signal` was still false — locking the wrong scan and starving REC.
+        self.last_adapt = Some(std::time::Instant::now());
         Ok(())
     }
 
@@ -1964,14 +1969,15 @@ impl ChannelPipeline {
             .with_context(|| format!("make {mux_name}"))?;
         if mux_name == "qtmux" {
             // Keep a playable moov even if final EOS is slow/missed (ProRes drain).
-            // Cap reservation (~2h × default bytes/sec × tracks) so files stay lean.
+            // Cap reservation short: a 2h window pre-allocated tens of MB on NFS and
+            // stalled filesink → encoder blocked → ~1s of frames then EOS timeout.
             let _ = mux.set_property(
                 "reserved-max-duration",
-                gstreamer::ClockTime::from_seconds(2 * 3600),
+                gstreamer::ClockTime::from_seconds(15 * 60),
             );
             let _ = mux.set_property(
                 "reserved-moov-update-period",
-                gstreamer::ClockTime::from_seconds(1),
+                gstreamer::ClockTime::from_seconds(2),
             );
         }
         let sink = gstreamer::ElementFactory::make("filesink")
