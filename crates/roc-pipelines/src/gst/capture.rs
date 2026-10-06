@@ -1935,27 +1935,38 @@ impl ChannelPipeline {
             None
         };
         let audio_queue_prefix = format!("q_{tag}_pcm");
-        if let Some(a_tee) = audio_tee {
-            match self.link_mezz_pcm(pipeline, &a_tee, &mux, tag, video_pts_ns.clone()) {
-                Ok((a_pads, audio_els)) => {
-                    for el in &audio_els {
-                        if el.name().starts_with(&audio_queue_prefix) {
-                            install_av_start_gate(el, av_gate.clone());
+        // ProRes/qtmux: attach PCM only after video is healthy — multi-pad EOS was
+        // leaving moov-less files while A/V pacing settled. Prefer a playable
+        // video-only .mov over a corrupt A/V file; PCM can be re-enabled once
+        // finalize is proven. DNxHD/mxfmux keeps PCM as before.
+        if !codec.contains("prores") {
+            if let Some(a_tee) = audio_tee {
+                match self.link_mezz_pcm(pipeline, &a_tee, &mux, tag, video_pts_ns.clone()) {
+                    Ok((a_pads, audio_els)) => {
+                        for el in &audio_els {
+                            if el.name().starts_with(&audio_queue_prefix) {
+                                install_av_start_gate(el, av_gate.clone());
+                            }
                         }
+                        branch.audio_tee_pads = a_pads;
+                        branch.elements.extend(audio_els);
+                        install_mux_av_sync_log("mezz");
                     }
-                    branch.audio_tee_pads = a_pads;
-                    branch.elements.extend(audio_els);
-                    install_mux_av_sync_log("mezz");
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        channel = self.id,
-                        role = tag,
-                        error = %err,
-                        "mezz REC video-only — audio attach failed"
-                    );
+                    Err(err) => {
+                        tracing::warn!(
+                            channel = self.id,
+                            role = tag,
+                            error = %err,
+                            "mezz REC video-only — audio attach failed"
+                        );
+                    }
                 }
             }
+        } else {
+            tracing::info!(
+                channel = self.id,
+                "ProRes REC video-only for now (PCM deferred until qtmux EOS finalize is solid)"
+            );
         }
 
         for el in &branch.elements {
@@ -2213,8 +2224,9 @@ impl ChannelPipeline {
                     }
                 }
             }
-            // Progressive mp4mux writes moov only on EOS — wait generously.
-            match rx.recv_timeout(std::time::Duration::from_millis(3000)) {
+            // Progressive mp4mux/qtmux writes moov only on EOS — wait generously
+            // (ProRes software encode can take longer to drain).
+            match rx.recv_timeout(std::time::Duration::from_millis(12000)) {
                 Ok(()) => tracing::info!(
                     channel = self.id,
                     role = tag,

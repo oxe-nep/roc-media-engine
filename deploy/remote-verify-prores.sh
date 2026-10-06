@@ -27,7 +27,7 @@ sleep 8
 curl -sS -X POST "$BASE/api/recordings/$CH/stop" | tee /tmp/rme-prores-stop.json
 echo
 
-FILE=$(ls -t /opt/applications/roc-media-engine/recordings/_unsorted/prores_smoke_ch4_*.mov 2>/dev/null | head -1 || true)
+FILE=$(ls -t /mnt/nep-storage/SHL/files/roc-recording/_unsorted/prores_smoke_ch4_*.mov 2>/dev/null | head -1 || true)
 echo "FILE=$FILE"
 if [ -n "$FILE" ]; then
   ls -la "$FILE"
