@@ -23,7 +23,7 @@ curl -sS -X PUT "$BASE/api/recordings/$CH/category" \
   -H 'Content-Type: application/json' -d '{"category":"_unsorted"}' >/dev/null
 curl -sS -X POST "$BASE/api/recordings/$CH/start" | tee /tmp/rme-prores-rec.json
 echo
-sleep 8
+sleep 15
 curl -sS -X POST "$BASE/api/recordings/$CH/stop" | tee /tmp/rme-prores-stop.json
 echo
 

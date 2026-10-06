@@ -1891,9 +1891,10 @@ impl ChannelPipeline {
             .with_context(|| format!("make {mux_name}"))?;
         if mux_name == "qtmux" {
             // Keep a playable moov even if final EOS is slow/missed (ProRes drain).
+            // Cap reservation (~2h × default bytes/sec × tracks) so files stay lean.
             let _ = mux.set_property(
                 "reserved-max-duration",
-                gstreamer::ClockTime::from_seconds(8 * 3600),
+                gstreamer::ClockTime::from_seconds(2 * 3600),
             );
             let _ = mux.set_property(
                 "reserved-moov-update-period",
