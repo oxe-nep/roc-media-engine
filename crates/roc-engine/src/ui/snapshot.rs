@@ -60,6 +60,7 @@ pub fn stream_json(orch: &Orchestrator, _ui: &UiState, id: u32) -> Option<Value>
         "format": ch.input_format.unwrap_or_default(),
         "bit_depth": ch.bit_depth,
         "mezz_label": ch.mezz_label,
+        "hq_recording": ch.hq_recording,
         "encode_preset": ch.encode_preset,
         "record_preset": ch.record_preset,
         "hls_url": format!("/hls/{}/preview.m3u8", ch.id),

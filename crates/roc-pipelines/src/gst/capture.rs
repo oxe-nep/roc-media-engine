@@ -1641,15 +1641,24 @@ impl ChannelPipeline {
 
         let queue_v = gstreamer::ElementFactory::make("queue")
             .name(format!("q_{tag}_v_{}", self.id))
-            .property("max-size-buffers", 8u32)
+            // Isolate mezz from live tee `raw`. Prefer absorbing NFS/encode jitter
+            // over wedging proxy/WebRTC; leaky drops mezz frames only under stall.
+            .property("max-size-buffers", 60u32)
             .property("max-size-bytes", 0u32)
-            .property("max-size-time", gstreamer::ClockTime::from_seconds(1))
+            .property("max-size-time", gstreamer::ClockTime::from_seconds(2))
             .build()
             .context("mezz queue")?;
+        let _ = queue_v.set_property_from_str("leaky", "downstream");
         let convert = gstreamer::ElementFactory::make("videoconvert")
             .name(format!("vconv_{tag}_{}", self.id))
             .build()
             .context("videoconvert")?;
+        // DeckLink may expose i50 as 50/1 fields; DNxHD OP wants 25/1 frames.
+        let rate = gstreamer::ElementFactory::make("videorate")
+            .name(format!("vrate_{tag}_{}", self.id))
+            .property("skip-to-first", true)
+            .build()
+            .context("videorate")?;
 
         let (caps_str, bitrate, enc_label, frame_duration_ns) = if codec.contains("dnx") {
             let hint = crate::parse_bitrate(&self.record_preset.video_bitrate);
@@ -1783,6 +1792,7 @@ impl ChannelPipeline {
         branch.elements.extend([
             queue_v.clone(),
             convert.clone(),
+            rate.clone(),
             caps.clone(),
             tc.clone(),
             enc.clone(),
@@ -1791,10 +1801,11 @@ impl ChannelPipeline {
             sink.clone(),
         ]);
         pipeline.add_many([
-            &queue_v, &convert, &caps, &tc, &enc, &id_v, &mux, &sink,
+            &queue_v, &convert, &rate, &caps, &tc, &enc, &id_v, &mux, &sink,
         ])?;
         queue_v.link(&convert).context("mezz queue→convert")?;
-        convert.link(&caps).context("mezz convert→caps")?;
+        convert.link(&rate).context("mezz convert→videorate")?;
+        rate.link(&caps).context("mezz videorate→caps")?;
         caps.link(&tc).context("mezz caps→timecode")?;
         tc.link(&enc).context("mezz timecode→enc")?;
         if let Some(parse) = &parse_opt {
@@ -1910,9 +1921,10 @@ impl ChannelPipeline {
                 .name(format!("q_{tag}_pcm{pair}_{}", self.id))
                 .property("max-size-buffers", 64u32)
                 .property("max-size-bytes", 0u32)
-                .property("max-size-time", gstreamer::ClockTime::from_mseconds(250))
+                .property("max-size-time", gstreamer::ClockTime::from_mseconds(500))
                 .build()
                 .context("pcm queue")?;
+            let _ = queue_a.set_property_from_str("leaky", "downstream");
             let id_a = make_mux_ts_align(&format!("id_{tag}_pcm{pair}_{}", self.id))?;
             // Same parse style as AAC bins — avoid bare `format=S24LE` after mix-matrix.
             let matrix = stereo_pair_matrix(pair);

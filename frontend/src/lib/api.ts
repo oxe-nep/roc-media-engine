@@ -16,6 +16,8 @@ export interface Stream {
   bit_depth?: number | null;
   /** Resolved HQ mezz OP for live signal, e.g. `DNxHD 185`. */
   mezz_label?: string | null;
+  /** True while HQ/mezz file REC is active. */
+  hq_recording?: boolean;
   encode_preset: string;
   /** Mezz/REC encode preset (falls back to encode_preset when unset). */
   record_preset?: string;

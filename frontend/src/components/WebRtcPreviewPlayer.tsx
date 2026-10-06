@@ -63,11 +63,11 @@ export default function WebRtcPreviewPlayer({
     if (depth === 8 || depth === 10) return `${fmt} · ${depth}-bit`;
     return fmt;
   })();
-  const mezzHint = stream?.mezz_label?.trim() || null;
-  const mezzDownconvert8 =
-    stream?.bit_depth === 10 &&
-    !!mezzHint &&
-    !/x\b/i.test(mezzHint);
+  // WebRTC is always the proxy encode — never show mezz OP as if it were the preview format.
+  const hqRecLabel =
+    stream?.hq_recording && stream?.mezz_label?.trim()
+      ? stream.mezz_label.trim()
+      : null;
   const [pair, setPair] = useState(initialPair);
   const [session, setSession] = useState(0);
   const [status, setStatus] = useState("Connecting…");
@@ -343,19 +343,13 @@ export default function WebRtcPreviewPlayer({
             {statusLabel}
           </span>
           {signalBits && !encodeOff && (
-            <span
-              className="preview-modal-signal"
-              title={
-                mezzHint
-                  ? mezzDownconvert8
-                    ? `HQ → ${mezzHint} (10-bit source downconverted to 8-bit)`
-                    : `HQ → ${mezzHint}`
-                  : undefined
-              }
-            >
+            <span className="preview-modal-signal" title="Live source (WebRTC uses proxy encode)">
               {signalBits}
-              {mezzHint ? ` · ${mezzHint}` : ""}
-              {mezzDownconvert8 ? " · → 8-bit" : ""}
+            </span>
+          )}
+          {hqRecLabel && (
+            <span className="preview-modal-signal preview-modal-hqrec" title="HQ file recording">
+              REC · {hqRecLabel}
             </span>
           )}
         </div>

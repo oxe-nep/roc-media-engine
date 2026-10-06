@@ -88,7 +88,12 @@ impl DnxhdOperatingPoint {
         self.class.bits()
     }
 
-    /// Caps string for the mezz capsfilter (no width/height — convert negotiates).
+    /// Caps for mezz `videoconvert ! videorate ! capsfilter`.
+    ///
+    /// Framerate is pinned here, so the attach path **must** insert `videorate`
+    /// before this capsfilter. DeckLink often exposes 1080i50 as 50/1 field rate
+    /// while the DNxHD OP is 25/1 frames — without videorate the mezz pad stalls
+    /// and back-pressures tee `raw` (kills proxy/WebRTC).
     pub fn video_caps(&self) -> String {
         let mut caps = format!(
             "video/x-raw,format={},framerate={}/{}",
@@ -241,6 +246,11 @@ mod tests {
         assert!(op.interlaced);
         assert_eq!(op.raw_format, "Y42B");
         assert!(op.video_caps().contains("interlace-mode=interleaved"));
+        assert!(
+            op.video_caps().contains("framerate=25/1"),
+            "i50 OP caps should pin 25/1 (attach path inserts videorate): {}",
+            op.video_caps()
+        );
     }
 
     #[test]

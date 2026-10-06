@@ -2683,6 +2683,14 @@ body:has(.preview-window-root) .container {
   font-variant-numeric: tabular-nums;
 }
 
+.preview-modal-hqrec {
+  color: #e8a0a0;
+  background: rgba(200, 70, 70, 0.18);
+  padding: 2px 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
 .preview-pair-pills {
   display: inline-flex;
   align-items: center;
