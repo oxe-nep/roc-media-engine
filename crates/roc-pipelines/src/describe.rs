@@ -598,7 +598,13 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         }
         None => {}
     }
-    out_branches.push("e. ! queue leaky=downstream ! fakesink sync=false".into());
+    // Standing WebRTC video tap (valve rewired on preview; never release tee pads).
+    out_branches.push(
+        "e. ! queue name=wpv_vq max-size-buffers=4 leaky=downstream ! \
+         valve name=wpv_vv drop=true ! \
+         fakesink name=wpv_vs sync=false async=false"
+            .into(),
+    );
 
     // Grid preview is 1 fps JPEG only (no always-on HLS). Listen A/V attaches
     // on demand when the preview modal opens.
@@ -960,7 +966,9 @@ pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
          {enc_prefix}{enc} ! tee name=e \
          e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
            mpegtsmux name=tsmux alignment=7 ! {srt_appsink} \
-         e. ! queue leaky=downstream ! fakesink sync=false \
+         e. ! queue name=wpv_vq max-size-buffers=4 leaky=downstream ! \
+           valve name=wpv_vv drop=true ! \
+           fakesink name=wpv_vs sync=false async=false \
          decklinkaudiosrc device-number={in_num} channels=8 ! \
            audioconvert ! audio/x-raw,channels=8,rate=48000,layout=interleaved ! \
            tee name=a allow-not-linked=true \
