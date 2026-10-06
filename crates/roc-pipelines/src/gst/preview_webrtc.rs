@@ -424,7 +424,11 @@ fn rebuild_audio_meter(pipeline: &Pipeline) {
         if let Some(sink) = q.static_pad("sink") {
             if let Some(peer) = sink.peer() {
                 let _ = peer.unlink(&sink);
-                if peer.parent_element().as_ref().map(|e| e.name().as_str()) == Some("a") {
+                let parent = peer
+                    .parent_element()
+                    .map(|e| e.name().to_string())
+                    .unwrap_or_default();
+                if parent == "a" {
                     tee.release_request_pad(&peer);
                 }
             }
