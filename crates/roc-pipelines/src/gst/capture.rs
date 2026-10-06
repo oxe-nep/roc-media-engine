@@ -21,7 +21,7 @@ use super::bitrate::BitrateMeter;
 use crate::describe::{
     aac_stereo_pairs, build_capture_encode_once_launch, stereo_pair_matrix, CaptureLaunchOpts,
 };
-use crate::signal_format::{format_from_caps, is_auto_mode, probe_input_format, InputFormat};
+use crate::signal_format::{format_from_caps, is_auto_mode, InputFormat};
 use crate::{ChannelSnapshot, ChannelStatus, RecordingRole};
 
 /// Insert an `identity` that forces a clean TIME segment from 0.
