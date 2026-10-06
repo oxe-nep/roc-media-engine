@@ -6,6 +6,7 @@ import {
   deleteEncodePreset,
   fetchEncodeOptions,
   fetchEncodePresets,
+  updateEncodePreset,
   type EncodeCodecOption,
   type EncodePreset,
 } from "@/lib/api";
