@@ -19,7 +19,7 @@ Capture graph:
 |--------|-------|-----------|--------|
 | `dnxhd_sq` / `dnxhd_hq` / `dnxhd_hqx` | `avenc_dnxhd` | `.mxf` (`mxfmux`) | Class selects SQ/HQ/HQX; **bitrate + scan follow live signal** (e.g. 1080i50 HQ → 185 Mbps interlaced). Tap is **pre-deinterlace** `raw`. HQX needs a real 10-bit source (`v210`). 10-bit source + SQ/HQ quietly downconverts to 8-bit (`Y42B`). MediaInfo may label HQ as “220” (NTSC family name) even when the OP is **185**. |
 | `dnxhd_145` / `dnxhd_185` | same | `.mxf` | Legacy ids → SQ / HQ |
-| `prores_proxy` / `prores_lt` / `prores_422` / `prores_hq` | `avenc_prores_ks` | `.mov` (`qtmux`) | Profile-driven (Proxy / LT / 422 / HQ). Tap is **progressive** tee `t` (interlace is deinterlaced before ProRes). 10-bit 4:2:2 (`I422_10LE`). |
+| `prores_proxy` / `prores_lt` / `prores_422` / `prores_hq` | `avenc_prores_ks` | `.mov` (`qtmux`) | Profile-driven (Proxy / LT / 422 / HQ). Tap is **progressive** tee `t` (interlace is deinterlaced before ProRes). 10-bit 4:2:2 (`I422_10LE`). **CPU encode** — Proxy/LT usually sustain 1080p50; 422/HQ may drop frames under load. |
 
 ### DNxHD operating points (1080 — **i50 / p50 only**)
 

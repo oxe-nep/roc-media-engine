@@ -6,7 +6,7 @@ CH=4
 curl -sS -X PUT "$BASE/api/streams/$CH/encode-preset" \
   -H 'Content-Type: application/json' -d '{"preset":"hq"}' >/dev/null
 curl -sS -X PUT "$BASE/api/streams/$CH/record-preset" \
-  -H 'Content-Type: application/json' -d '{"preset":"prores_422"}' | tee /tmp/rme-prores-preset.json
+  -H 'Content-Type: application/json' -d '{"preset":"prores_proxy"}' | tee /tmp/rme-prores-preset.json
 echo
 curl -sS -X POST "$BASE/api/streams/$CH/start" >/dev/null || true
 sleep 4

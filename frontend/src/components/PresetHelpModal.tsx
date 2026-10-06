@@ -116,17 +116,17 @@ export default function PresetHelpModal({ open, kind, onClose }: Props) {
               <p>
                 ProRes writes a QuickTime <strong>.mov</strong> from the progressive tee (interlace
                 is deinterlaced first). Choose Proxy / LT / 422 / HQ — bitrate follows the profile,
-                not a free Mbps slider.
+                not a free Mbps slider. This is a <strong>CPU</strong> encode on the capture host.
               </p>
               <ul className="preset-help-list">
                 <li>
-                  <strong>422</strong> — normal edit mezz.
+                  <strong>Proxy / LT</strong> — preferred for live 1080p50; usually keeps realtime.
                 </li>
                 <li>
-                  <strong>HQ</strong> — heavier, more headroom.
+                  <strong>422</strong> — normal edit mezz when the host can keep up.
                 </li>
                 <li>
-                  <strong>LT / Proxy</strong> — smaller files for offline / review.
+                  <strong>HQ</strong> — heaviest; may drop frames if the CPU cannot sustain the rate.
                 </li>
               </ul>
             </>
