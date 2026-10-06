@@ -142,11 +142,11 @@ fn tc_adapt_candidate(rt: &TcLoopRuntime) -> Option<String> {
         t.map(|x| x.elapsed() > std::time::Duration::from_secs(secs))
             .unwrap_or(true)
     };
-    // Wrong scan lock with no signal → try alternate a couple of times.
+    // Wrong scan lock with no signal → try alternate once after a long wait.
     if tc_decklink_signal_present(rt) == Some(false)
-        && rt.signal_flip_attempts < 2
-        && cool(rt.last_signal_flip, 6)
-        && cool(rt.last_adapt, 6)
+        && rt.signal_flip_attempts < 1
+        && cool(rt.last_signal_flip, 12)
+        && cool(rt.last_adapt, 12)
     {
         if let Some(alt) = tc_alternate_scan(&rt.locked_mode) {
             return Some(alt.to_string());
@@ -156,7 +156,7 @@ fn tc_adapt_candidate(rt: &TcLoopRuntime) -> Option<String> {
     if fmt.width < 1280 || fmt.mode == rt.locked_mode {
         return None;
     }
-    if !cool(rt.last_adapt, 3) {
+    if !cool(rt.last_adapt, 10) {
         return None;
     }
     Some(fmt.mode)
@@ -746,6 +746,47 @@ impl PipelineBackend for GstBackend {
     }
 
     fn start_capture(&self, channel_id: u32) -> Result<()> {
+        use crate::signal_format::{is_auto_mode, probe_input_format};
+
+        // Probe outside gst_op — DeckLink format detect can take several seconds.
+        let (device, configured, already_live) = {
+            let map = self.channels.lock();
+            let pipe = map
+                .get(&channel_id)
+                .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+            (
+                pipe.device_name().to_string(),
+                pipe.configured_mode().to_string(),
+                matches!(pipe.status, ChannelStatus::Running | ChannelStatus::Waiting),
+            )
+        };
+        if already_live {
+            return Ok(());
+        }
+
+        let (locked, detected) = if is_auto_mode(&configured) {
+            match probe_input_format(&device, 5000) {
+                Ok(fmt) => {
+                    tracing::info!(
+                        channel = channel_id,
+                        format = %fmt.summary(),
+                        "probed input format"
+                    );
+                    (fmt.mode.clone(), Some(fmt))
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        channel = channel_id,
+                        error = %err,
+                        "input probe failed — falling back to 1080p50"
+                    );
+                    ("1080p50".into(), None)
+                }
+            }
+        } else {
+            (configured, None)
+        };
+
         let _gst = self.gst_op.lock();
         let used = self.nvenc_used.load(Ordering::SeqCst);
         if used >= self.max_nvenc {
@@ -758,7 +799,10 @@ impl PipelineBackend for GstBackend {
         if matches!(pipe.status, ChannelStatus::Running | ChannelStatus::Waiting) {
             return Ok(());
         }
-        pipe.start()?;
+        if let Some(fmt) = detected {
+            pipe.set_detected(fmt);
+        }
+        pipe.start_with_mode(&locked)?;
         self.nvenc_used.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -777,8 +821,11 @@ impl PipelineBackend for GstBackend {
             let pending_hq = pipe.begin_stop_hq_recording()?;
             (pending_proxy, pending_hq, was_live)
         };
+        let mut eos_err = None;
         for pending in [pending_proxy, pending_hq].into_iter().flatten() {
-            pending.wait_eos();
+            if let Err(e) = pending.wait_eos() {
+                eos_err = Some(e);
+            }
             let _gst = self.gst_op.lock();
             pending.finish();
         }
@@ -795,6 +842,9 @@ impl PipelineBackend for GstBackend {
                     self.nvenc_used.store(0, Ordering::SeqCst);
                 }
             }
+        }
+        if let Some(e) = eos_err {
+            return Err(e);
         }
         Ok(())
     }
@@ -827,9 +877,10 @@ impl PipelineBackend for GstBackend {
         };
         // ProRes / qtmux drain can take seconds — never hold gst_op across wait.
         if let Some(pending) = pending {
-            pending.wait_eos();
+            let eos = pending.wait_eos();
             let _gst = self.gst_op.lock();
             pending.finish();
+            eos?;
         }
         Ok(())
     }
@@ -854,9 +905,10 @@ impl PipelineBackend for GstBackend {
         };
         // ProRes / qtmux drain can take seconds — never hold gst_op across wait.
         if let Some(pending) = pending {
-            pending.wait_eos();
+            let eos = pending.wait_eos();
             let _gst = self.gst_op.lock();
             pending.finish();
+            eos?;
         }
         Ok(())
     }

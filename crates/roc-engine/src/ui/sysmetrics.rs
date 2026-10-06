@@ -135,21 +135,11 @@ impl Collector {
         let (idle, total) = read_cpu_times()?;
         let mut g = self.inner.lock().unwrap();
         if !g.have_prev {
+            // Seed without sleeping on the request thread; next snapshot yields a real %.
             g.prev_idle = idle;
             g.prev_total = total;
             g.have_prev = true;
-            drop(g);
-            std::thread::sleep(Duration::from_millis(120));
-            let (idle2, total2) = read_cpu_times()?;
-            let mut g = self.inner.lock().unwrap();
-            g.prev_idle = idle2;
-            g.prev_total = total2;
-            let d_idle = idle2.saturating_sub(idle);
-            let d_total = total2.saturating_sub(total);
-            if d_total == 0 {
-                return Ok(0.0);
-            }
-            return Ok((1.0 - d_idle as f64 / d_total as f64) * 100.0);
+            return Ok(0.0);
         }
         let d_idle = idle.saturating_sub(g.prev_idle);
         let d_total = total.saturating_sub(g.prev_total);

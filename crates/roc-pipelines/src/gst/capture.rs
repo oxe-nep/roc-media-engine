@@ -829,6 +829,8 @@ pub struct ChannelPipeline {
     last_signal_flip: Option<std::time::Instant>,
     /// How many p↔i flips while waiting since last Running (cap to avoid relaunch storms).
     signal_flip_attempts: u8,
+    /// Format-adapt hysteresis: mode must stay stable before relaunch.
+    pending_adapt_mode: Option<(String, std::time::Instant)>,
     /// Peak dBFS per discrete channel (8). Updated from `level` bus messages.
     audio_peaks: [f64; 8],
     /// Last time a `level` bus message updated `audio_peaks`.
@@ -866,18 +868,29 @@ pub struct PendingRecordDetach {
 }
 
 impl PendingRecordDetach {
-    pub fn wait_eos(&self) {
+    /// Wait for filesink EOS. On timeout returns `Err` (caller should still `finish`).
+    pub fn wait_eos(&self) -> Result<()> {
         match self.rx.recv_timeout(std::time::Duration::from_millis(15000)) {
-            Ok(()) => tracing::info!(
-                channel = self.channel_id,
-                role = %self.tag,
-                "record EOS reached filesink"
-            ),
-            Err(_) => tracing::warn!(
-                channel = self.channel_id,
-                role = %self.tag,
-                "record EOS timeout — moov may be missing"
-            ),
+            Ok(()) => {
+                tracing::info!(
+                    channel = self.channel_id,
+                    role = %self.tag,
+                    "record EOS reached filesink"
+                );
+                Ok(())
+            }
+            Err(_) => {
+                tracing::warn!(
+                    channel = self.channel_id,
+                    role = %self.tag,
+                    "record EOS timeout — moov may be missing"
+                );
+                Err(anyhow!(
+                    "record EOS timeout on channel {} role {} — file may lack moov/footer",
+                    self.channel_id,
+                    self.tag
+                ))
+            }
         }
     }
 
@@ -953,6 +966,7 @@ impl ChannelPipeline {
             last_adapt: None,
             last_signal_flip: None,
             signal_flip_attempts: 0,
+            pending_adapt_mode: None,
             audio_peaks: [-90.0; 8],
             last_level_at: None,
             encode_bitrate: BitrateMeter::new(),
@@ -1113,9 +1127,29 @@ impl ChannelPipeline {
             return Ok(());
         }
         let locked = self.resolve_lock_mode()?;
-        self.locked_mode = locked.clone();
-        self.launch_locked(&locked)?;
+        self.start_with_mode(&locked)
+    }
+
+    /// Start with a pre-resolved DeckLink mode (probe done outside `gst_op`).
+    pub fn start_with_mode(&mut self, locked: &str) -> Result<()> {
+        if self.pipeline.is_some() {
+            return Ok(());
+        }
+        self.locked_mode = locked.to_string();
+        self.launch_locked(locked)?;
         Ok(())
+    }
+
+    pub fn device_name(&self) -> &str {
+        &self.device
+    }
+
+    pub fn configured_mode(&self) -> &str {
+        &self.configured_mode
+    }
+
+    pub fn set_detected(&mut self, fmt: InputFormat) {
+        self.detected = Some(fmt);
     }
 
     fn resolve_lock_mode(&mut self) -> Result<String> {
@@ -2245,8 +2279,9 @@ impl ChannelPipeline {
     /// When `!finalize`, unlinks immediately (relaunch / hard stop).
     fn detach_recording(&mut self, role: RecordingRole, finalize: bool) -> Result<()> {
         if let Some(pending) = self.begin_detach_recording(role, finalize)? {
-            pending.wait_eos();
+            let eos = pending.wait_eos();
             pending.finish();
+            eos?;
         }
         Ok(())
     }
@@ -2487,20 +2522,19 @@ impl ChannelPipeline {
         self.decay_stale_peaks();
 
         // Auto channels locked to the wrong scan (p50 vs i50) often sit in Waiting with
-        // signal=false. Flip a couple of times so a mis-probe can recover. Cap attempts so
-        // unused inputs don't relaunch forever.
+        // signal=false. Flip once after a long wait so a mis-probe can recover — then stop.
         let flip_to = if playing
             && is_auto_mode(&self.configured_mode)
             && self.status == ChannelStatus::Waiting
             && self.decklink_signal_present() == Some(false)
-            && self.signal_flip_attempts < 2
+            && self.signal_flip_attempts < 1
             && self
                 .last_signal_flip
-                .map(|t| t.elapsed() > std::time::Duration::from_secs(6))
+                .map(|t| t.elapsed() > std::time::Duration::from_secs(12))
                 .unwrap_or(true)
             && self
                 .last_adapt
-                .map(|t| t.elapsed() > std::time::Duration::from_secs(6))
+                .map(|t| t.elapsed() > std::time::Duration::from_secs(12))
                 .unwrap_or(true)
         {
             match self.locked_mode.as_str() {
@@ -2525,6 +2559,7 @@ impl ChannelPipeline {
             );
             self.last_signal_flip = Some(std::time::Instant::now());
             self.signal_flip_attempts = self.signal_flip_attempts.saturating_add(1);
+            self.pending_adapt_mode = None;
             let _ = self.adapt_to_mode(mode);
             return;
         }
@@ -2537,16 +2572,11 @@ impl ChannelPipeline {
                     .map(|d| d.mode != fmt.mode)
                     .unwrap_or(true);
                 self.detected = Some(fmt.clone());
-                let should = is_auto_mode(&self.configured_mode)
-                    && fmt.mode != self.locked_mode
-                    && fmt.width >= 1280
-                    && self
-                        .last_adapt
-                        .map(|t| t.elapsed() > std::time::Duration::from_secs(3))
-                        .unwrap_or(true);
-                if should {
-                    Some(fmt.mode)
-                } else {
+                if !is_auto_mode(&self.configured_mode)
+                    || fmt.mode == self.locked_mode
+                    || fmt.width < 1280
+                {
+                    self.pending_adapt_mode = None;
                     if changed {
                         tracing::info!(
                             channel = self.id,
@@ -2555,6 +2585,39 @@ impl ChannelPipeline {
                         );
                     }
                     None
+                } else {
+                    let cool = self
+                        .last_adapt
+                        .map(|t| t.elapsed() > std::time::Duration::from_secs(10))
+                        .unwrap_or(true);
+                    let same_pending = self
+                        .pending_adapt_mode
+                        .as_ref()
+                        .is_some_and(|(m, _)| m == &fmt.mode);
+                    let stable = if same_pending {
+                        self.pending_adapt_mode
+                            .as_ref()
+                            .is_some_and(|(_, since)| {
+                                since.elapsed() > std::time::Duration::from_secs(2)
+                            })
+                    } else {
+                        self.pending_adapt_mode =
+                            Some((fmt.mode.clone(), std::time::Instant::now()));
+                        false
+                    };
+                    if cool && stable {
+                        self.pending_adapt_mode = None;
+                        Some(fmt.mode)
+                    } else {
+                        if changed {
+                            tracing::info!(
+                                channel = self.id,
+                                format = %fmt.summary(),
+                                "input format (waiting for stability before adapt)"
+                            );
+                        }
+                        None
+                    }
                 }
             } else {
                 None

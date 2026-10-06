@@ -6,6 +6,7 @@ export interface ChannelWorkflowConfig {
 
 export const DEFAULT_WORKFLOW: ChannelWorkflowConfig = { mode: "pair" };
 
+/** Modes shown in Settings — commentator is hidden until the engine bridge exists. */
 export const WORKFLOW_OPTIONS: {
   mode: ChannelWorkflowMode;
   label: string;
@@ -13,25 +14,24 @@ export const WORKFLOW_OPTIONS: {
 }[] = [
   { mode: "pair", label: "Encode + Decode", hint: "Record / ingest and playout" },
   { mode: "tc", label: "TC Burn-In", hint: "Timecode overlay loop" },
-  {
-    mode: "remote_commentator",
-    label: "Remote Commentator",
-    hint: "WebRTC commentator bridge via DeckLink pair",
-  },
 ];
 
-const VALID_MODES = new Set<ChannelWorkflowMode>(["pair", "tc", "remote_commentator"]);
+const VALID_MODES = new Set<ChannelWorkflowMode>(["pair", "tc"]);
 
 export function normalizeWorkflowConfig(
   value?: Partial<ChannelWorkflowConfig> | { encode?: boolean; decode?: boolean } | string,
 ): ChannelWorkflowConfig {
   if (typeof value === "string") {
     if (value === "tc") return { mode: "tc" };
-    if (value === "remote_commentator") return { mode: "remote_commentator" };
+    // Legacy saved mode — treat as pair until commentator ships.
+    if (value === "remote_commentator") return { ...DEFAULT_WORKFLOW };
     return { ...DEFAULT_WORKFLOW };
   }
   if (value && "mode" in value && value.mode && VALID_MODES.has(value.mode)) {
     return { mode: value.mode };
+  }
+  if (value && "mode" in value && value.mode === "remote_commentator") {
+    return { ...DEFAULT_WORKFLOW };
   }
   // Transitional encode/decode booleans from older builds.
   if (value && ("encode" in value || "decode" in value)) {

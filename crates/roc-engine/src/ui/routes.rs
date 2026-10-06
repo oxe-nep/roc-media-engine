@@ -1328,7 +1328,7 @@ async fn set_workflow_ui(
     Json(body): Json<WfBody>,
 ) -> Result<Json<Value>, UiError> {
     let prev = st.ui.workflow_mode(id);
-    let mode = body
+    let requested = body
         .mode
         .clone()
         .or_else(|| {
@@ -1343,29 +1343,38 @@ async fn set_workflow_ui(
             }
         })
         .unwrap_or_else(|| "pair".into());
-    let mode = match mode.as_str() {
+    if requested == "remote_commentator" || body.commentator == Some(true) {
+        return Err(UiError::bad(
+            "remote commentator is not available yet — use Encode + Decode or TC Burn-In",
+        ));
+    }
+    let mode = match requested.as_str() {
         "tc" => "tc",
-        "remote_commentator" => "remote_commentator",
         _ => "pair",
     };
 
-    if prev != mode {
-        if prev == "tc" {
-            let _ = tc::stop_tc(st.orch.as_ref(), st.ui.as_ref(), id);
-        }
-        if mode == "tc" {
-            st.ui.set_workflow_mode(id, mode);
-            let hls = st.hls_dir.to_string_lossy().to_string();
-            let _ = tc::start_tc(st.orch.as_ref(), st.ui.as_ref(), id, &hls);
-        } else {
-            st.ui.set_workflow_mode(id, mode);
-            if mode == "pair" && st.ui.encode_wanted(id).unwrap_or(true) {
-                let _ = st.orch.start_capture(id);
+    let st2 = st.clone();
+    let hls = st.hls_dir.to_string_lossy().to_string();
+    run_blocking(move || {
+        if prev != mode {
+            if prev == "tc" {
+                let _ = tc::stop_tc(st2.orch.as_ref(), st2.ui.as_ref(), id);
             }
+            if mode == "tc" {
+                st2.ui.set_workflow_mode(id, mode);
+                let _ = tc::start_tc(st2.orch.as_ref(), st2.ui.as_ref(), id, &hls);
+            } else {
+                st2.ui.set_workflow_mode(id, mode);
+                if mode == "pair" && st2.ui.encode_wanted(id).unwrap_or(true) {
+                    let _ = st2.orch.start_capture(id);
+                }
+            }
+        } else {
+            st2.ui.set_workflow_mode(id, mode);
         }
-    } else {
-        st.ui.set_workflow_mode(id, mode);
-    }
+        Ok::<(), UiError>(())
+    })
+    .await?;
 
     Ok(Json(json!({ "id": id, "mode": st.ui.workflow_mode(id) })))
 }
