@@ -1122,14 +1122,6 @@ impl ChannelPipeline {
         }
     }
 
-    pub fn start(&mut self) -> Result<()> {
-        if self.pipeline.is_some() {
-            return Ok(());
-        }
-        let locked = self.resolve_lock_mode()?;
-        self.start_with_mode(&locked)
-    }
-
     /// Start with a pre-resolved DeckLink mode (probe done outside `gst_op`).
     pub fn start_with_mode(&mut self, locked: &str) -> Result<()> {
         if self.pipeline.is_some() {
@@ -1150,34 +1142,6 @@ impl ChannelPipeline {
 
     pub fn set_detected(&mut self, fmt: InputFormat) {
         self.detected = Some(fmt);
-    }
-
-    fn resolve_lock_mode(&mut self) -> Result<String> {
-        if !is_auto_mode(&self.configured_mode) {
-            return Ok(self.configured_mode.clone());
-        }
-        match probe_input_format(&self.device, 5000) {
-            Ok(fmt) => {
-                tracing::info!(
-                    channel = self.id,
-                    format = %fmt.summary(),
-                    "probed input format"
-                );
-                self.detected = Some(fmt.clone());
-                Ok(fmt.mode)
-            }
-            Err(err) => {
-                // No SDI/IP signal yet is normal on unused inputs after restart.
-                // Prefer i50 over p50 as cold-start fallback for broadcast plants that
-                // still run interlaced; live adapt / signal-flip will correct if wrong.
-                tracing::debug!(
-                    channel = self.id,
-                    error = %err,
-                    "input probe failed — falling back to 1080p50"
-                );
-                Ok("1080p50".into())
-            }
-        }
     }
 
     fn launch_locked(&mut self, locked: &str) -> Result<()> {
