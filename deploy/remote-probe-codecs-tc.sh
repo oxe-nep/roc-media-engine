@@ -11,9 +11,9 @@ for e in avenc_dnxhd avdec_dnxhd avenc_mpeg2video avenc_prores avenc_prores_ks t
   if gst-inspect-1.0 "$e" >/dev/null 2>&1; then echo "OK $e"; else echo "MISS $e"; fi
 done
 echo '=== search ==='
-gst-inspect-1.0 2>/dev/null | grep -iE 'xavc|dnx|avcintra|vc3|mpeg2video|prores|mxf|timecode|avenc_' | head -80
+gst-inspect-1.0 2>/dev/null | grep -iE 'dnx|prores|mxf|timecode|avenc_|nvh264|nvh265' | head -80
 echo '=== ffmpeg encoders ==='
-ffmpeg -hide_banner -encoders 2>/dev/null | grep -iE 'dnx|xavc|avci|mpeg2|prores|vc3' | head -40
+ffmpeg -hide_banner -encoders 2>/dev/null | grep -iE 'dnx|mpeg2|prores|nvenc' | head -40
 echo '=== ffmpeg muxers ==='
 ffmpeg -hide_banner -muxers 2>/dev/null | grep -iE 'mxf|mov|mp4' | head -20
 echo '=== nvidia ==='

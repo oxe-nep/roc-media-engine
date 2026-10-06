@@ -7,8 +7,8 @@ mod probe;
 mod tc_loop;
 
 pub use crate::describe::{
-    build_capture_launch, build_playout_launch, build_spike_tee_launch, build_tc_loop_launch,
-    CaptureLaunchOpts, PlayoutLaunchOpts, TcLoopLaunchOpts,
+    build_playout_launch, build_spike_tee_launch, build_tc_loop_launch, CaptureLaunchOpts,
+    PlayoutLaunchOpts, TcLoopLaunchOpts,
 };
 pub use preview_webrtc::WebRtcPreview;
 pub use probe::probe_gst_devices;

@@ -1411,16 +1411,6 @@ impl ChannelPipeline {
             .ok_or_else(|| anyhow!("mezz video tee `raw`/`t` missing — is capture running?"))
     }
 
-    #[allow(dead_code)]
-    fn raw_tee(&self) -> Result<gstreamer::Element> {
-        let p = self
-            .pipeline
-            .as_ref()
-            .ok_or_else(|| anyhow!("no pipeline"))?;
-        p.by_name("t")
-            .ok_or_else(|| anyhow!("progressive tee `t` missing — is capture running?"))
-    }
-
     /// Best-effort bit depth from live DeckLink caps (8 if unknown).
     fn source_bit_depth(&self) -> u8 {
         if let Some(fmt) = self.detected.as_ref() {
