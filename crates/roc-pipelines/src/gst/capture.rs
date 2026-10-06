@@ -957,7 +957,7 @@ impl ChannelPipeline {
         };
         // Keep self.srt / self.srt_url — launch_locked bakes SRT into the graph.
 
-        self.stop_webrtc_preview();
+        self.dispose_webrtc_preview();
         let _ = self.detach_recording(RecordingRole::Proxy, false);
         let _ = self.detach_recording(RecordingRole::Hq, false);
         if let Some(p) = self.pipeline.take() {
@@ -1126,7 +1126,7 @@ impl ChannelPipeline {
     }
 
     pub fn stop(&mut self) -> Result<()> {
-        self.stop_webrtc_preview();
+        self.dispose_webrtc_preview();
         let _ = self.detach_recording(RecordingRole::Proxy, false);
         let _ = self.detach_recording(RecordingRole::Hq, false);
         if let Some(p) = self.pipeline.take() {
@@ -1261,12 +1261,21 @@ impl ChannelPipeline {
         pair: u8,
         signal_tx: crate::PreviewSignalTx,
     ) -> Result<String> {
-        self.stop_webrtc_preview();
         let pipeline = self
             .pipeline
             .as_ref()
             .ok_or_else(|| anyhow!("capture not running"))?
             .clone();
+        // Reuse parked session when possible — never stack orphan webrtc bins.
+        if let Some(existing) = self.webrtc_preview.as_mut() {
+            if existing.pair == pair {
+                return existing.unpark(&pipeline, signal_tx);
+            }
+            // Pair change: dispose old bin, then attach fresh.
+            if let Some(old) = self.webrtc_preview.take() {
+                old.dispose(&pipeline);
+            }
+        }
         let preview = crate::gst::preview_webrtc::WebRtcPreview::attach(
             &pipeline,
             self.id,
@@ -1293,12 +1302,23 @@ impl ChannelPipeline {
         Ok(())
     }
 
+    /// Soft-close: park valves, keep one reusable bin.
     pub fn stop_webrtc_preview(&mut self) {
+        let Some(preview) = self.webrtc_preview.as_mut() else {
+            return;
+        };
+        if let Some(pipeline) = self.pipeline.as_ref() {
+            preview.park(pipeline);
+        }
+    }
+
+    /// Hard remove (capture stop). Restores valves and Nulls the bin.
+    pub fn dispose_webrtc_preview(&mut self) {
         let Some(preview) = self.webrtc_preview.take() else {
             return;
         };
         if let Some(pipeline) = self.pipeline.as_ref() {
-            preview.detach(pipeline);
+            preview.dispose(pipeline);
         }
     }
 

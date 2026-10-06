@@ -177,7 +177,7 @@ fn relaunch_tc_for_mode(rt: &mut TcLoopRuntime, channel_id: u32, new_mode: &str)
         "TC input format adapt — relaunching"
     );
 
-    stop_tc_webrtc(rt);
+    dispose_tc_webrtc(rt);
     stop_tc_srt(rt, channel_id);
     if let Some(flag) = rt.udp_stop.take() {
         flag.store(true, Ordering::SeqCst);
@@ -368,12 +368,19 @@ fn start_tc_webrtc(
     pair: u8,
     signal_tx: crate::PreviewSignalTx,
 ) -> Result<String> {
-    stop_tc_webrtc(rt);
     let pipeline = rt
         .pipeline
         .as_ref()
         .ok_or_else(|| anyhow!("TC not running"))?
         .clone();
+    if let Some(existing) = rt.webrtc_preview.as_mut() {
+        if existing.pair == pair {
+            return existing.unpark(&pipeline, signal_tx);
+        }
+        if let Some(old) = rt.webrtc_preview.take() {
+            old.dispose(&pipeline);
+        }
+    }
     let preview =
         preview_webrtc::WebRtcPreview::attach(&pipeline, channel_id, pair, signal_tx)?;
     let sid = preview.session_id.clone();
@@ -382,11 +389,20 @@ fn start_tc_webrtc(
 }
 
 fn stop_tc_webrtc(rt: &mut TcLoopRuntime) {
+    let Some(preview) = rt.webrtc_preview.as_mut() else {
+        return;
+    };
+    if let Some(pipeline) = rt.pipeline.as_ref() {
+        preview.park(pipeline);
+    }
+}
+
+fn dispose_tc_webrtc(rt: &mut TcLoopRuntime) {
     let Some(preview) = rt.webrtc_preview.take() else {
         return;
     };
     if let Some(pipeline) = rt.pipeline.as_ref() {
-        preview.detach(pipeline);
+        preview.dispose(pipeline);
     }
 }
 
@@ -1279,7 +1295,7 @@ impl PipelineBackend for GstBackend {
         {
             let mut map = self.tc_loops.lock();
             if let Some(mut old) = map.remove(&channel_id) {
-                stop_tc_webrtc(&mut old);
+                dispose_tc_webrtc(&mut old);
                 stop_tc_srt(&mut old, channel_id);
                 if let Some(flag) = &old.udp_stop {
                     flag.store(true, Ordering::SeqCst);
@@ -1372,7 +1388,7 @@ impl PipelineBackend for GstBackend {
         let _gst = self.gst_op.lock();
         let mut map = self.tc_loops.lock();
         if let Some(mut rt) = map.remove(&channel_id) {
-            stop_tc_webrtc(&mut rt);
+            dispose_tc_webrtc(&mut rt);
             stop_tc_srt(&mut rt, channel_id);
             if let Some(flag) = rt.udp_stop.take() {
                 flag.store(true, Ordering::SeqCst);

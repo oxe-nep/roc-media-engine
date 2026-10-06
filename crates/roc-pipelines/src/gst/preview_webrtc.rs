@@ -1,9 +1,8 @@
 //! On-demand WebRTC encode preview (sendonly) via `webrtcbin`.
 //!
-//! Video and audio both use **standing valve taps** (`wpv_vv`, `wpv_avN`) that stay
-//! linked for the life of the capture pipeline. Preview only rewires valve outputs —
-//! it never request/releases tee pads. Releasing pads was flushing upstream and
-//! killing card `ameter` after preview close.
+//! Video/audio use standing valve taps (`wpv_vv`, `wpv_avN`). Closing preview only
+//! sets `drop=true` and **reuses** the same bin on the next open — never
+//! `mem::forget` orphan bins (that wedged the encode graph / API lock).
 
 use anyhow::{anyhow, bail, Context, Result};
 use gstreamer::prelude::*;
@@ -18,10 +17,12 @@ use crate::preview_sig::{PreviewSignal, PreviewSignalTx};
 pub struct WebRtcPreview {
     pub session_id: String,
     pub pair: u8,
+    pub channel: u32,
     pub webrtc: Element,
     pub video_ghost: Pad,
     pub audio_ghost: Pad,
     pub branch: Bin,
+    pub parked: bool,
 }
 
 impl WebRtcPreview {
@@ -148,95 +149,85 @@ impl WebRtcPreview {
             return Err(e);
         }
 
-        let vpay = branch
-            .by_name(&format!("vpay_{tag}"))
-            .ok_or_else(|| anyhow!("vpay missing"))?;
-        let vpay_src = vpay
-            .static_pad("src")
-            .ok_or_else(|| anyhow!("vpay src missing"))?;
-        let mut have_fmtp = false;
-        for _ in 0..75 {
-            if let Some(caps) = vpay_src.current_caps() {
-                let s = caps.to_string();
-                if s.contains("packetization-mode") || s.contains("profile-level-id") {
-                    have_fmtp = true;
-                    break;
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        if !have_fmtp {
-            tracing::debug!(channel, "H264 RTP caps still missing fmtp fields before create-offer");
-        }
-
-        let (offer_tx, offer_rx) = mpsc::channel::<Result<String>>();
-        let promise = Promise::with_change_func({
-            let webrtc = webrtc.clone();
-            move |reply| {
-                let res = (|| -> Result<String> {
-                    let reply = reply
-                        .map_err(|e| anyhow!("create-offer: {e:?}"))?
-                        .ok_or_else(|| anyhow!("create-offer: empty reply"))?;
-                    let offer = reply
-                        .value("offer")
-                        .context("offer field")?
-                        .get::<WebRTCSessionDescription>()
-                        .context("offer type")?;
-                    webrtc.emit_by_name::<()>(
-                        "set-local-description",
-                        &[&offer, &None::<Promise>],
-                    );
-                    let mut sdp = offer.sdp().as_text().context("sdp text")?;
-                    sdp = sdp.replace("a=sendrecv", "a=sendonly");
-                    Ok(sdp)
-                })();
-                let _ = offer_tx.send(res);
-            }
-        });
-        webrtc.emit_by_name::<()>(
-            "create-offer",
-            &[&None::<gstreamer::Structure>, &promise],
-        );
-        let sdp = match offer_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .context("create-offer timeout")
-            .and_then(|r| r.context("create-offer"))
-        {
-            Ok(s) => s,
-            Err(e) => {
-                cleanup_valves(pipeline, pair, &video_ghost, &audio_ghost);
-                let _ = branch.set_state(State::Null);
-                let _ = pipeline.remove(&branch);
-                return Err(e);
-            }
-        };
-        if !sdp.contains("m=video") || !sdp.contains("m=audio") {
-            cleanup_valves(pipeline, pair, &video_ghost, &audio_ghost);
-            let _ = branch.set_state(State::Null);
-            let _ = pipeline.remove(&branch);
-            bail!("webrtc offer missing media lines (sdp_len={})", sdp.len());
-        }
-        if let Some(tx) = signal_tx.lock().as_ref() {
-            let _ = tx.send(PreviewSignal::Offer {
-                channel,
-                sdp: sdp.clone(),
-            });
-        }
-
-        info!(
-            channel,
-            pair,
-            %session_id,
-            "attached webrtc preview (standing A/V valves)"
-        );
-        Ok(Self {
+        let mut preview = Self {
             session_id,
             pair,
+            channel,
             webrtc,
             video_ghost,
             audio_ghost,
             branch,
-        })
+            parked: false,
+        };
+        preview.emit_offer(pipeline, signal_tx)?;
+        info!(
+            channel,
+            pair,
+            session = %preview.session_id,
+            "attached webrtc preview (standing A/V valves)"
+        );
+        Ok(preview)
+    }
+
+    /// Starve valves but keep the bin linked — safe for card meters.
+    pub fn park(&mut self, pipeline: &Pipeline) {
+        if self.parked {
+            return;
+        }
+        if let Some(v) = pipeline.by_name(&format!("wpv_av{}", self.pair)) {
+            v.set_property("drop", true);
+        }
+        if let Some(v) = pipeline.by_name("wpv_vv") {
+            v.set_property("drop", true);
+        }
+        self.parked = true;
+        info!(session = %self.session_id, "parked webrtc preview");
+    }
+
+    /// Re-open a parked session (same pair): open valves + fresh SDP offer.
+    pub fn unpark(&mut self, pipeline: &Pipeline, signal_tx: PreviewSignalTx) -> Result<String> {
+        if !self.parked {
+            // Already live — mint a fresh offer/session for the new WS client.
+            self.session_id = uuid::Uuid::new_v4().to_string();
+            self.emit_offer(pipeline, signal_tx)?;
+            return Ok(self.session_id.clone());
+        }
+        if let Some(v) = pipeline.by_name("wpv_vv") {
+            v.set_property("drop", false);
+        }
+        if let Some(v) = pipeline.by_name(&format!("wpv_av{}", self.pair)) {
+            v.set_property("drop", false);
+        }
+        self.parked = false;
+        self.session_id = uuid::Uuid::new_v4().to_string();
+        self.emit_offer(pipeline, signal_tx)?;
+        info!(
+            channel = self.channel,
+            pair = self.pair,
+            session = %self.session_id,
+            "unparked webrtc preview"
+        );
+        Ok(self.session_id.clone())
+    }
+
+    /// Hard teardown (capture/TC stop). Restores valves then Nulls the bin.
+    pub fn dispose(self, pipeline: &Pipeline) {
+        if let Some(v) = pipeline.by_name(&format!("wpv_av{}", self.pair)) {
+            v.set_property("drop", true);
+        }
+        if let Some(v) = pipeline.by_name("wpv_vv") {
+            v.set_property("drop", true);
+        }
+        let _ = restore_valve(
+            pipeline,
+            &format!("wpv_av{}", self.pair),
+            &format!("wpv_as{}", self.pair),
+            &self.audio_ghost,
+        );
+        let _ = restore_valve(pipeline, "wpv_vv", "wpv_vs", &self.video_ghost);
+        let _ = self.branch.set_state(State::Null);
+        let _ = pipeline.remove(&self.branch);
+        info!(session = %self.session_id, "disposed webrtc preview");
     }
 
     pub fn set_remote_answer(&self, sdp_text: &str) -> Result<()> {
@@ -263,34 +254,65 @@ impl WebRtcPreview {
             .emit_by_name::<()>("add-ice-candidate", &[&sdp_mline_index, &candidate]);
     }
 
-    pub fn detach(self, pipeline: &Pipeline) {
-        // Soft-close only: starve the taps. Do NOT unlink/Null/remove — that was
-        // flushing upstream into tee `a` and killing card ameter. The bin stays
-        // parked in the pipeline (dropped at capture stop with the parent).
-        if let Some(v) = pipeline.by_name(&format!("wpv_av{}", self.pair)) {
-            v.set_property("drop", true);
+    fn emit_offer(&self, pipeline: &Pipeline, signal_tx: PreviewSignalTx) -> Result<()> {
+        let _ = pipeline;
+        let vpay_name = format!("vpay_wpv{}p{}", self.channel, self.pair);
+        if let Some(vpay) = self.branch.by_name(&vpay_name) {
+            if let Some(src) = vpay.static_pad("src") {
+                for _ in 0..40 {
+                    if let Some(caps) = src.current_caps() {
+                        let s = caps.to_string();
+                        if s.contains("packetization-mode") || s.contains("profile-level-id") {
+                            break;
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
         }
-        if let Some(v) = pipeline.by_name("wpv_vv") {
-            v.set_property("drop", true);
-        }
-        // Keep branch Playing+linked but starved. Forget Rust handles; GstObject
-        // ref on the pipeline holds the bin until capture teardown.
-        std::mem::forget(self.branch);
-        info!(session = %self.session_id, "parked webrtc preview (soft close)");
-    }
-}
 
-fn cleanup_valves(pipeline: &Pipeline, pair: u8, video_ghost: &Pad, audio_ghost: &Pad) {
-    if let Err(e) = restore_valve(
-        pipeline,
-        &format!("wpv_av{pair}"),
-        &format!("wpv_as{pair}"),
-        audio_ghost,
-    ) {
-        tracing::warn!(error = %e, pair, "failed to restore webrtc audio valve");
-    }
-    if let Err(e) = restore_valve(pipeline, "wpv_vv", "wpv_vs", video_ghost) {
-        tracing::warn!(error = %e, "failed to restore webrtc video valve");
+        let (offer_tx, offer_rx) = mpsc::channel::<Result<String>>();
+        let promise = Promise::with_change_func({
+            let webrtc = self.webrtc.clone();
+            move |reply| {
+                let res = (|| -> Result<String> {
+                    let reply = reply
+                        .map_err(|e| anyhow!("create-offer: {e:?}"))?
+                        .ok_or_else(|| anyhow!("create-offer: empty reply"))?;
+                    let offer = reply
+                        .value("offer")
+                        .context("offer field")?
+                        .get::<WebRTCSessionDescription>()
+                        .context("offer type")?;
+                    webrtc.emit_by_name::<()>(
+                        "set-local-description",
+                        &[&offer, &None::<Promise>],
+                    );
+                    let mut sdp = offer.sdp().as_text().context("sdp text")?;
+                    sdp = sdp.replace("a=sendrecv", "a=sendonly");
+                    Ok(sdp)
+                })();
+                let _ = offer_tx.send(res);
+            }
+        });
+        self.webrtc.emit_by_name::<()>(
+            "create-offer",
+            &[&None::<gstreamer::Structure>, &promise],
+        );
+        let sdp = offer_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .context("create-offer timeout")?
+            .context("create-offer")?;
+        if !sdp.contains("m=video") || !sdp.contains("m=audio") {
+            bail!("webrtc offer missing media lines (sdp_len={})", sdp.len());
+        }
+        if let Some(tx) = signal_tx.lock().as_ref() {
+            let _ = tx.send(PreviewSignal::Offer {
+                channel: self.channel,
+                sdp,
+            });
+        }
+        Ok(())
     }
 }
 
