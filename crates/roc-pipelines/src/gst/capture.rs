@@ -1266,15 +1266,10 @@ impl ChannelPipeline {
             .as_ref()
             .ok_or_else(|| anyhow!("capture not running"))?
             .clone();
-        // Reuse parked session when possible — never stack orphan webrtc bins.
-        if let Some(existing) = self.webrtc_preview.as_mut() {
-            if existing.pair == pair {
-                return existing.unpark(&pipeline, signal_tx);
-            }
-            // Pair change: dispose old bin, then attach fresh.
-            if let Some(old) = self.webrtc_preview.take() {
-                old.dispose(&pipeline);
-            }
+        // Always dispose then attach: parked webrtcbin ICE/DTLS state is unreliable
+        // across a new browser PeerConnection. Soft-park still protects meters while closed.
+        if let Some(old) = self.webrtc_preview.take() {
+            old.dispose(&pipeline);
         }
         let preview = crate::gst::preview_webrtc::WebRtcPreview::attach(
             &pipeline,

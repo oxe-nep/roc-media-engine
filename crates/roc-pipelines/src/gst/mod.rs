@@ -373,13 +373,9 @@ fn start_tc_webrtc(
         .as_ref()
         .ok_or_else(|| anyhow!("TC not running"))?
         .clone();
-    if let Some(existing) = rt.webrtc_preview.as_mut() {
-        if existing.pair == pair {
-            return existing.unpark(&pipeline, signal_tx);
-        }
-        if let Some(old) = rt.webrtc_preview.take() {
-            old.dispose(&pipeline);
-        }
+    // Fresh webrtcbin each open — reuse after park sticks ICE with a new browser PC.
+    if let Some(old) = rt.webrtc_preview.take() {
+        old.dispose(&pipeline);
     }
     let preview =
         preview_webrtc::WebRtcPreview::attach(&pipeline, channel_id, pair, signal_tx)?;
