@@ -525,7 +525,12 @@ pub fn build_capture_launch(opts: &CaptureLaunchOpts) -> String {
 }
 
 /// Optimized capture: encode once (NVENC), then tee the bitstream to SRT / UDP.
-/// Mezz REC (DNxHD / XAVC) attaches later from the raw tee `t` with NTP/RTC TC.
+///
+/// Graph:
+/// `decklink → tee raw → (mezz hot-attach) | deinterlace → tee t → NVENC / thumb`
+///
+/// Mezz REC (DNxHD) attaches on **`raw`** so interlaced sources keep fields.
+/// Proxy/SRT/JPEG use progressive **`t`**.
 pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
     let live_codec = live_nvenc_codec(&opts.preset);
     let bitrate_kbit = live_nvenc_bitrate_kbit(&opts.preset);
@@ -630,7 +635,9 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
 
     format!(
         "{src} ! \
-         deinterlace mode=auto ! tee name=t \
+         tee name=raw allow-not-linked=true \
+         raw. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
+           deinterlace mode=auto ! tee name=t \
          {audio_src} \
          t. ! queue ! {enc} ! \
          tee name=e \
@@ -1076,6 +1083,12 @@ mod tests {
         });
         assert!(udp_only.contains("appsink name=srt_in"), "{udp_only}");
         assert!(udp_only.contains("tee name=ts_out"), "{udp_only}");
+        assert!(
+            udp_only.contains("tee name=raw")
+                && udp_only.find("tee name=raw").unwrap()
+                    < udp_only.find("deinterlace").unwrap(),
+            "mezz tee raw must precede deinterlace: {udp_only}"
+        );
     }
 
     #[test]

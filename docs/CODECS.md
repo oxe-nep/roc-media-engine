@@ -11,10 +11,23 @@ Live/SRT always uses NVENC (encode-once tee `e`).
 
 ## Mezz REC (raw tee + NTP timecode)
 
+Capture graph:
+
+`decklink → tee raw → (mezz) | deinterlace → tee t → NVENC / JPEG`
+
 | Preset | Codec | Container | Notes |
 |--------|-------|-----------|--------|
-| `dnxhd_145` / `dnxhd_185` | `avenc_dnxhd` | `.mxf` (`mxfmux`) | Y42B from raw tee `t` (qtmux cannot take DNxHD on this host) |
-| `xavc_intra_hd` | `x264enc` High 4:2:2 Intra | `.mxf` (`mxfmux`) | Open-source XAVC Intra HD approximation |
+| `dnxhd_sq` / `dnxhd_hq` / `dnxhd_hqx` | `avenc_dnxhd` | `.mxf` (`mxfmux`) | Class selects SQ/HQ/HQX; **bitrate + scan follow live signal** (e.g. 1080i50 HQ → 185 Mbps interlaced). Tap is **pre-deinterlace** `raw`. HQX needs a real 10-bit source (`v210`). |
+| `dnxhd_145` / `dnxhd_185` | same | `.mxf` | Legacy ids → SQ / HQ |
+| `xavc_intra_hd` | `x264enc` High 4:2:2 Intra | `.mxf` (`mxfmux`) | Open-source XAVC Intra HD **approximation** (not Sony Class 100) |
+
+### DNxHD operating points (1080)
+
+| Signal | SQ (8-bit) | HQ (8-bit) | HQX (10-bit) |
+|--------|------------|------------|--------------|
+| 1080i50 / 1080p25 | 120 | 185 | 185x |
+| 1080i59.94 / 1080p29.97 | 145 | 220 | 220x |
+| 1080p50 | 240 | 365 | 365x |
 
 Timecode: GStreamer `timecodestamper source=rtc set=always` — uses the host
 real-time clock. Capture host has **no PTP**; chrony syncs RTC from LAN NTP:
@@ -27,7 +40,7 @@ Install/refresh: [`deploy/remote-ntp-roc.sh`](../deploy/remote-ntp-roc.sh) +
 
 When `record_preset` is a mezz codec (`dnxhd_*` / `xavc_*`), SRT/UDP/preview
 keep the channel's `encode_preset` (NVENC proxy); only the REC branch uses the
-mezz encoder from raw tee `t`. Proxy and REC are selected independently in the
+mezz encoder from tee `raw`. Proxy and REC are selected independently in the
 UI (`encode_preset` vs `record_preset`).
 
 ## Later
@@ -38,6 +51,7 @@ UI (`encode_preset` vs `record_preset`).
 | True Sony XAVC | needs vendor tooling | Replace x264 Intra approx if required |
 | AV1 NVENC | P2000 unlikely | Skip |
 | **TC interlaced SRT/WebRTC** | done via deinterlace | DeckLink OUT stays interlaced; proxy encode deinterlaces before NVENC so SRT + WebRTC are progressive |
+| DNxHR / 4:4:4 | not started | UHD / 444 mezz |
 
 ## Deferred audio
 

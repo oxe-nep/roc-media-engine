@@ -3,8 +3,8 @@
 //! Two independent REC roles attach as dynamic branches and can run at the same
 //! time (each with its own start/stop):
 //! - **proxy**: encoded tee `e` → encode-preset parser → mp4mux (`.mp4`);
-//! - **hq**: record preset — mezz from raw tee `t` (DNxHD/XAVC → `.mxf`), or the
-//!   encoded bitstream from tee `e` (`.mp4`) for NVENC record presets.
+//! - **hq**: record preset — mezz from pre-deinterlace tee `raw` (DNxHD/XAVC → `.mxf`),
+//!   or the encoded bitstream from tee `e` (`.mp4`) for NVENC record presets.
 //!
 //! Element names carry the role tag (`q_proxy_*` / `q_hq_*`) and each branch
 //! remembers its video tee so detach releases the right pad. REC is independent
@@ -1322,13 +1322,62 @@ impl ChannelPipeline {
             .ok_or_else(|| anyhow!("encoded tee `e` missing — is capture running?"))
     }
 
+    /// Pre-deinterlace tee for mezz REC (DNxHD keeps interlaced fields).
+    /// Falls back to `t` only if an older launch string is still running.
+    fn mezz_video_tee(&self) -> Result<gstreamer::Element> {
+        let p = self
+            .pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow!("no pipeline"))?;
+        p.by_name("raw")
+            .or_else(|| p.by_name("t"))
+            .ok_or_else(|| anyhow!("mezz video tee `raw`/`t` missing — is capture running?"))
+    }
+
+    #[allow(dead_code)]
     fn raw_tee(&self) -> Result<gstreamer::Element> {
         let p = self
             .pipeline
             .as_ref()
             .ok_or_else(|| anyhow!("no pipeline"))?;
         p.by_name("t")
-            .ok_or_else(|| anyhow!("raw tee `t` missing — is capture running?"))
+            .ok_or_else(|| anyhow!("progressive tee `t` missing — is capture running?"))
+    }
+
+    /// Best-effort bit depth from live DeckLink caps (8 if unknown).
+    fn source_bit_depth(&self) -> u8 {
+        let Some(pipeline) = self.pipeline.as_ref() else {
+            return 8;
+        };
+        let Some(src) = pipeline.by_name("dlsrc") else {
+            return 8;
+        };
+        let Some(pad) = src.static_pad("src") else {
+            return 8;
+        };
+        let Some(caps) = pad.current_caps().or_else(|| pad.allowed_caps()) else {
+            return 8;
+        };
+        let Some(s) = caps.structure(0) else {
+            return 8;
+        };
+        if let Ok(depth) = s.get::<i32>("bit-depth-luma") {
+            if depth >= 10 {
+                return 10;
+            }
+            if depth > 0 {
+                return depth as u8;
+            }
+        }
+        if let Ok(fmt) = s.get::<&str>("format") {
+            let f = fmt.to_ascii_uppercase();
+            // Common 10-bit DeckLink / raw formats.
+            if f.contains("V210") || f.contains("R210") || f.contains("P010") || f.contains("Y210")
+            {
+                return 10;
+            }
+        }
+        8
     }
 
     /// Audio settings for a REC role. Proxy follows the live/proxy encode preset;
@@ -1516,10 +1565,9 @@ impl ChannelPipeline {
         Ok(())
     }
 
-    /// Mezz REC from raw tee `t`: DNxHD (.mov) or XAVC Intra (.mxf) + NTP/RTC timecode.
+    /// Mezz REC from pre-deinterlace tee `raw`: DNxHD (.mxf) or XAVC Intra (.mxf) + NTP/RTC timecode.
     ///
-    /// HQ-only: raw tee `t` is the video tee for this branch, so detach releases
-    /// its pad on `t` (not on `e`).
+    /// HQ-only: video tee is `raw` (fields preserved). Detach releases that pad (not `e`).
     fn attach_mezz_recording(&self, role: RecordingRole, path: &str) -> Result<Branch> {
         let pipeline = self
             .pipeline
@@ -1528,7 +1576,7 @@ impl ChannelPipeline {
             .clone();
         let mut branch = Branch {
             role,
-            video_tee: "t",
+            video_tee: "raw",
             tee_pad: None,
             audio_tee_pads: Vec::new(),
             elements: Vec::new(),
@@ -1555,10 +1603,14 @@ impl ChannelPipeline {
         path: &str,
     ) -> Result<()> {
         let tag = branch.role.tag();
-        let tee = self.raw_tee()?;
+        let tee = self.mezz_video_tee()?;
+        branch.video_tee = if tee.name() == "raw" { "raw" } else { "t" };
         let audio_tee = pipeline.by_name("a");
         let codec = self.record_preset.video_codec.to_ascii_lowercase();
-        let bitrate = crate::parse_bitrate(&self.record_preset.video_bitrate).unwrap_or(185_000_000);
+
+        let fmt = self.detected.clone().ok_or_else(|| {
+            anyhow!("no detected input format — wait for signal before DNxHD/XAVC REC")
+        })?;
 
         let queue_v = gstreamer::ElementFactory::make("queue")
             .name(format!("q_{tag}_v_{}", self.id))
@@ -1571,30 +1623,68 @@ impl ChannelPipeline {
             .name(format!("vconv_{tag}_{}", self.id))
             .build()
             .context("videoconvert")?;
-        let (fps_n, fps_d) = self
-            .detected
-            .as_ref()
-            .map(|f| {
-                // After deinterlace, field rate becomes frame rate.
-                if f.interlaced {
-                    (f.fps_num.saturating_mul(2).max(1), f.fps_den.max(1))
+
+        let (caps_str, bitrate, enc_label, frame_duration_ns) = if codec.contains("dnx") {
+            let hint = crate::parse_bitrate(&self.record_preset.video_bitrate);
+            let class_src = if !self.record_preset.video_preset.trim().is_empty() {
+                self.record_preset.video_preset.as_str()
+            } else {
+                self.record_preset.label.as_str()
+            };
+            let class = crate::DnxhdClass::parse(class_src, hint);
+            let op = crate::resolve_dnxhd(&fmt, class)?;
+            if class == crate::DnxhdClass::Hqx && self.source_bit_depth() < 10 {
+                bail!(
+                    "DNxHD HQX requires a 10-bit source (signal is {}-bit). \
+                     Use DNxHD SQ/HQ (8-bit) or feed a 10-bit input.",
+                    self.source_bit_depth()
+                );
+            }
+            let frame_duration_ns = 1_000_000_000u64
+                .saturating_mul(op.fps_den as u64)
+                .saturating_div(op.fps_num as u64)
+                .max(1);
+            tracing::info!(
+                channel = self.id,
+                class = class.as_str(),
+                label = %op.label,
+                bitrate = op.bitrate,
+                interlaced = op.interlaced,
+                fps = %format!("{}/{}", op.fps_num, op.fps_den),
+                raw_format = op.raw_format,
+                "DNxHD operating point resolved from live signal"
+            );
+            (op.video_caps(), op.bitrate, op.label, frame_duration_ns)
+        } else {
+            let (fps_n, fps_d) = if fmt.interlaced {
+                if fmt.fps_num >= 40 {
+                    (fmt.fps_num / 2, fmt.fps_den.max(1))
                 } else {
-                    (f.fps_num.max(1), f.fps_den.max(1))
+                    (fmt.fps_num.max(1), fmt.fps_den.max(1))
                 }
-            })
-            .unwrap_or((50, 1));
-        let frame_duration_ns = 1_000_000_000u64
-            .saturating_mul(fps_d as u64)
-            .saturating_div(fps_n as u64)
-            .max(1);
+            } else {
+                (fmt.fps_num.max(1), fmt.fps_den.max(1))
+            };
+            let frame_duration_ns = 1_000_000_000u64
+                .saturating_mul(fps_d as u64)
+                .saturating_div(fps_n as u64)
+                .max(1);
+            let bitrate =
+                crate::parse_bitrate(&self.record_preset.video_bitrate).unwrap_or(111_000_000);
+            let caps = format!("video/x-raw,format=Y42B,framerate={fps_n}/{fps_d}");
+            (
+                caps,
+                bitrate,
+                "XAVC Intra HD (approx)".into(),
+                frame_duration_ns,
+            )
+        };
+
         let caps = gstreamer::ElementFactory::make("capsfilter")
             .name(format!("caps_{tag}_{}", self.id))
             .property(
                 "caps",
-                gstreamer::Caps::from_str(&format!(
-                    "video/x-raw,format=Y42B,framerate={fps_n}/{fps_d}"
-                ))
-                .context("Y42B caps")?,
+                gstreamer::Caps::from_str(&caps_str).context("mezz video caps")?,
             )
             .build()
             .context("capsfilter")?;
@@ -1736,7 +1826,7 @@ impl ChannelPipeline {
 
         let tee_pad = tee
             .request_pad_simple("src_%u")
-            .ok_or_else(|| anyhow!("raw tee request_pad failed"))?;
+            .ok_or_else(|| anyhow!("mezz video tee request_pad failed"))?;
         // Record the pad before linking so a link failure still releases it.
         branch.tee_pad = Some(tee_pad.clone());
         let sink_pad = queue_v
@@ -1744,13 +1834,14 @@ impl ChannelPipeline {
             .ok_or_else(|| anyhow!("queue sink pad"))?;
         tee_pad
             .link(&sink_pad)
-            .context("link raw tee → mezz record")?;
+            .context("link mezz video tee → record")?;
 
         tracing::info!(
             channel = self.id,
             role = tag,
             %path,
             codec = %self.record_preset.video_codec,
+            enc = %enc_label,
             mux = mux_name,
             bitrate,
             video_tee = branch.video_tee,
@@ -2004,7 +2095,7 @@ impl ChannelPipeline {
     }
 
     /// Unlink and release the branch's request pads: the video pad on
-    /// `branch.video_tee` (`e` or `t`) and every AAC/PCM pad on audio tee `a`.
+    /// `branch.video_tee` (`e`, `raw`, or legacy `t`) and every AAC/PCM pad on audio tee `a`.
     fn unlink_branch(pipeline: &gstreamer::Pipeline, branch: &Branch) {
         if let Some(tee_pad) = branch.tee_pad.as_ref() {
             if let Some(qpad) = branch.elements.first().and_then(|e| e.static_pad("sink")) {

@@ -58,19 +58,27 @@ encode_presets:
     video_gop: 50
     audio_bitrate: "256k"
     audio_channels: 2
-  dnxhd_145:
-    label: "DNxHD 145"
+  dnxhd_sq:
+    label: "DNxHD SQ"
     video_codec: avenc_dnxhd
-    video_bitrate: "145M"
-    video_preset: dnxhd
+    video_bitrate: "120M"
+    video_preset: sq
     video_gop: 1
     audio_bitrate: "384k"
     audio_channels: 8
-  dnxhd_185:
-    label: "DNxHD 185"
+  dnxhd_hq:
+    label: "DNxHD HQ"
     video_codec: avenc_dnxhd
     video_bitrate: "185M"
-    video_preset: dnxhd
+    video_preset: hq
+    video_gop: 1
+    audio_bitrate: "384k"
+    audio_channels: 8
+  dnxhd_hqx:
+    label: "DNxHD HQX (10-bit)"
+    video_codec: avenc_dnxhd
+    video_bitrate: "185M"
+    video_preset: hqx
     video_gop: 1
     audio_bitrate: "384k"
     audio_channels: 8

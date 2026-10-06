@@ -25,8 +25,8 @@ const PROXY_MBPS = [3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40] as const;
 /** NVENC mezz file bitrates when used as REC. */
 const REC_NVENC_MBPS = [12, 15, 20, 25, 30, 40, 50, 60] as const;
 
-/** Valid-ish DNxHD Mbps for 1080p50 (host-probed set). */
-const DNXHD_MBPS = [36, 45, 60, 75, 90, 110, 115, 120, 145, 175, 185, 220] as const;
+/** Valid-ish DNxHD Mbps for display only — live REC uses class + signal. */
+const DNXHD_MBPS = [120, 145, 185, 220, 240, 365] as const;
 
 /** XAVC Intra HD approximation bitrate steps. */
 const XAVC_MBPS = [50, 75, 100, 111, 140, 160, 200] as const;
@@ -284,7 +284,7 @@ export default function EncodePresetsEditor({
     if (codecs[0]) {
       base.video_codec = codecs[0].id;
       base.video_preset =
-        codecs[0].presets.find((p) => p.id === "p4" || p.id === "dnxhd" || p.id === "intra")?.id ??
+        codecs[0].presets.find((p) => p.id === "p4" || p.id === "hq" || p.id === "dnxhd" || p.id === "intra")?.id ??
         codecs[0].presets[0]?.id ??
         base.video_preset;
       if (isMezzCodec(codecs[0].id)) {
@@ -311,7 +311,7 @@ export default function EncodePresetsEditor({
       const mezz = isMezzCodec(codecId);
       const nextPreset =
         codec?.presets.find((p) => p.id === prev.video_preset)?.id ??
-        codec?.presets.find((p) => p.id === "p4" || p.id === "dnxhd" || p.id === "intra")?.id ??
+        codec?.presets.find((p) => p.id === "p4" || p.id === "hq" || p.id === "dnxhd" || p.id === "intra")?.id ??
         codec?.presets[0]?.id ??
         prev.video_preset;
       const next: EncodePreset = {
@@ -390,6 +390,7 @@ export default function EncodePresetsEditor({
     }
   };
 
+  const formDnxhd = formMezz && form.video_codec.toLowerCase().includes("dnx");
   const derived = deriveFromMbps(Math.round(videoMbps));
   const title = kind === "proxy" ? "Proxy presets" : "HQ presets";
   const audioMeta = formMezz
@@ -407,7 +408,7 @@ export default function EncodePresetsEditor({
       <p className="settings-tab-intro">
         {kind === "proxy"
           ? "Live / SRT / preview encode (NVENC). Selected per channel as Proxy preset."
-          : "Recording encode (NVENC mezz, DNxHD, or XAVC). Selected per channel as HQ preset. Mezz writes MXF with PCM."}
+          : "Recording encode (NVENC mezz, DNxHD, or XAVC). Selected per channel as HQ preset. Mezz writes MXF with PCM. DNxHD bitrate follows the live signal (class + format)."}
       </p>
 
       <div className="presets-layout">
@@ -447,7 +448,7 @@ export default function EncodePresetsEditor({
             <input
               value={form.label}
               onChange={(e) => setLabel(e.target.value)}
-              placeholder={kind === "proxy" ? "e.g. HQ 12 Mbit" : "e.g. DNxHD 185"}
+              placeholder={kind === "proxy" ? "e.g. HQ 12 Mbit" : "e.g. DNxHD HQ"}
               disabled={busy}
             />
           </label>
@@ -480,11 +481,16 @@ export default function EncodePresetsEditor({
             </label>
 
             <label className="presets-field">
-              <span>Video bitrate</span>
+              <span>{formDnxhd ? "Nominal bitrate (signal overrides)" : "Video bitrate"}</span>
               <select
                 value={String(Math.round(videoMbps))}
                 onChange={(e) => setVideoMbps(Number(e.target.value))}
-                disabled={busy}
+                disabled={busy || formDnxhd}
+                title={
+                  formDnxhd
+                    ? "DNxHD Mbps is chosen from class + live format (e.g. HQ + 1080i50 → 185)"
+                    : undefined
+                }
               >
                 {mbpsOptions.map((m) => (
                   <option key={m} value={m}>
@@ -496,11 +502,23 @@ export default function EncodePresetsEditor({
             </label>
 
             <label className="presets-field">
-              <span>{formMezz ? "Profile" : "Encoder speed / quality"}</span>
+              <span>{formDnxhd ? "DNxHD class" : formMezz ? "Profile" : "Encoder speed / quality"}</span>
               <select
                 value={form.video_preset}
-                onChange={(e) => setForm((prev) => ({ ...prev, video_preset: e.target.value }))}
-                disabled={busy || formMezz}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setForm((prev) => {
+                    const updated = { ...prev, video_preset: next };
+                    if (formDnxhd) {
+                      // Nominal stored bitrate for legacy UIs; live REC ignores it.
+                      const mbps =
+                        next === "sq" ? 120 : next === "hqx" ? 185 : 185;
+                      Object.assign(updated, deriveFromMbps(mbps));
+                    }
+                    return updated;
+                  });
+                }}
+                disabled={busy || (formMezz && !formDnxhd)}
               >
                 {encoderPresets.map((p) => (
                   <option key={p.id} value={p.id}>

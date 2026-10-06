@@ -390,15 +390,59 @@ fn default_presets() -> std::collections::HashMap<String, EncodePreset> {
         },
     );
     // Mezz REC (raw tee + NTP/RTC timecode). Live/SRT still uses NVENC proxy.
+    // video_preset is the DNxHD class: sq | hq | hqx (bitrate follows live signal).
+    m.insert(
+        "dnxhd_sq".into(),
+        EncodePreset {
+            label: "DNxHD SQ".into(),
+            video_codec: "avenc_dnxhd".into(),
+            video_bitrate: "120M".into(),
+            video_maxrate: None,
+            video_bufsize: None,
+            video_preset: "sq".into(),
+            video_gop: 1,
+            audio_bitrate: "384k".into(),
+            audio_channels: 8,
+        },
+    );
+    m.insert(
+        "dnxhd_hq".into(),
+        EncodePreset {
+            label: "DNxHD HQ".into(),
+            video_codec: "avenc_dnxhd".into(),
+            video_bitrate: "185M".into(),
+            video_maxrate: None,
+            video_bufsize: None,
+            video_preset: "hq".into(),
+            video_gop: 1,
+            audio_bitrate: "384k".into(),
+            audio_channels: 8,
+        },
+    );
+    m.insert(
+        "dnxhd_hqx".into(),
+        EncodePreset {
+            label: "DNxHD HQX (10-bit)".into(),
+            video_codec: "avenc_dnxhd".into(),
+            video_bitrate: "185M".into(),
+            video_maxrate: None,
+            video_bufsize: None,
+            video_preset: "hqx".into(),
+            video_gop: 1,
+            audio_bitrate: "384k".into(),
+            audio_channels: 8,
+        },
+    );
+    // Legacy ids kept for existing channel configs (class inferred from preset/bitrate).
     m.insert(
         "dnxhd_145".into(),
         EncodePreset {
-            label: "DNxHD 145".into(),
+            label: "DNxHD SQ (legacy 145)".into(),
             video_codec: "avenc_dnxhd".into(),
             video_bitrate: "145M".into(),
             video_maxrate: None,
             video_bufsize: None,
-            video_preset: "dnxhd".into(),
+            video_preset: "sq".into(),
             video_gop: 1,
             audio_bitrate: "384k".into(),
             audio_channels: 8,
@@ -407,12 +451,12 @@ fn default_presets() -> std::collections::HashMap<String, EncodePreset> {
     m.insert(
         "dnxhd_185".into(),
         EncodePreset {
-            label: "DNxHD 185".into(),
+            label: "DNxHD HQ (legacy 185)".into(),
             video_codec: "avenc_dnxhd".into(),
             video_bitrate: "185M".into(),
             video_maxrate: None,
             video_bufsize: None,
-            video_preset: "dnxhd".into(),
+            video_preset: "hq".into(),
             video_gop: 1,
             audio_bitrate: "384k".into(),
             audio_channels: 8,

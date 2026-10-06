@@ -4,16 +4,16 @@ BASE=http://127.0.0.1:8080
 CH=4
 
 # Ensure mezz preset has 8ch PCM
-curl -sS -X PUT "$BASE/api/encode/presets/dnxhd_185" \
+curl -sS -X PUT "$BASE/api/encode/presets/dnxhd_hq" \
   -H 'Content-Type: application/json' \
-  -d '{"label":"DNxHD 185","video_codec":"avenc_dnxhd","video_bitrate":"185M","video_preset":"dnxhd","video_gop":1,"audio_bitrate":"384k","audio_channels":8}' \
+  -d '{"label":"DNxHD HQ","video_codec":"avenc_dnxhd","video_bitrate":"185M","video_preset":"hq","video_gop":1,"audio_bitrate":"384k","audio_channels":8}' \
   | tee /tmp/rme-dnx-8ch-preset.json
 echo
 
 curl -sS -X PUT "$BASE/api/streams/$CH/encode-preset" \
   -H 'Content-Type: application/json' -d '{"preset":"hq"}' >/dev/null
 curl -sS -X PUT "$BASE/api/streams/$CH/record-preset" \
-  -H 'Content-Type: application/json' -d '{"preset":"dnxhd_185"}' >/dev/null
+  -H 'Content-Type: application/json' -d '{"preset":"dnxhd_hq"}' >/dev/null
 curl -sS -X POST "$BASE/api/streams/$CH/start" >/dev/null || true
 sleep 4
 

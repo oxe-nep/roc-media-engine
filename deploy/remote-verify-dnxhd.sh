@@ -4,14 +4,14 @@ export PATH=/home/oxe/.cargo/bin:/usr/bin:/bin
 BASE=http://127.0.0.1:8080
 CH=4
 
-# Proxy stays HQ NVENC; REC uses DNxHD mezz.
+# Proxy stays HQ NVENC; REC uses DNxHD HQ class (bitrate from live signal).
 curl -sS -X PUT "$BASE/api/streams/$CH/encode-preset" \
   -H 'Content-Type: application/json' \
   -d '{"preset":"hq"}' | tee /tmp/rme-proxy.json
 echo
 curl -sS -X PUT "$BASE/api/streams/$CH/record-preset" \
   -H 'Content-Type: application/json' \
-  -d '{"preset":"dnxhd_185"}' | tee /tmp/rme-recpreset.json
+  -d '{"preset":"dnxhd_hq"}' | tee /tmp/rme-recpreset.json
 echo
 curl -sS -X POST "$BASE/api/streams/$CH/start" >/dev/null || true
 sleep 4
@@ -40,10 +40,14 @@ FILE=$(ls -t /opt/applications/roc-media-engine/recordings/_unsorted/dnxhd_ntp_t
 echo "FILE=$FILE"
 if [ -n "$FILE" ]; then
   ls -la "$FILE"
-  ffprobe -hide_banner "$FILE" 2>&1 | head -40
+  echo "=== ffprobe (expect interlaced when IN is 1080i) ==="
+  ffprobe -hide_banner -show_streams -select_streams v:0 "$FILE" 2>&1 | \
+    grep -iE 'codec_name|profile|width|height|r_frame_rate|avg_frame_rate|field_order|bits_per|pix_fmt|bit_rate' | head -40
+  echo "=== mediainfo (if present) ==="
+  mediainfo "$FILE" 2>/dev/null | grep -iE 'Format|Scan|Bit rate|Bit depth|Frame rate|Width|Height|Format profile' | head -40 || true
 else
   echo "no .mxf produced"
-  journalctl -u roc-media-engine --since "3 min ago" --no-pager | grep -iE "mezz|dnx|timecode|record|error|WARN" | tail -50
+  journalctl -u roc-media-engine --since "3 min ago" --no-pager | grep -iE "mezz|dnx|timecode|record|error|WARN|operating point" | tail -50
 fi
 
 curl -sS -X POST "$BASE/api/streams/$CH/stop" >/dev/null || true
