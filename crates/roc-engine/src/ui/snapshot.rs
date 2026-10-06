@@ -338,7 +338,7 @@ fn from_hex(b: u8) -> Option<u8> {
 pub fn meters_maps(orch: &Orchestrator) -> (serde_json::Map<String, Value>, serde_json::Map<String, Value>) {
     let mut enc = serde_json::Map::new();
     let mut play = serde_json::Map::new();
-    for ch in orch.list_channels() {
+    for ch in orch.list_channel_meters() {
         let m = from_peaks(ch.audio_peaks.as_deref());
         let v = serde_json::to_value(m).unwrap_or(json!({}));
         enc.insert(ch.id.to_string(), v);
@@ -359,7 +359,7 @@ pub fn meters_maps(orch: &Orchestrator) -> (serde_json::Map<String, Value>, serd
         );
     }
     // TC burn-in feeds the playout meter bus (UI listens on bus=playout).
-    for t in orch.list_tc_loops() {
+    for t in orch.list_tc_loop_meters() {
         if matches!(
             t.status,
             roc_pipelines::TcLoopStatus::Running | roc_pipelines::TcLoopStatus::Restarting

@@ -229,6 +229,11 @@ impl Orchestrator {
         self.backend.list_channels()
     }
 
+    /// Meter tick — peaks/status without capture adapt/relaunch.
+    pub fn list_channel_meters(&self) -> Vec<ChannelSnapshot> {
+        self.backend.list_channel_meters()
+    }
+
     pub fn channel(&self, id: u32) -> Result<ChannelSnapshot> {
         self.backend.channel_snapshot(id)
     }
@@ -520,6 +525,11 @@ impl Orchestrator {
 
     pub fn list_tc_loops(&self) -> Vec<roc_pipelines::TcLoopSnapshot> {
         self.backend.list_tc_loops()
+    }
+
+    /// Meter tick — TC peaks without format adapt/relaunch.
+    pub fn list_tc_loop_meters(&self) -> Vec<roc_pipelines::TcLoopSnapshot> {
+        self.backend.list_tc_loop_meters()
     }
 
     pub fn tc_loop_snapshot(&self, channel_id: u32) -> Option<roc_pipelines::TcLoopSnapshot> {

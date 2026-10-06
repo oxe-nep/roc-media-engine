@@ -69,6 +69,11 @@ pub trait PipelineBackend: Send + Sync {
     fn channel_snapshot(&self, channel_id: u32) -> Result<ChannelSnapshot>;
     fn list_channels(&self) -> Vec<ChannelSnapshot>;
 
+    /// High-frequency meter poll: peaks/status only (no format adapt / relaunch).
+    fn list_channel_meters(&self) -> Vec<ChannelSnapshot> {
+        self.list_channels()
+    }
+
     fn nvenc_used(&self) -> usize;
     fn nvenc_limit(&self) -> usize;
 
@@ -96,6 +101,12 @@ pub trait PipelineBackend: Send + Sync {
         position: crate::TcLoopPosition,
     ) -> Result<()>;
     fn list_tc_loops(&self) -> Vec<crate::TcLoopSnapshot>;
+
+    /// High-frequency TC meter poll: peaks only (no format adapt / relaunch).
+    fn list_tc_loop_meters(&self) -> Vec<crate::TcLoopSnapshot> {
+        self.list_tc_loops()
+    }
+
     fn tc_loop_snapshot(&self, channel_id: u32) -> Option<crate::TcLoopSnapshot>;
 
     /// Fas 4 stub: apply exclusive workflow (TC / commentator).

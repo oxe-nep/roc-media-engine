@@ -853,6 +853,53 @@ struct Branch {
     elements: Vec<gstreamer::Element>,
 }
 
+/// In-flight REC finalize: EOS wait can run outside the global `gst_op` lock.
+pub struct PendingRecordDetach {
+    channel_id: u32,
+    tag: String,
+    pipeline: gstreamer::Pipeline,
+    branch: Branch,
+    rx: std::sync::mpsc::Receiver<()>,
+    /// Keep probe ids until finish so probes stay installed during wait.
+    eos_probe: Option<gstreamer::PadProbeId>,
+    block_probes: Vec<gstreamer::PadProbeId>,
+}
+
+impl PendingRecordDetach {
+    pub fn wait_eos(&self) {
+        match self.rx.recv_timeout(std::time::Duration::from_millis(15000)) {
+            Ok(()) => tracing::info!(
+                channel = self.channel_id,
+                role = %self.tag,
+                "record EOS reached filesink"
+            ),
+            Err(_) => tracing::warn!(
+                channel = self.channel_id,
+                role = %self.tag,
+                "record EOS timeout — moov may be missing"
+            ),
+        }
+    }
+
+    pub fn finish(self) {
+        drop(self.eos_probe);
+        drop(self.block_probes);
+        ChannelPipeline::unlink_branch(&self.pipeline, &self.branch);
+        for el in self.branch.elements.iter().rev() {
+            let _ = el.set_state(gstreamer::State::Null);
+        }
+        for el in &self.branch.elements {
+            let _ = self.pipeline.remove(el);
+        }
+        tracing::info!(
+            channel = self.channel_id,
+            role = %self.tag,
+            video_tee = self.branch.video_tee,
+            "detached record branch"
+        );
+    }
+}
+
 /// Parser for the NVENC bitstream on encoded tee `e` (follows the *encode* preset).
 fn parse_element_for_codec(video_codec: &str) -> &'static str {
     let c = video_codec.to_ascii_lowercase();
@@ -1216,14 +1263,23 @@ impl ChannelPipeline {
         Ok(())
     }
 
-    pub fn stop_proxy_recording(&mut self) -> Result<()> {
+    /// Begin proxy REC stop (inject EOS). Caller must `wait_eos` then `finish`
+    /// — preferably outside the global `gst_op` lock.
+    pub fn begin_stop_proxy_recording(&mut self) -> Result<Option<PendingRecordDetach>> {
         if !self.proxy_recording {
-            return Ok(());
+            return Ok(None);
         }
-        let res = self.detach_recording(RecordingRole::Proxy, true);
         self.proxy_recording = false;
         self.proxy_recording_path = None;
-        res
+        self.begin_detach_recording(RecordingRole::Proxy, true)
+    }
+
+    pub fn stop_proxy_recording(&mut self) -> Result<()> {
+        if let Some(pending) = self.begin_stop_proxy_recording()? {
+            pending.wait_eos();
+            pending.finish();
+        }
+        Ok(())
     }
 
     /// HQ REC: mezz from raw tee `t` when the record preset is mezz, otherwise
@@ -1246,14 +1302,23 @@ impl ChannelPipeline {
         Ok(())
     }
 
-    pub fn stop_hq_recording(&mut self) -> Result<()> {
+    /// Begin HQ REC stop (inject EOS). Caller must `wait_eos` then `finish`
+    /// — preferably outside the global `gst_op` lock.
+    pub fn begin_stop_hq_recording(&mut self) -> Result<Option<PendingRecordDetach>> {
         if !self.hq_recording {
-            return Ok(());
+            return Ok(None);
         }
-        let res = self.detach_recording(RecordingRole::Hq, true);
         self.hq_recording = false;
         self.hq_recording_path = None;
-        res
+        self.begin_detach_recording(RecordingRole::Hq, true)
+    }
+
+    pub fn stop_hq_recording(&mut self) -> Result<()> {
+        if let Some(pending) = self.begin_stop_hq_recording()? {
+            pending.wait_eos();
+            pending.finish();
+        }
+        Ok(())
     }
 
     pub fn start_srt(&mut self, url: &str) -> Result<()> {
@@ -2155,22 +2220,53 @@ impl ChannelPipeline {
         Ok((pads, els))
     }
 
-    /// Detach one REC role. The branch remembers which video tee (`e` | `t`) its
-    /// pad came from, so the correct tee releases it.
+    /// Detach one REC role. When `finalize`, returns a pending EOS wait that
+    /// the caller should run outside `gst_op`, then call [`PendingRecordDetach::finish`].
+    /// When `!finalize`, unlinks immediately (relaunch / hard stop).
     fn detach_recording(&mut self, role: RecordingRole, finalize: bool) -> Result<()> {
+        if let Some(pending) = self.begin_detach_recording(role, finalize)? {
+            pending.wait_eos();
+            pending.finish();
+        }
+        Ok(())
+    }
+
+    fn begin_detach_recording(
+        &mut self,
+        role: RecordingRole,
+        finalize: bool,
+    ) -> Result<Option<PendingRecordDetach>> {
         let taken = match role {
             RecordingRole::Proxy => self.proxy_branch.take(),
             RecordingRole::Hq => self.hq_branch.take(),
         };
         let Some(branch) = taken else {
-            return Ok(());
+            return Ok(None);
         };
-        let tag = branch.role.tag();
+        let tag = branch.role.tag().to_string();
         let pipeline = self
             .pipeline
             .as_ref()
             .ok_or_else(|| anyhow!("no pipeline"))?
             .clone();
+        let channel_id = self.id;
+
+        if !finalize {
+            ChannelPipeline::unlink_branch(&pipeline, &branch);
+            for el in branch.elements.iter().rev() {
+                let _ = el.set_state(gstreamer::State::Null);
+            }
+            for el in &branch.elements {
+                let _ = pipeline.remove(el);
+            }
+            tracing::info!(
+                channel = channel_id,
+                role = %tag,
+                video_tee = branch.video_tee,
+                "detached record branch"
+            );
+            return Ok(None);
+        }
 
         // Optional EOS for a cleaner mp4/mxf/mov footer. Do NOT wait on the
         // pipeline bus: that raced under multi-channel stop and held the global
@@ -2179,91 +2275,67 @@ impl ChannelPipeline {
         // Order matters for qtmux: block live tee input, inject EOS while the
         // branch is still linked, wait for filesink, THEN unlink. Unlinking
         // first left ProRes/qtmux without a reachable EOS (moov-less .mov).
-        if finalize {
-            use gstreamer::{PadProbeReturn, PadProbeType};
-            use std::sync::mpsc;
+        use gstreamer::{PadProbeReturn, PadProbeType};
+        use std::sync::mpsc;
 
-            let sink_prefix = format!("fs_{tag}_");
-            let queue_prefix = format!("q_{tag}_");
-            let (tx, rx) = mpsc::channel::<()>();
-            // Keep probe id alive until after recv — dropping it removes the probe.
-            let eos_probe = branch
-                .elements
-                .iter()
-                .find(|e| e.name().starts_with(&sink_prefix))
-                .and_then(|sink| sink.static_pad("sink"))
-                .map(|pad| {
-                    let tx = tx.clone();
-                    pad.add_probe(PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
-                        if let Some(ev) = info.event() {
-                            if ev.type_() == gstreamer::EventType::Eos {
-                                let _ = tx.send(());
-                                return PadProbeReturn::Remove;
-                            }
+        let sink_prefix = format!("fs_{tag}_");
+        let queue_prefix = format!("q_{tag}_");
+        let (tx, rx) = mpsc::channel::<()>();
+        // Keep probe id alive until after recv — dropping it removes the probe.
+        let eos_probe = branch
+            .elements
+            .iter()
+            .find(|e| e.name().starts_with(&sink_prefix))
+            .and_then(|sink| sink.static_pad("sink"))
+            .and_then(|pad| {
+                let tx = tx.clone();
+                pad.add_probe(PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+                    if let Some(ev) = info.event() {
+                        if ev.type_() == gstreamer::EventType::Eos {
+                            let _ = tx.send(());
+                            return PadProbeReturn::Remove;
                         }
-                        PadProbeReturn::Ok
-                    })
-                });
-            drop(tx);
-
-            // Drop further live buffers on record queues while we finalize.
-            let mut block_probes = Vec::new();
-            for el in &branch.elements {
-                if el.name().starts_with(&queue_prefix) {
-                    if let Some(pad) = el.static_pad("sink") {
-                        block_probes.push(pad.add_probe(PadProbeType::BUFFER, |_pad, _info| {
-                            PadProbeReturn::Drop
-                        }));
                     }
-                }
-            }
+                    PadProbeReturn::Ok
+                })
+            });
+        drop(tx);
 
-            // Inject EOS *into* each record queue sink (downstream). Element-level
-            // send_event(EOS) on a filter goes to its sink pads (upstream) and
-            // never reaches the muxer — leaving a moov-less "corrupt" file.
-            for el in &branch.elements {
-                let name = el.name();
-                if name.starts_with(&queue_prefix) {
-                    if let Some(sink) = el.static_pad("sink") {
-                        let _ = sink.send_event(gstreamer::event::Eos::new());
-                    }
-                }
-            }
-            // Progressive mp4mux/qtmux writes moov only on EOS — wait generously
-            // (ProRes software encode can take longer to drain).
-            match rx.recv_timeout(std::time::Duration::from_millis(15000)) {
-                Ok(()) => tracing::info!(
-                    channel = self.id,
-                    role = tag,
-                    "record EOS reached filesink"
-                ),
-                Err(_) => tracing::warn!(
-                    channel = self.id,
-                    role = tag,
-                    "record EOS timeout — moov may be missing"
-                ),
-            }
-            drop(eos_probe);
-            drop(block_probes);
-        }
-
-        // Cut data path from the video/audio tees, then Null/remove.
-        Self::unlink_branch(&pipeline, &branch);
-
-        // Null from sink → source, then remove.
-        for el in branch.elements.iter().rev() {
-            let _ = el.set_state(gstreamer::State::Null);
-        }
+        // Drop further live buffers on record queues while we finalize.
+        let mut block_probes = Vec::new();
         for el in &branch.elements {
-            let _ = pipeline.remove(el);
+            if el.name().starts_with(&queue_prefix) {
+                if let Some(pad) = el.static_pad("sink") {
+                    if let Some(id) = pad.add_probe(PadProbeType::BUFFER, |_pad, _info| {
+                        PadProbeReturn::Drop
+                    }) {
+                        block_probes.push(id);
+                    }
+                }
+            }
         }
-        tracing::info!(
-            channel = self.id,
-            role = tag,
-            video_tee = branch.video_tee,
-            "detached record branch"
-        );
-        Ok(())
+
+        // Inject EOS *into* each record queue sink (downstream). Element-level
+        // send_event(EOS) on a filter goes to its sink pads (upstream) and
+        // never reaches the muxer — leaving a moov-less "corrupt" file.
+        for el in &branch.elements {
+            let name = el.name();
+            if name.starts_with(&queue_prefix) {
+                if let Some(sink) = el.static_pad("sink") {
+                    let _ = sink.send_event(gstreamer::event::Eos::new());
+                }
+            }
+        }
+
+        Ok(Some(PendingRecordDetach {
+            channel_id,
+            tag,
+            pipeline,
+            branch,
+            rx,
+            eos_probe,
+            block_probes,
+        }))
     }
 
     /// Unlink and release the branch's request pads: the video pad on
@@ -2350,6 +2422,37 @@ impl ChannelPipeline {
         if stale {
             self.audio_peaks = [-90.0; 8];
         }
+    }
+
+    /// Peaks / status / bus drain only — no format adapt or graph relaunch.
+    /// Used by the high-frequency meter poll so UI meters never hold `gst_op`
+    /// across a capture relaunch.
+    pub fn poll_bus_light(&mut self) {
+        let playing = {
+            let Some(p) = self.pipeline.as_ref() else {
+                return;
+            };
+            let (_, cur, _) = p.state(gstreamer::ClockTime::ZERO);
+            cur == gstreamer::State::Playing
+        };
+        self.apply_signal_status(playing);
+        self.decay_stale_peaks();
+        if let Some(fmt) = self.read_live_format() {
+            let changed = self
+                .detected
+                .as_ref()
+                .map(|d| d.mode != fmt.mode)
+                .unwrap_or(true);
+            self.detected = Some(fmt.clone());
+            if changed {
+                tracing::info!(
+                    channel = self.id,
+                    format = %fmt.summary(),
+                    "input format"
+                );
+            }
+        }
+        self.drain_bus_messages();
     }
 
     pub fn poll_bus(&mut self) {
@@ -2447,6 +2550,10 @@ impl ChannelPipeline {
             let _ = self.adapt_to_mode(&mode);
         }
 
+        self.drain_bus_messages();
+    }
+
+    fn drain_bus_messages(&mut self) {
         let Some(p) = self.pipeline.as_ref() else {
             return;
         };

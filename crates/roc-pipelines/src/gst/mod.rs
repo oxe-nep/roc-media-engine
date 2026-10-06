@@ -783,12 +783,21 @@ impl PipelineBackend for GstBackend {
     }
 
     fn stop_proxy_recording(&self, channel_id: u32) -> Result<()> {
-        let _gst = self.gst_op.lock();
-        let mut map = self.channels.lock();
-        let pipe = map
-            .get_mut(&channel_id)
-            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
-        pipe.stop_proxy_recording()
+        let pending = {
+            let _gst = self.gst_op.lock();
+            let mut map = self.channels.lock();
+            let pipe = map
+                .get_mut(&channel_id)
+                .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+            pipe.begin_stop_proxy_recording()?
+        };
+        // ProRes / qtmux drain can take seconds — never hold gst_op across wait.
+        if let Some(pending) = pending {
+            pending.wait_eos();
+            let _gst = self.gst_op.lock();
+            pending.finish();
+        }
+        Ok(())
     }
 
     fn start_hq_recording(&self, channel_id: u32, path: &str) -> Result<()> {
@@ -801,12 +810,21 @@ impl PipelineBackend for GstBackend {
     }
 
     fn stop_hq_recording(&self, channel_id: u32) -> Result<()> {
-        let _gst = self.gst_op.lock();
-        let mut map = self.channels.lock();
-        let pipe = map
-            .get_mut(&channel_id)
-            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
-        pipe.stop_hq_recording()
+        let pending = {
+            let _gst = self.gst_op.lock();
+            let mut map = self.channels.lock();
+            let pipe = map
+                .get_mut(&channel_id)
+                .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+            pipe.begin_stop_hq_recording()?
+        };
+        // ProRes / qtmux drain can take seconds — never hold gst_op across wait.
+        if let Some(pending) = pending {
+            pending.wait_eos();
+            let _gst = self.gst_op.lock();
+            pending.finish();
+        }
+        Ok(())
     }
 
     fn start_srt(&self, channel_id: u32, url: &str) -> Result<()> {
@@ -983,6 +1001,22 @@ impl PipelineBackend for GstBackend {
             .filter_map(|id| {
                 let p = map.get_mut(&id)?;
                 p.poll_bus();
+                Some(p.snapshot(used))
+            })
+            .collect()
+    }
+
+    fn list_channel_meters(&self) -> Vec<ChannelSnapshot> {
+        // Meter tick: peaks/status only — never adapt/relaunch under gst_op.
+        let _gst = self.gst_op.lock();
+        let mut map = self.channels.lock();
+        let used = self.nvenc_used.load(Ordering::SeqCst);
+        let mut ids: Vec<u32> = map.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .filter_map(|id| {
+                let p = map.get_mut(&id)?;
+                p.poll_bus_light();
                 Some(p.snapshot(used))
             })
             .collect()
@@ -1472,6 +1506,24 @@ impl PipelineBackend for GstBackend {
                 if let Err(e) = relaunch_tc_for_mode(rt, id, &mode) {
                     tracing::warn!(channel_id = id, error = %e, "TC format adapt failed");
                 }
+            }
+        }
+        let mut out: Vec<_> = map
+            .iter()
+            .map(|(id, rt)| tc_runtime_snapshot(*id, rt))
+            .collect();
+        out.sort_by_key(|t| t.id);
+        out
+    }
+
+    fn list_tc_loop_meters(&self) -> Vec<TcLoopSnapshot> {
+        // Meter tick: peaks only — skip TC format adapt/relaunch.
+        let _gst = self.gst_op.lock();
+        let mut map = self.tc_loops.lock();
+        let ids: Vec<u32> = map.keys().copied().collect();
+        for id in ids {
+            if let Some(rt) = map.get_mut(&id) {
+                poll_tc_runtime(rt);
             }
         }
         let mut out: Vec<_> = map
