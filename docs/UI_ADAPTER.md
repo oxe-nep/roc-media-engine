@@ -35,5 +35,5 @@ See also [CUTOVER.md](CUTOVER.md).
 ## Still deferred
 
 - TC-loop + commentator/WebRTC on the engine (UI grids still present; engine returns empty stubs)
-- DNxHD / XAVC mezz codecs (see [CODECS.md](CODECS.md))
+- DNxHD / ProRes mezz codecs (see [CODECS.md](CODECS.md))
 - **Native interlaced encode** — today capture always runs `deinterlace` before NVENC, so SRT/REC/proxy are progressive even when DeckLink locks `1080i50`. Goal: keep source scan type through encode (PAFF/MBAFF or field-aware path) with optional deinterlace; decode OUT should then match source rather than forcing `Hi50` → `1080p50`.

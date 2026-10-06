@@ -2,7 +2,7 @@
 
 export function isMezzCodec(codec: string): boolean {
   const c = codec.toLowerCase();
-  return c.includes("dnx") || c.includes("xavc");
+  return c.includes("dnx") || c.includes("prores");
 }
 
 export function isNvencCodec(codec: string): boolean {
@@ -23,7 +23,7 @@ export function isProxyPreset(p: { video_codec: string }): boolean {
   return isNvencCodec(p.video_codec);
 }
 
-/** HQ file presets: mezz (DNxHD/XAVC) — not the live proxy set. */
+/** HQ file presets: mezz (DNxHD/ProRes) — not the live proxy set. */
 export function isRecPreset(p: { video_codec: string }): boolean {
   return !isProxyPreset(p);
 }

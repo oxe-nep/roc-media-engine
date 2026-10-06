@@ -573,10 +573,13 @@ async fn encode_options() -> Json<Value> {
                 ]
             },
             {
-                "id": "xavc_intra",
-                "label": "XAVC Intra HD (mezz REC)",
+                "id": "avenc_prores_ks",
+                "label": "ProRes (mezz REC)",
                 "presets": [
-                    {"id": "intra", "label": "Intra"}
+                    {"id": "proxy", "label": "Proxy"},
+                    {"id": "lt", "label": "LT"},
+                    {"id": "standard", "label": "422"},
+                    {"id": "hq", "label": "HQ"}
                 ]
             }
         ]

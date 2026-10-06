@@ -56,7 +56,7 @@ pub struct Orchestrator {
 
 impl Orchestrator {
     /// File extension for a REC role. Proxy is always the encoded bitstream in
-    /// an MP4 container; HQ follows the channel's record preset (.mp4 / .mxf).
+    /// an MP4 container; HQ follows the channel's record preset (.mp4 / .mxf / .mov).
     pub fn recording_ext_for(&self, id: u32, role: RecordingRole) -> &'static str {
         if role == RecordingRole::Proxy {
             return "mp4";

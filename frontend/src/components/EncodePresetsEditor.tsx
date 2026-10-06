@@ -33,8 +33,13 @@ const DNXHD_CLASS_MBPS: Record<string, number> = {
   hqx: 185,
 };
 
-/** XAVC Intra HD approximation bitrate steps. */
-const XAVC_MBPS = [50, 75, 100, 111, 140, 160, 200] as const;
+/** Nominal Mbps for ProRes profile (encoder is profile-driven). */
+const PRORES_PROFILE_MBPS: Record<string, number> = {
+  proxy: 45,
+  lt: 102,
+  standard: 147,
+  hq: 220,
+};
 
 const PROXY_MBPS_HINT: Record<number, string> = {
   3: "Very light",
@@ -54,6 +59,13 @@ const DNXHD_CLASS_FALLBACK = [
   { id: "sq", label: "SQ (8-bit)" },
   { id: "hq", label: "HQ (8-bit)" },
   { id: "hqx", label: "HQX (10-bit)" },
+];
+
+const PRORES_PROFILE_FALLBACK = [
+  { id: "proxy", label: "Proxy" },
+  { id: "lt", label: "LT" },
+  { id: "standard", label: "422" },
+  { id: "hq", label: "HQ" },
 ];
 
 const NVENC_PRESETS_FALLBACK = [
@@ -101,6 +113,15 @@ function normalizeDnxhdClass(preset: string): string {
   return "hq";
 }
 
+function normalizeProresProfile(preset: string): string {
+  const p = preset.toLowerCase();
+  if (p.includes("proxy")) return "proxy";
+  if (p === "lt" || p.includes("_lt") || p.endsWith(" lt")) return "lt";
+  if (p === "hq" || p.includes("prores_hq") || p.endsWith("_hq")) return "hq";
+  if (p.includes("standard") || p.includes("422")) return "standard";
+  return "standard";
+}
+
 function dnxhdClassLabel(preset: string): string {
   const cls = normalizeDnxhdClass(preset);
   if (cls === "sq") return "SQ";
@@ -108,13 +129,26 @@ function dnxhdClassLabel(preset: string): string {
   return "HQ";
 }
 
+function proresProfileLabel(preset: string): string {
+  switch (normalizeProresProfile(preset)) {
+    case "proxy":
+      return "Proxy";
+    case "lt":
+      return "LT";
+    case "hq":
+      return "HQ";
+    default:
+      return "422";
+  }
+}
+
 function presetListMeta(p: EncodePreset): string {
+  const audio = p.audio_channels === 8 ? "8ch PCM" : "stereo PCM";
   if (p.video_codec.toLowerCase().includes("dnx")) {
-    const audio = p.audio_channels === 8 ? "8ch PCM" : "stereo PCM";
     return `${dnxhdClassLabel(p.video_preset)} · ${audio}`;
   }
-  if (isMezzCodec(p.video_codec)) {
-    return `${p.video_bitrate} · ${p.audio_channels === 8 ? "8ch PCM" : "stereo PCM"}`;
+  if (p.video_codec.toLowerCase().includes("prores")) {
+    return `${proresProfileLabel(p.video_preset)} · ${audio}`;
   }
   return `${p.video_bitrate} · ${p.audio_channels === 8 ? "8ch · 4×AAC" : p.audio_bitrate}`;
 }
@@ -152,7 +186,7 @@ function slugifyId(label: string): string {
 function normalizeCodecId(id: string): string {
   const c = id.toLowerCase();
   if (c.includes("dnx")) return "avenc_dnxhd";
-  if (c.includes("xavc")) return "xavc_intra";
+  if (c.includes("prores")) return "avenc_prores_ks";
   if (c.includes("265") || c.includes("hevc")) return "hevc_nvenc";
   return "h264_nvenc";
 }
@@ -191,23 +225,33 @@ function filterCodecs(codecs: EncodeCodecOption[], kind: PresetEditorKind): Enco
 
 function bitrateStepsFor(codec: string, kind: PresetEditorKind): readonly number[] {
   const c = codec.toLowerCase();
-  if (c.includes("dnx")) return [];
-  if (isMezzCodec(codec)) return XAVC_MBPS;
+  if (c.includes("dnx") || c.includes("prores")) return [];
   return kind === "proxy" ? PROXY_MBPS : REC_NVENC_MBPS;
 }
 
 function pickDefaultPresetId(codec: EncodeCodecOption | undefined, preferred?: string): string {
   const list = codec?.presets ?? [];
   if (preferred && list.some((p) => p.id === preferred)) return preferred;
-  if (codec?.id.toLowerCase().includes("dnx")) {
+  const id = codec?.id.toLowerCase() ?? "";
+  if (id.includes("dnx")) {
     return list.find((p) => p.id === "hq")?.id ?? list[0]?.id ?? "hq";
   }
+  if (id.includes("prores")) {
+    return list.find((p) => p.id === "standard" || p.id === "hq")?.id ?? list[0]?.id ?? "standard";
+  }
   return (
-    list.find((p) => p.id === "p4" || p.id === "hq" || p.id === "intra")?.id ??
+    list.find((p) => p.id === "p4" || p.id === "hq")?.id ??
     list[0]?.id ??
     preferred ??
     "p4"
   );
+}
+
+function mezzNominalMbps(codec: string, profile: string): number {
+  const c = codec.toLowerCase();
+  if (c.includes("dnx")) return DNXHD_CLASS_MBPS[normalizeDnxhdClass(profile)] ?? 185;
+  if (c.includes("prores")) return PRORES_PROFILE_MBPS[normalizeProresProfile(profile)] ?? 147;
+  return 185;
 }
 
 type Props = {
@@ -283,7 +327,9 @@ export default function EncodePresetsEditor({
 
   const formMezz = isMezzCodec(form.video_codec);
   const formDnxhd = formMezz && form.video_codec.toLowerCase().includes("dnx");
+  const formProres = formMezz && form.video_codec.toLowerCase().includes("prores");
   const dnxClass = formDnxhd ? normalizeDnxhdClass(form.video_preset) : "";
+  const proresProfile = formProres ? normalizeProresProfile(form.video_preset) : "";
 
   const videoMbps = useMemo(() => {
     const n = parseMbps(form.video_bitrate);
@@ -310,12 +356,19 @@ export default function EncodePresetsEditor({
       }
       return list;
     }
+    if (formProres) {
+      const list = activeCodec?.presets?.length ? activeCodec.presets : PRORES_PROFILE_FALLBACK;
+      if (!list.some((p) => p.id === proresProfile)) {
+        return [...list, { id: proresProfile, label: `${proresProfile} (current)` }];
+      }
+      return list;
+    }
     const list = activeCodec?.presets?.length ? activeCodec.presets : NVENC_PRESETS_FALLBACK;
     if (!list.some((p) => p.id === form.video_preset)) {
       return [...list, { id: form.video_preset, label: `${form.video_preset} (current)` }];
     }
     return list;
-  }, [activeCodec, form.video_preset, formDnxhd, dnxClass]);
+  }, [activeCodec, form.video_preset, formDnxhd, formProres, dnxClass, proresProfile]);
 
   const codecOptions = useMemo(() => {
     if (codecs.some((c) => c.id === form.video_codec) || !form.video_codec) {
@@ -356,11 +409,7 @@ export default function EncodePresetsEditor({
       if (isMezzCodec(codecs[0].id)) {
         base.video_gop = 1;
         base.audio_channels = 8;
-        const dnx = codecs[0].id.toLowerCase().includes("dnx");
-        Object.assign(
-          base,
-          deriveFromMbps(dnx ? DNXHD_CLASS_MBPS[base.video_preset] ?? 185 : 111),
-        );
+        Object.assign(base, deriveFromMbps(mezzNominalMbps(codecs[0].id, base.video_preset)));
       }
     }
     setForm(base);
@@ -371,7 +420,10 @@ export default function EncodePresetsEditor({
     const next = { ...p, audio_channels: p.audio_channels === 8 ? 8 : 2 };
     if (p.video_codec.toLowerCase().includes("dnx")) {
       next.video_preset = normalizeDnxhdClass(p.video_preset);
-      Object.assign(next, deriveFromMbps(DNXHD_CLASS_MBPS[next.video_preset] ?? 185));
+      Object.assign(next, deriveFromMbps(mezzNominalMbps(p.video_codec, next.video_preset)));
+    } else if (p.video_codec.toLowerCase().includes("prores")) {
+      next.video_preset = normalizeProresProfile(p.video_preset);
+      Object.assign(next, deriveFromMbps(mezzNominalMbps(p.video_codec, next.video_preset)));
     }
     setForm(next);
   };
@@ -393,11 +445,7 @@ export default function EncodePresetsEditor({
       if (mezz) {
         next.video_gop = 1;
         next.audio_channels = 8;
-        const dnx = codecId.toLowerCase().includes("dnx");
-        Object.assign(
-          next,
-          deriveFromMbps(dnx ? DNXHD_CLASS_MBPS[nextPreset] ?? 185 : 111),
-        );
+        Object.assign(next, deriveFromMbps(mezzNominalMbps(codecId, nextPreset)));
       } else if (isMezzCodec(prev.video_codec)) {
         next.video_gop = 50;
         next.audio_channels = kind === "rec" ? 2 : prev.audio_channels;
@@ -413,6 +461,15 @@ export default function EncodePresetsEditor({
       ...prev,
       video_preset: id,
       ...deriveFromMbps(DNXHD_CLASS_MBPS[id] ?? 185),
+    }));
+  };
+
+  const setProresProfile = (profile: string) => {
+    const id = normalizeProresProfile(profile);
+    setForm((prev) => ({
+      ...prev,
+      video_preset: id,
+      ...deriveFromMbps(PRORES_PROFILE_MBPS[id] ?? 147),
     }));
   };
 
@@ -432,13 +489,19 @@ export default function EncodePresetsEditor({
     try {
       const mbps = Math.round(
         parseMbps(form.video_bitrate) ??
-          (formDnxhd ? DNXHD_CLASS_MBPS[dnxClass] ?? 185 : formMezz ? 185 : 12),
+          (formDnxhd
+            ? DNXHD_CLASS_MBPS[dnxClass] ?? 185
+            : formProres
+              ? PRORES_PROFILE_MBPS[proresProfile] ?? 147
+              : formMezz
+                ? 185
+                : 12),
       );
       const payload: EncodePreset = {
         ...form,
         ...deriveFromMbps(mbps),
         video_codec: normalizeCodecId(form.video_codec),
-        video_preset: formDnxhd ? dnxClass : form.video_preset,
+        video_preset: formDnxhd ? dnxClass : formProres ? proresProfile : form.video_preset,
         video_gop: formMezz ? 1 : form.video_gop,
         audio_channels: form.audio_channels === 8 ? 8 : 2,
       };
@@ -532,7 +595,7 @@ export default function EncodePresetsEditor({
             <input
               value={form.label}
               onChange={(e) => setLabel(e.target.value)}
-              placeholder={kind === "proxy" ? "e.g. Proxy 12M" : "e.g. DNxHD HQ"}
+              placeholder={kind === "proxy" ? "e.g. Proxy 12M" : "e.g. ProRes HQ"}
               disabled={busy}
             />
           </label>
@@ -579,6 +642,21 @@ export default function EncodePresetsEditor({
                   ))}
                 </select>
               </label>
+            ) : formProres ? (
+              <label className="presets-field">
+                <span>ProRes profile</span>
+                <select
+                  value={proresProfile}
+                  onChange={(e) => setProresProfile(e.target.value)}
+                  disabled={busy}
+                >
+                  {encoderPresets.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
             ) : (
               <>
                 <label className="presets-field">
@@ -598,11 +676,11 @@ export default function EncodePresetsEditor({
                 </label>
 
                 <label className="presets-field">
-                  <span>{formMezz ? "Profile" : "Encoder speed"}</span>
+                  <span>Encoder speed</span>
                   <select
                     value={form.video_preset}
                     onChange={(e) => setForm((prev) => ({ ...prev, video_preset: e.target.value }))}
-                    disabled={busy || formMezz}
+                    disabled={busy}
                   >
                     {encoderPresets.map((p) => (
                       <option key={p.id} value={p.id}>
@@ -679,11 +757,15 @@ export default function EncodePresetsEditor({
               <>
                 MXF · DNxHD {dnxhdClassLabel(dnxClass)} · {dnxhdOutcome(dnxClass)} · {audioMeta}
               </>
+            ) : formProres ? (
+              <>
+                MOV · ProRes {proresProfileLabel(proresProfile)} · progressive from live ·{" "}
+                {audioMeta}
+              </>
             ) : (
               <>
-                {formMezz ? "MXF" : "MP4"} · {form.video_codec} · {derived.video_bitrate}
-                {!formMezz ? ` (max ${derived.video_maxrate})` : ""} · {form.video_preset} ·{" "}
-                {audioMeta}
+                MP4 · {form.video_codec} · {derived.video_bitrate}
+                {` (max ${derived.video_maxrate})`} · {form.video_preset} · {audioMeta}
               </>
             )}
           </p>

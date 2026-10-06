@@ -98,19 +98,19 @@ pub fn map_video_codec(raw: &str) -> String {
     if c.is_empty() {
         return default_video_codec();
     }
-    // Mezz codecs first — "xavc" contains "avc".
+    // Mezz codecs first.
     if c.contains("dnx") {
         return "avenc_dnxhd".into();
     }
-    if c.contains("xavc") {
-        return "xavc_intra".into();
+    if c.contains("prores") {
+        return "avenc_prores_ks".into();
     }
     if c.contains("265") || c.contains("hevc") {
         "nvh265enc".into()
     } else if c == "nvh264enc"
         || c.contains("264")
         || c == "h264_nvenc"
-        || (c.contains("avc") && !c.contains("xavc"))
+        || c.contains("avc")
     {
         "nvh264enc".into()
     } else {
@@ -119,19 +119,41 @@ pub fn map_video_codec(raw: &str) -> String {
     }
 }
 
-/// Mezz codecs encode from the raw tee on REC only; live/SRT stays NVENC.
+/// Mezz codecs encode from the raw/progressive tee on REC only; live/SRT stays NVENC.
 pub fn is_mezz_codec(video_codec: &str) -> bool {
     let c = video_codec.to_ascii_lowercase();
-    c.contains("dnx") || c.contains("xavc")
+    c.contains("dnx") || c.contains("prores")
 }
 
 /// File extension for recordings produced with this codec.
 pub fn recording_extension(video_codec: &str) -> &'static str {
     let c = video_codec.to_ascii_lowercase();
-    if c.contains("dnx") || c.contains("xavc") {
+    if c.contains("dnx") {
         "mxf"
+    } else if c.contains("prores") {
+        "mov"
     } else {
         "mp4"
+    }
+}
+
+/// ProRes profile nick for `avenc_prores_ks` (`proxy` / `lt` / `standard` / `hq` / `4444`).
+pub fn parse_prores_profile(preset: &str) -> &'static str {
+    let p = preset.trim().to_ascii_lowercase();
+    if p.contains("proxy") {
+        "proxy"
+    } else if p == "lt" || p.contains("_lt") || p.ends_with(" lt") || p.contains("prores_lt") {
+        "lt"
+    } else if p.contains("4444xq") {
+        "4444xq"
+    } else if p.contains("4444") {
+        "4444"
+    } else if p == "hq" || p.contains("prores_hq") || p.ends_with("_hq") {
+        "hq"
+    } else if p.contains("standard") || p.contains("422") || p == "apcn" {
+        "standard"
+    } else {
+        "standard"
     }
 }
 
@@ -173,7 +195,7 @@ pub struct ChannelConfig {
     /// Live/proxy encode (NVENC → SRT/UDP/preview).
     #[serde(default)]
     pub encode_preset: Option<String>,
-    /// Recording encode (may be mezz DNxHD/XAVC). Defaults to `encode_preset`.
+    /// Recording encode (may be mezz DNxHD/ProRes). Defaults to `encode_preset`.
     #[serde(default)]
     pub record_preset: Option<String>,
     /// DeckLink device name, e.g. "DeckLink IP 100G (1)"
@@ -223,6 +245,21 @@ impl Config {
             // Merge built-in mezz/NVENC presets without clobbering custom ids.
             for (id, preset) in default_presets() {
                 cfg.encode_presets.entry(id).or_insert(preset);
+            }
+        }
+        // Drop retired XAVC approximation presets (replaced by ProRes / DNxHD).
+        cfg.encode_presets.retain(|id, p| {
+            let c = p.video_codec.to_ascii_lowercase();
+            !id.contains("xavc") && !c.contains("xavc")
+        });
+        for ch in &mut cfg.channels {
+            if ch
+                .record_preset
+                .as_deref()
+                .map(|s| s.contains("xavc"))
+                .unwrap_or(false)
+            {
+                ch.record_preset = Some("dnxhd_hq".into());
             }
         }
         for p in cfg.encode_presets.values_mut() {
@@ -462,16 +499,58 @@ fn default_presets() -> std::collections::HashMap<String, EncodePreset> {
             audio_channels: 8,
         },
     );
+    // ProRes mezz REC → QuickTime (.mov). video_preset = encoder profile nick.
     m.insert(
-        "xavc_intra_hd".into(),
+        "prores_proxy".into(),
         EncodePreset {
-            label: "XAVC Intra HD".into(),
-            video_codec: "xavc_intra".into(),
-            // ~Class 100 HD target; x264 high-4:2:2-intra approximation.
-            video_bitrate: "111M".into(),
+            label: "ProRes Proxy".into(),
+            video_codec: "avenc_prores_ks".into(),
+            video_bitrate: "45M".into(),
             video_maxrate: None,
             video_bufsize: None,
-            video_preset: "intra".into(),
+            video_preset: "proxy".into(),
+            video_gop: 1,
+            audio_bitrate: "384k".into(),
+            audio_channels: 8,
+        },
+    );
+    m.insert(
+        "prores_lt".into(),
+        EncodePreset {
+            label: "ProRes LT".into(),
+            video_codec: "avenc_prores_ks".into(),
+            video_bitrate: "102M".into(),
+            video_maxrate: None,
+            video_bufsize: None,
+            video_preset: "lt".into(),
+            video_gop: 1,
+            audio_bitrate: "384k".into(),
+            audio_channels: 8,
+        },
+    );
+    m.insert(
+        "prores_422".into(),
+        EncodePreset {
+            label: "ProRes 422".into(),
+            video_codec: "avenc_prores_ks".into(),
+            video_bitrate: "147M".into(),
+            video_maxrate: None,
+            video_bufsize: None,
+            video_preset: "standard".into(),
+            video_gop: 1,
+            audio_bitrate: "384k".into(),
+            audio_channels: 8,
+        },
+    );
+    m.insert(
+        "prores_hq".into(),
+        EncodePreset {
+            label: "ProRes HQ".into(),
+            video_codec: "avenc_prores_ks".into(),
+            video_bitrate: "220M".into(),
+            video_maxrate: None,
+            video_bufsize: None,
+            video_preset: "hq".into(),
             video_gop: 1,
             audio_bitrate: "384k".into(),
             audio_channels: 8,
@@ -497,13 +576,17 @@ mod tests {
         assert_eq!(map_video_codec("hevc_nvenc"), "nvh265enc");
         assert_eq!(map_video_codec("dnxhd"), "avenc_dnxhd");
         assert_eq!(map_video_codec("avenc_dnxhd"), "avenc_dnxhd");
-        assert_eq!(map_video_codec("xavc_intra"), "xavc_intra");
+        assert_eq!(map_video_codec("prores"), "avenc_prores_ks");
+        assert_eq!(map_video_codec("avenc_prores_ks"), "avenc_prores_ks");
         assert!(is_mezz_codec("avenc_dnxhd"));
-        assert!(is_mezz_codec("xavc_intra"));
+        assert!(is_mezz_codec("avenc_prores_ks"));
         assert!(!is_mezz_codec("nvh264enc"));
         assert_eq!(recording_extension("avenc_dnxhd"), "mxf");
-        assert_eq!(recording_extension("xavc_intra"), "mxf");
+        assert_eq!(recording_extension("avenc_prores_ks"), "mov");
         assert_eq!(recording_extension("nvh264enc"), "mp4");
+        assert_eq!(parse_prores_profile("hq"), "hq");
+        assert_eq!(parse_prores_profile("prores_422"), "standard");
+        assert_eq!(parse_prores_profile("lt"), "lt");
         assert_eq!(map_nvenc_preset("p4"), "hq");
         assert_eq!(map_nvenc_preset("p1"), "hp");
         assert_eq!(map_nvenc_preset("llhq"), "low-latency-hq");

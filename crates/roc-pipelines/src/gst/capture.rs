@@ -3,7 +3,7 @@
 //! Two independent REC roles attach as dynamic branches and can run at the same
 //! time (each with its own start/stop):
 //! - **proxy**: encoded tee `e` → encode-preset parser → mp4mux (`.mp4`);
-//! - **hq**: record preset — mezz from pre-deinterlace tee `raw` (DNxHD/XAVC → `.mxf`),
+//! - **hq**: record preset — mezz from tee `raw` (DNxHD → `.mxf`) or `t` (ProRes → `.mov`),
 //!   or the encoded bitstream from tee `e` (`.mp4`) for NVENC record presets.
 //!
 //! Element names carry the role tag (`q_proxy_*` / `q_hq_*`) and each branch
@@ -1337,13 +1337,20 @@ impl ChannelPipeline {
             .ok_or_else(|| anyhow!("encoded tee `e` missing — is capture running?"))
     }
 
-    /// Pre-deinterlace tee for mezz REC (DNxHD keeps interlaced fields).
-    /// Falls back to `t` only if an older launch string is still running.
+    /// Video tee for mezz REC.
+    /// DNxHD keeps interlaced fields from pre-deinterlace `raw`.
+    /// ProRes uses progressive post-deinterlace `t` (QuickTime-friendly).
     fn mezz_video_tee(&self) -> Result<gstreamer::Element> {
         let p = self
             .pipeline
             .as_ref()
             .ok_or_else(|| anyhow!("no pipeline"))?;
+        let codec = self.record_preset.video_codec.to_ascii_lowercase();
+        if codec.contains("prores") {
+            return p
+                .by_name("t")
+                .ok_or_else(|| anyhow!("progressive tee `t` missing — is capture running?"));
+        }
         p.by_name("raw")
             .or_else(|| p.by_name("t"))
             .ok_or_else(|| anyhow!("mezz video tee `raw`/`t` missing — is capture running?"))
@@ -1416,8 +1423,16 @@ impl ChannelPipeline {
                 .ok()
                 .map(|op| op.label);
         }
-        if codec.contains("xavc") {
-            return Some("XAVC Intra HD".into());
+        if codec.contains("prores") {
+            let profile = roc_config::parse_prores_profile(&self.record_preset.video_preset);
+            let label = match profile {
+                "proxy" => "ProRes Proxy",
+                "lt" => "ProRes LT",
+                "hq" => "ProRes HQ",
+                "4444" | "4444xq" => "ProRes 4444",
+                _ => "ProRes 422",
+            };
+            return Some(label.into());
         }
         None
     }
@@ -1607,9 +1622,9 @@ impl ChannelPipeline {
         Ok(())
     }
 
-    /// Mezz REC from pre-deinterlace tee `raw`: DNxHD (.mxf) or XAVC Intra (.mxf) + NTP/RTC timecode.
+    /// Mezz REC: DNxHD (.mxf from `raw`) or ProRes (.mov from `t`) + NTP/RTC timecode.
     ///
-    /// HQ-only: video tee is `raw` (fields preserved). Detach releases that pad (not `e`).
+    /// HQ-only. Detach releases the mezz tee pad (not encoded tee `e`).
     fn attach_mezz_recording(&self, role: RecordingRole, path: &str) -> Result<Branch> {
         let pipeline = self
             .pipeline
@@ -1651,12 +1666,12 @@ impl ChannelPipeline {
         let codec = self.record_preset.video_codec.to_ascii_lowercase();
 
         let fmt = self.detected.clone().ok_or_else(|| {
-            anyhow!("no detected input format — wait for signal before DNxHD/XAVC REC")
+            anyhow!("no detected input format — wait for signal before DNxHD/ProRes REC")
         })?;
 
         let queue_v = gstreamer::ElementFactory::make("queue")
             .name(format!("q_{tag}_v_{}", self.id))
-            // Isolate mezz from live tee `raw`. Prefer absorbing NFS/encode jitter
+            // Isolate mezz from live tee. Prefer absorbing NFS/encode jitter
             // over wedging proxy/WebRTC; leaky drops mezz frames only under stall.
             .property("max-size-buffers", 60u32)
             .property("max-size-bytes", 0u32)
@@ -1675,71 +1690,103 @@ impl ChannelPipeline {
             .build()
             .context("videorate")?;
 
-        let (caps_str, bitrate, enc_label, frame_duration_ns) = if codec.contains("dnx") {
-            let hint = crate::parse_bitrate(&self.record_preset.video_bitrate);
-            let class_src = if !self.record_preset.video_preset.trim().is_empty() {
-                self.record_preset.video_preset.as_str()
-            } else {
-                self.record_preset.label.as_str()
-            };
-            let class = crate::DnxhdClass::parse(class_src, hint);
-            let op = crate::resolve_dnxhd(&fmt, class)?;
-            if class == crate::DnxhdClass::Hqx && self.source_bit_depth() < 10 {
-                bail!(
-                    "DNxHD HQX requires a 10-bit source (signal is {}-bit). \
-                     Use DNxHD SQ/HQ (8-bit) or feed a 10-bit input.",
-                    self.source_bit_depth()
-                );
-            }
-            if class.bits() == 8 && self.source_bit_depth() >= 10 {
-                tracing::warn!(
+        let (caps_str, bitrate, enc_label, frame_duration_ns, prores_profile) =
+            if codec.contains("dnx") {
+                let hint = crate::parse_bitrate(&self.record_preset.video_bitrate);
+                let class_src = if !self.record_preset.video_preset.trim().is_empty() {
+                    self.record_preset.video_preset.as_str()
+                } else {
+                    self.record_preset.label.as_str()
+                };
+                let class = crate::DnxhdClass::parse(class_src, hint);
+                let op = crate::resolve_dnxhd(&fmt, class)?;
+                if class == crate::DnxhdClass::Hqx && self.source_bit_depth() < 10 {
+                    bail!(
+                        "DNxHD HQX requires a 10-bit source (signal is {}-bit). \
+                         Use DNxHD SQ/HQ (8-bit) or feed a 10-bit input.",
+                        self.source_bit_depth()
+                    );
+                }
+                if class.bits() == 8 && self.source_bit_depth() >= 10 {
+                    tracing::warn!(
+                        channel = self.id,
+                        class = class.as_str(),
+                        source_bits = self.source_bit_depth(),
+                        "DNxHD {}: 10-bit source will be recorded as 8-bit (Y42B). Use HQX to keep 10-bit.",
+                        class.as_str()
+                    );
+                }
+                let frame_duration_ns = 1_000_000_000u64
+                    .saturating_mul(op.fps_den as u64)
+                    .saturating_div(op.fps_num as u64)
+                    .max(1);
+                tracing::info!(
                     channel = self.id,
                     class = class.as_str(),
+                    label = %op.label,
+                    bitrate = op.bitrate,
+                    interlaced = op.interlaced,
+                    fps = %format!("{}/{}", op.fps_num, op.fps_den),
+                    raw_format = op.raw_format,
                     source_bits = self.source_bit_depth(),
-                    "DNxHD {}: 10-bit source will be recorded as 8-bit (Y42B). Use HQX to keep 10-bit.",
-                    class.as_str()
+                    "DNxHD operating point resolved from live signal"
                 );
-            }
-            let frame_duration_ns = 1_000_000_000u64
-                .saturating_mul(op.fps_den as u64)
-                .saturating_div(op.fps_num as u64)
-                .max(1);
-            tracing::info!(
-                channel = self.id,
-                class = class.as_str(),
-                label = %op.label,
-                bitrate = op.bitrate,
-                interlaced = op.interlaced,
-                fps = %format!("{}/{}", op.fps_num, op.fps_den),
-                raw_format = op.raw_format,
-                source_bits = self.source_bit_depth(),
-                "DNxHD operating point resolved from live signal"
-            );
-            (op.video_caps(), op.bitrate, op.label, frame_duration_ns)
-        } else {
-            let (fps_n, fps_d) = if fmt.interlaced {
-                if fmt.fps_num >= 40 {
-                    (fmt.fps_num / 2, fmt.fps_den.max(1))
+                (
+                    op.video_caps(),
+                    op.bitrate,
+                    op.label,
+                    frame_duration_ns,
+                    None,
+                )
+            } else if codec.contains("prores") {
+                let profile = roc_config::parse_prores_profile(
+                    if !self.record_preset.video_preset.trim().is_empty() {
+                        self.record_preset.video_preset.as_str()
+                    } else {
+                        self.record_preset.label.as_str()
+                    },
+                );
+                let (fps_n, fps_d) = if fmt.interlaced {
+                    if fmt.fps_num >= 40 {
+                        (fmt.fps_num / 2, fmt.fps_den.max(1))
+                    } else {
+                        (fmt.fps_num.max(1), fmt.fps_den.max(1))
+                    }
                 } else {
                     (fmt.fps_num.max(1), fmt.fps_den.max(1))
+                };
+                let frame_duration_ns = 1_000_000_000u64
+                    .saturating_mul(fps_d as u64)
+                    .saturating_div(fps_n as u64)
+                    .max(1);
+                let raw_format = if profile.starts_with("4444") {
+                    "Y444_10LE"
+                } else {
+                    "I422_10LE"
+                };
+                let caps = format!("video/x-raw,format={raw_format},framerate={fps_n}/{fps_d}");
+                let enc_label = match profile {
+                    "proxy" => "ProRes Proxy",
+                    "lt" => "ProRes LT",
+                    "hq" => "ProRes HQ",
+                    "4444" | "4444xq" => "ProRes 4444",
+                    _ => "ProRes 422",
                 }
+                .to_string();
+                let bitrate = crate::parse_bitrate(&self.record_preset.video_bitrate)
+                    .unwrap_or(147_000_000);
+                tracing::info!(
+                    channel = self.id,
+                    profile,
+                    label = %enc_label,
+                    fps = %format!("{fps_n}/{fps_d}"),
+                    raw_format,
+                    "ProRes profile resolved"
+                );
+                (caps, bitrate, enc_label, frame_duration_ns, Some(profile))
             } else {
-                (fmt.fps_num.max(1), fmt.fps_den.max(1))
+                bail!("unsupported mezz codec {}", self.record_preset.video_codec);
             };
-            let frame_duration_ns = 1_000_000_000u64
-                .saturating_mul(fps_d as u64)
-                .saturating_div(fps_n as u64)
-                .max(1);
-            let bitrate =
-                crate::parse_bitrate(&self.record_preset.video_bitrate).unwrap_or(111_000_000);
-            let caps = format!("video/x-raw,format=Y42B,framerate={fps_n}/{fps_d}");
-            (
-                caps,
-                bitrate,
-                "XAVC Intra HD (approx)".into(),
-                frame_duration_ns,
-            )
-        };
 
         let caps = gstreamer::ElementFactory::make("capsfilter")
             .name(format!("caps_{tag}_{}", self.id))
@@ -1757,35 +1804,27 @@ impl ChannelPipeline {
         let _ = tc.set_property_from_str("source", "rtc");
         let _ = tc.set_property_from_str("set", "always");
 
-        let (enc, parse_opt, mux_name): (gstreamer::Element, Option<gstreamer::Element>, &str) =
-            if codec.contains("dnx") {
-                let enc = gstreamer::ElementFactory::make("avenc_dnxhd")
-                    .name(format!("enc_{tag}_{}", self.id))
-                    .property("bitrate", bitrate as i32)
-                    .build()
-                    .context("avenc_dnxhd")?;
-                let _ = enc.set_property_from_str("profile", "dnxhd");
-                // Host probe: only mxfmux accepts video/x-dnxhd (qtmux/avmux_mov do not).
-                (enc, None, "mxfmux")
-            } else if codec.contains("xavc") {
-                let enc = gstreamer::ElementFactory::make("x264enc")
-                    .name(format!("enc_{tag}_{}", self.id))
-                    .property("bitrate", (bitrate / 1000) as u32)
-                    .property("key-int-max", 1u32)
-                    .property("bframes", 0u32)
-                    .build()
-                    .context("x264enc xavc-intra")?;
-                let _ = enc.set_property_from_str("speed-preset", "medium");
-                let _ = enc.set_property_from_str("tune", "zerolatency");
-                let parse = gstreamer::ElementFactory::make("h264parse")
-                    .name(format!("parse_{tag}_{}", self.id))
-                    .build()
-                    .context("h264parse")?;
-                let _ = parse.set_property_from_str("config-interval", "-1");
-                (enc, Some(parse), "mxfmux")
-            } else {
-                bail!("unsupported mezz codec {}", self.record_preset.video_codec);
-            };
+        let (enc, mux_name): (gstreamer::Element, &str) = if codec.contains("dnx") {
+            let enc = gstreamer::ElementFactory::make("avenc_dnxhd")
+                .name(format!("enc_{tag}_{}", self.id))
+                .property("bitrate", bitrate as i32)
+                .build()
+                .context("avenc_dnxhd")?;
+            let _ = enc.set_property_from_str("profile", "dnxhd");
+            // Host probe: only mxfmux accepts video/x-dnxhd (qtmux/avmux_mov do not).
+            (enc, "mxfmux")
+        } else if codec.contains("prores") {
+            let enc = gstreamer::ElementFactory::make("avenc_prores_ks")
+                .name(format!("enc_{tag}_{}", self.id))
+                .build()
+                .context("avenc_prores_ks")?;
+            let profile = prores_profile.unwrap_or("standard");
+            let _ = enc.set_property_from_str("profile", profile);
+            let _ = bitrate; // ProRes is profile-driven; stored Mbps is UI-only.
+            (enc, "qtmux")
+        } else {
+            bail!("unsupported mezz codec {}", self.record_preset.video_codec);
+        };
 
         // Hot-attach onto a live tee: reset TIME segment *after* encode so
         // mxfmux sees pts≈0 (raw-side identity alone is not enough for avenc).
@@ -1823,27 +1862,7 @@ impl ChannelPipeline {
         rate.link(&caps).context("mezz videorate→caps")?;
         caps.link(&tc).context("mezz caps→timecode")?;
         tc.link(&enc).context("mezz timecode→enc")?;
-        if let Some(parse) = &parse_opt {
-            branch.elements.push(parse.clone());
-            pipeline.add(parse)?;
-            // High 4:2:2 Intra profile for XAVC-HD-style Intra.
-            let profile_caps = gstreamer::ElementFactory::make("capsfilter")
-                .name(format!("prof_{tag}_{}", self.id))
-                .property(
-                    "caps",
-                    gstreamer::Caps::from_str("video/x-h264,profile=high-4:2:2-intra")
-                        .context("xavc profile caps")?,
-                )
-                .build()
-                .context("profile capsfilter")?;
-            branch.elements.push(profile_caps.clone());
-            pipeline.add(&profile_caps)?;
-            enc.link(&profile_caps).context("xavc enc→profile")?;
-            profile_caps.link(parse).context("xavc profile→parse")?;
-            parse.link(&id_v).context("xavc parse→identity")?;
-        } else {
-            enc.link(&id_v).context("dnxhd enc→identity")?;
-        }
+        enc.link(&id_v).context("mezz enc→identity")?;
         id_v.link(&mux).context("mezz identity→mux")?;
         mux.link(&sink).context("mezz mux→sink")?;
 

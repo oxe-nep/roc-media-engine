@@ -82,11 +82,35 @@ encode_presets:
     video_gop: 1
     audio_bitrate: "384k"
     audio_channels: 8
-  xavc_intra_hd:
-    label: "XAVC Intra HD"
-    video_codec: xavc_intra
-    video_bitrate: "111M"
-    video_preset: intra
+  prores_proxy:
+    label: "ProRes Proxy"
+    video_codec: avenc_prores_ks
+    video_bitrate: "45M"
+    video_preset: proxy
+    video_gop: 1
+    audio_bitrate: "384k"
+    audio_channels: 8
+  prores_lt:
+    label: "ProRes LT"
+    video_codec: avenc_prores_ks
+    video_bitrate: "102M"
+    video_preset: lt
+    video_gop: 1
+    audio_bitrate: "384k"
+    audio_channels: 8
+  prores_422:
+    label: "ProRes 422"
+    video_codec: avenc_prores_ks
+    video_bitrate: "147M"
+    video_preset: standard
+    video_gop: 1
+    audio_bitrate: "384k"
+    audio_channels: 8
+  prores_hq:
+    label: "ProRes HQ"
+    video_codec: avenc_prores_ks
+    video_bitrate: "220M"
+    video_preset: hq
     video_gop: 1
     audio_bitrate: "384k"
     audio_channels: 8

@@ -112,11 +112,23 @@ export default function PresetHelpModal({ open, kind, onClose }: Props) {
                 is blocked.
               </p>
 
-              <h3>XAVC</h3>
+              <h3>ProRes — pick a profile</h3>
               <p>
-                Our XAVC option is an open-source Intra approximation — fine for many edit
-                workflows, not a certified Sony Class 100 deliverable.
+                ProRes writes a QuickTime <strong>.mov</strong> from the progressive tee (interlace
+                is deinterlaced first). Choose Proxy / LT / 422 / HQ — bitrate follows the profile,
+                not a free Mbps slider.
               </p>
+              <ul className="preset-help-list">
+                <li>
+                  <strong>422</strong> — normal edit mezz.
+                </li>
+                <li>
+                  <strong>HQ</strong> — heavier, more headroom.
+                </li>
+                <li>
+                  <strong>LT / Proxy</strong> — smaller files for offline / review.
+                </li>
+              </ul>
             </>
           )}
         </div>

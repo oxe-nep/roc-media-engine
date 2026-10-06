@@ -6,7 +6,7 @@ CH=4
 curl -sS -X PUT "$BASE/api/streams/$CH/encode-preset" \
   -H 'Content-Type: application/json' -d '{"preset":"hq"}' >/dev/null
 curl -sS -X PUT "$BASE/api/streams/$CH/record-preset" \
-  -H 'Content-Type: application/json' -d '{"preset":"xavc_intra_hd"}' | tee /tmp/rme-xavc-preset.json
+  -H 'Content-Type: application/json' -d '{"preset":"prores_422"}' | tee /tmp/rme-prores-preset.json
 echo
 curl -sS -X POST "$BASE/api/streams/$CH/start" >/dev/null || true
 sleep 4
@@ -18,25 +18,28 @@ print("status", c["status"], "proxy", c.get("encode_preset"), "rec", c.get("reco
 PY
 
 curl -sS -X PUT "$BASE/api/recordings/$CH/name" \
-  -H 'Content-Type: application/json' -d '{"name":"xavc_ntp_test"}' >/dev/null
+  -H 'Content-Type: application/json' -d '{"name":"prores_smoke"}' >/dev/null
 curl -sS -X PUT "$BASE/api/recordings/$CH/category" \
   -H 'Content-Type: application/json' -d '{"category":"_unsorted"}' >/dev/null
-curl -sS -X POST "$BASE/api/recordings/$CH/start" | tee /tmp/rme-xavc-rec.json
+curl -sS -X POST "$BASE/api/recordings/$CH/start" | tee /tmp/rme-prores-rec.json
 echo
 sleep 8
-curl -sS -X POST "$BASE/api/recordings/$CH/stop" | tee /tmp/rme-xavc-stop.json
+curl -sS -X POST "$BASE/api/recordings/$CH/stop" | tee /tmp/rme-prores-stop.json
 echo
 
-FILE=$(ls -t /opt/applications/roc-media-engine/recordings/_unsorted/xavc_ntp_test_ch4_*.mxf 2>/dev/null | head -1 || true)
+FILE=$(ls -t /opt/applications/roc-media-engine/recordings/_unsorted/prores_smoke_ch4_*.mov 2>/dev/null | head -1 || true)
 echo "FILE=$FILE"
 if [ -n "$FILE" ]; then
   ls -la "$FILE"
-  ffprobe -hide_banner "$FILE" 2>&1 | head -35
+  ffprobe -hide_banner "$FILE" 2>&1 | head -40
+  if command -v mediainfo >/dev/null 2>&1; then
+    mediainfo "$FILE" | head -50
+  fi
 else
-  echo "no .mxf"
-  journalctl -u roc-media-engine --since "3 min ago" --no-pager | grep -iE "mezz|xavc|error|WARN|assert" | tail -40
+  echo "no .mov"
+  journalctl -u roc-media-engine --since "3 min ago" --no-pager | grep -iE "mezz|prores|error|WARN|assert" | tail -40
 fi
 
 curl -sS -X POST "$BASE/api/streams/$CH/stop" >/dev/null || true
 curl -sS -X PUT "$BASE/api/streams/$CH/record-preset" \
-  -H 'Content-Type: application/json' -d '{"preset":"hq"}' >/dev/null || true
+  -H 'Content-Type: application/json' -d '{"preset":"dnxhd_hq"}' >/dev/null || true
