@@ -362,7 +362,7 @@ fn stop_tc_srt(rt: &mut TcLoopRuntime, channel_id: u32) {
     tracing::info!(channel_id, "TC SRT publish detached");
 }
 
-fn start_tc_webrtc(
+fn attach_tc_webrtc(
     rt: &mut TcLoopRuntime,
     channel_id: u32,
     pair: u8,
@@ -382,6 +382,21 @@ fn start_tc_webrtc(
     let sid = preview.session_id.clone();
     rt.webrtc_preview = Some(preview);
     Ok(sid)
+}
+
+fn emit_tc_webrtc_offer(
+    rt: &TcLoopRuntime,
+    signal_tx: crate::PreviewSignalTx,
+) -> Result<()> {
+    let pipeline = rt
+        .pipeline
+        .as_ref()
+        .ok_or_else(|| anyhow!("TC not running"))?;
+    let preview = rt
+        .webrtc_preview
+        .as_ref()
+        .ok_or_else(|| anyhow!("no TC webrtc preview"))?;
+    preview.emit_offer(pipeline, signal_tx)
 }
 
 fn stop_tc_webrtc(rt: &mut TcLoopRuntime) {
@@ -896,41 +911,79 @@ impl PipelineBackend for GstBackend {
         pair: u8,
         signal_tx: crate::PreviewSignalTx,
     ) -> Result<String> {
-        let _gst = self.gst_op.lock();
-        // Only one preview session engine-wide.
-        {
-            let mut map = self.channels.lock();
-            for (id, pipe) in map.iter_mut() {
-                if *id != channel_id {
-                    pipe.stop_webrtc_preview();
+        #[derive(Clone, Copy)]
+        enum PreviewKind {
+            Channel,
+            Tc,
+        }
+        // Attach under gst_op (quick); emit SDP offer outside so create-offer
+        // cannot hold the global lock for seconds.
+        let (sid, kind) = {
+            let _gst = self.gst_op.lock();
+            {
+                let mut map = self.channels.lock();
+                for (id, pipe) in map.iter_mut() {
+                    if *id != channel_id {
+                        pipe.stop_webrtc_preview();
+                    }
                 }
+            }
+            let mut on_tc = false;
+            let sid = {
+                let mut tc = self.tc_loops.lock();
+                for (id, rt) in tc.iter_mut() {
+                    if *id != channel_id {
+                        stop_tc_webrtc(rt);
+                    }
+                }
+                if let Some(rt) = tc.get_mut(&channel_id) {
+                    if matches!(
+                        rt.status,
+                        TcLoopStatus::Running | TcLoopStatus::Restarting
+                    ) {
+                        on_tc = true;
+                        attach_tc_webrtc(rt, channel_id, pair, signal_tx.clone())?
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            };
+            if on_tc {
+                (sid, PreviewKind::Tc)
+            } else {
+                let mut map = self.channels.lock();
+                let pipe = map
+                    .get_mut(&channel_id)
+                    .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+                let sid = pipe.attach_webrtc_preview(pair, signal_tx.clone())?;
+                (sid, PreviewKind::Channel)
+            }
+        };
+
+        match kind {
+            PreviewKind::Tc => {
+                let tc = self.tc_loops.lock();
+                let rt = tc
+                    .get(&channel_id)
+                    .ok_or_else(|| anyhow!("TC preview disappeared before offer"))?;
+                emit_tc_webrtc_offer(rt, signal_tx)?;
+            }
+            PreviewKind::Channel => {
+                let map = self.channels.lock();
+                let pipe = map
+                    .get(&channel_id)
+                    .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+                pipe.emit_webrtc_offer(signal_tx)?;
             }
         }
-        {
-            let mut tc = self.tc_loops.lock();
-            for (id, rt) in tc.iter_mut() {
-                if *id != channel_id {
-                    stop_tc_webrtc(rt);
-                }
-            }
-            if let Some(rt) = tc.get_mut(&channel_id) {
-                if matches!(
-                    rt.status,
-                    TcLoopStatus::Running | TcLoopStatus::Restarting
-                ) {
-                    return start_tc_webrtc(rt, channel_id, pair, signal_tx);
-                }
-            }
-        }
-        let mut map = self.channels.lock();
-        let pipe = map
-            .get_mut(&channel_id)
-            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
-        pipe.start_webrtc_preview(pair, signal_tx)
+        Ok(sid)
     }
 
     fn set_webrtc_answer(&self, channel_id: u32, sdp: &str) -> Result<()> {
-        let _gst = self.gst_op.lock();
+        // Answer only touches webrtcbin — skip gst_op so create-offer/EOS waits
+        // on other channels are not blocked by set-remote-description (~5s).
         {
             let map = self.tc_loops.lock();
             if let Some(rt) = map.get(&channel_id) {
@@ -947,7 +1000,7 @@ impl PipelineBackend for GstBackend {
     }
 
     fn add_webrtc_ice(&self, channel_id: u32, sdp_mline_index: u32, candidate: &str) -> Result<()> {
-        let _gst = self.gst_op.lock();
+        // ICE is webrtcbin-only — no gst_op (same rationale as set_webrtc_answer).
         {
             let map = self.tc_loops.lock();
             if let Some(rt) = map.get(&channel_id) {
@@ -1052,6 +1105,9 @@ impl PipelineBackend for GstBackend {
     fn start_playout(&self, client: &PlayoutClientConfig, source: &str) -> Result<()> {
         use gstreamer::prelude::*;
         use crate::resolve_playout_format_code;
+
+        // Serialize with capture/TC — DeckLink device claim races without gst_op.
+        let _gst = self.gst_op.lock();
 
         let format_code = resolve_playout_format_code(client.format_code.as_deref(), source);
         let num_id = client
@@ -1160,6 +1216,7 @@ impl PipelineBackend for GstBackend {
 
     fn stop_playout(&self, client_id: &str) -> Result<()> {
         use gstreamer::prelude::*;
+        let _gst = self.gst_op.lock();
         let mut map = self.playout.lock();
         if let Some(p) = map.get_mut(client_id) {
             if let Some(pipe) = p.pipeline.take() {
@@ -1175,6 +1232,7 @@ impl PipelineBackend for GstBackend {
 
     fn pause_playout(&self, client_id: &str) -> Result<()> {
         use gstreamer::prelude::*;
+        let _gst = self.gst_op.lock();
         let mut map = self.playout.lock();
         let p = map
             .get_mut(client_id)
@@ -1201,6 +1259,7 @@ impl PipelineBackend for GstBackend {
 
     fn resume_playout(&self, client_id: &str) -> Result<()> {
         use gstreamer::prelude::*;
+        let _gst = self.gst_op.lock();
         let mut map = self.playout.lock();
         let p = map
             .get_mut(client_id)
@@ -1247,6 +1306,7 @@ impl PipelineBackend for GstBackend {
 
     fn seek_playout(&self, client_id: &str, position_sec: f64) -> Result<()> {
         use gstreamer::prelude::*;
+        let _gst = self.gst_op.lock();
         let mut map = self.playout.lock();
         let p = map
             .get_mut(client_id)
@@ -1286,6 +1346,7 @@ impl PipelineBackend for GstBackend {
 
     fn set_playout_file_control(&self, client_id: &str, control: &PlayoutFileControl) -> Result<()> {
         use gstreamer::prelude::*;
+        let _gst = self.gst_op.lock();
         let mut map = self.playout.lock();
         let Some(p) = map.get_mut(client_id) else {
             return Ok(());
@@ -1354,6 +1415,11 @@ impl PipelineBackend for GstBackend {
                 }
                 let _ = self.nvenc_used.fetch_sub(1, Ordering::SeqCst);
             }
+        }
+
+        let used = self.nvenc_used.load(Ordering::SeqCst);
+        if used >= self.max_nvenc {
+            bail!("NVENC session limit reached ({}/{})", used, self.max_nvenc);
         }
 
         let launch = build_tc_loop_launch(opts);

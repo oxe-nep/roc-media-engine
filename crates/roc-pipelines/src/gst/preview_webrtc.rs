@@ -1,9 +1,14 @@
 //! On-demand WebRTC encode preview (sendonly) via `webrtcbin`.
 //!
-//! Video/audio use standing valve taps (`wpv_vv`, `wpv_avN`). Soft-close parks
-//! valves (`drop=true`) so card meters stay alive; the next open **disposes** the
-//! bin and attaches a fresh `webrtcbin` (parked ICE/DTLS is unreliable with a new
-//! browser PeerConnection). Never `mem::forget` orphan bins.
+//! Video/audio use standing valve taps (`wpv_vv`, `wpv_avN`).
+//!
+//! Lifecycle policy:
+//! - **Close** → [`Self::park`] (valves `drop=true`, bin stays linked so card meters live)
+//! - **Open** → always [`Self::dispose`] then [`Self::attach`] + [`Self::emit_offer`]
+//!   (parked ICE/DTLS is unreliable with a new browser PeerConnection)
+//! - **Capture/TC stop** → [`Self::dispose`]
+//!
+//! Never `mem::forget` orphan bins.
 
 use anyhow::{anyhow, bail, Context, Result};
 use gstreamer::prelude::*;
@@ -160,12 +165,14 @@ impl WebRtcPreview {
             branch,
             parked: false,
         };
-        preview.emit_offer(pipeline, signal_tx)?;
+        // Offer is emitted by the caller *outside* `gst_op` so create-offer's
+        // multi-second wait does not stall every other pipeline mutation.
+        let _ = signal_tx;
         info!(
             channel,
             pair,
             session = %preview.session_id,
-            "attached webrtc preview (standing A/V valves)"
+            "attached webrtc preview bin (offer pending)"
         );
         Ok(preview)
     }
@@ -229,7 +236,8 @@ impl WebRtcPreview {
             .emit_by_name::<()>("add-ice-candidate", &[&sdp_mline_index, &candidate]);
     }
 
-    fn emit_offer(&self, pipeline: &Pipeline, signal_tx: PreviewSignalTx) -> Result<()> {
+    /// Create and push the SDP offer (may block up to ~5s). Call outside `gst_op`.
+    pub fn emit_offer(&self, pipeline: &Pipeline, signal_tx: PreviewSignalTx) -> Result<()> {
         let _ = pipeline;
         let vpay_name = format!("vpay_wpv{}p{}", self.channel, self.pair);
         if let Some(vpay) = self.branch.by_name(&vpay_name) {

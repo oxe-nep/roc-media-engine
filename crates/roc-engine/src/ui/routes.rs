@@ -90,9 +90,7 @@ async fn list_streams(State(st): State<AppState>) -> Json<Value> {
         let mut out = Vec::new();
         for ch in st2.orch.list_channels() {
             st2.ui.ensure_channel(ch.id, &ch.name);
-            if let Some(s) = snapshot::stream_json(st2.orch.as_ref(), st2.ui.as_ref(), ch.id) {
-                out.push(s);
-            }
+            out.push(snapshot::stream_json_from(&ch));
         }
         Json(Value::Array(out))
     })
@@ -187,10 +185,10 @@ async fn list_recordings(State(st): State<AppState>) -> Json<Value> {
     run_blocking(move || {
         let mut out = Vec::new();
         for ch in st2.orch.list_channels() {
-            out.push(snapshot::recording_json(
-                st2.orch.as_ref(),
+            out.push(snapshot::recording_json_from(
                 st2.ui.as_ref(),
                 ch.id,
+                Some(&ch),
             ));
         }
         Json(Value::Array(out))
@@ -389,11 +387,27 @@ async fn clear_schedule(
 }
 
 async fn list_srt(State(st): State<AppState>) -> Json<Value> {
-    let mut out = Vec::new();
-    for ch in st.orch.list_channels() {
-        out.push(snapshot::srt_json(st.orch.as_ref(), st.ui.as_ref(), ch.id));
-    }
-    Json(Value::Array(out))
+    let st2 = st.clone();
+    run_blocking(move || {
+        let channels = st2.orch.list_channels();
+        let tc_by_id: std::collections::HashMap<u32, _> = st2
+            .orch
+            .list_tc_loops()
+            .into_iter()
+            .map(|t| (t.id, t))
+            .collect();
+        let mut out = Vec::new();
+        for ch in &channels {
+            out.push(snapshot::srt_json_from(
+                st2.ui.as_ref(),
+                ch.id,
+                Some(ch),
+                tc_by_id.get(&ch.id),
+            ));
+        }
+        Json(Value::Array(out))
+    })
+    .await
 }
 
 async fn get_srt(

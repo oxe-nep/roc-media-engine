@@ -1256,6 +1256,13 @@ impl ChannelPipeline {
         if self.proxy_recording {
             bail!("already recording proxy");
         }
+        // Encoded HQ already runs its own voaacenc chain from tee `a`.
+        if self.hq_recording && !roc_config::is_mezz_codec(&self.record_preset.video_codec) {
+            bail!(
+                "stop encoded HQ recording before starting proxy \
+                 (dual encoded REC would double AAC encode); use a mezz HQ preset instead"
+            );
+        }
         let branch = self.attach_encoded_recording(RecordingRole::Proxy, path)?;
         self.proxy_branch = Some(branch);
         self.proxy_recording = true;
@@ -1283,7 +1290,16 @@ impl ChannelPipeline {
         if self.hq_recording {
             bail!("already recording hq");
         }
-        let branch = if roc_config::is_mezz_codec(&self.record_preset.video_codec) {
+        let mezz = roc_config::is_mezz_codec(&self.record_preset.video_codec);
+        // Proxy already owns an AAC encode from tee `a`; a second encoded HQ
+        // would run another full voaacenc bank (8ch → 4× encoders).
+        if self.proxy_recording && !mezz {
+            bail!(
+                "stop proxy before starting encoded HQ recording \
+                 (dual encoded REC would double AAC encode); use a mezz HQ preset instead"
+            );
+        }
+        let branch = if mezz {
             self.attach_mezz_recording(RecordingRole::Hq, path)?
         } else {
             self.attach_encoded_recording(RecordingRole::Hq, path)?
@@ -1359,8 +1375,9 @@ impl ChannelPipeline {
         Ok(())
     }
 
-    /// Start (or replace) on-demand WebRTC preview for `pair` (0..=3).
-    pub fn start_webrtc_preview(
+    /// Dispose any parked bin and attach a fresh WebRTC branch (no SDP offer yet).
+    /// Caller must [`Self::emit_webrtc_offer`] outside `gst_op`.
+    pub fn attach_webrtc_preview(
         &mut self,
         pair: u8,
         signal_tx: crate::PreviewSignalTx,
@@ -1386,6 +1403,19 @@ impl ChannelPipeline {
         Ok(sid)
     }
 
+    /// SDP offer — may block ~5s; call outside the global `gst_op` lock.
+    pub fn emit_webrtc_offer(&self, signal_tx: crate::PreviewSignalTx) -> Result<()> {
+        let pipeline = self
+            .pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow!("capture not running"))?;
+        let preview = self
+            .webrtc_preview
+            .as_ref()
+            .ok_or_else(|| anyhow!("no webrtc preview session"))?;
+        preview.emit_offer(pipeline, signal_tx)
+    }
+
     pub fn set_webrtc_answer(&self, sdp: &str) -> Result<()> {
         let Some(p) = self.webrtc_preview.as_ref() else {
             bail!("no webrtc preview session");
@@ -1401,7 +1431,7 @@ impl ChannelPipeline {
         Ok(())
     }
 
-    /// Soft-close: park valves, keep one reusable bin.
+    /// Soft-close: park valves; next open disposes + attaches a fresh bin.
     pub fn stop_webrtc_preview(&mut self) {
         let Some(preview) = self.webrtc_preview.as_mut() else {
             return;
@@ -1763,6 +1793,12 @@ impl ChannelPipeline {
             anyhow!("no detected input format — wait for signal before DNxHD/ProRes REC")
         })?;
 
+        tracing::warn!(
+            channel = self.id,
+            codec = %self.record_preset.video_codec,
+            "mezz REC shares the live graph — CPU encode may drop frames \
+             (leaky 2s queue protects proxy/WebRTC; prefer Proxy/LT ProRes or DNxHD)"
+        );
         let queue_v = gstreamer::ElementFactory::make("queue")
             .name(format!("q_{tag}_v_{}", self.id))
             // Isolate mezz from live tee. Prefer absorbing NFS/encode jitter

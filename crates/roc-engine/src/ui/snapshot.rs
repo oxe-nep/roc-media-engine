@@ -44,6 +44,10 @@ fn from_peaks(peaks: Option<&[f64]>) -> MeterLevels {
 
 pub fn stream_json(orch: &Orchestrator, _ui: &UiState, id: u32) -> Option<Value> {
     let ch = orch.channel(id).ok()?;
+    Some(stream_json_from(&ch))
+}
+
+pub fn stream_json_from(ch: &roc_pipelines::ChannelSnapshot) -> Value {
     let status = match ch.status {
         ChannelStatus::Stopped => "stopped",
         ChannelStatus::Waiting => "waiting",
@@ -52,21 +56,21 @@ pub fn stream_json(orch: &Orchestrator, _ui: &UiState, id: u32) -> Option<Value>
         ChannelStatus::Error => "error",
         ChannelStatus::Restarting => "waiting",
     };
-    Some(json!({
+    json!({
         "id": ch.id,
-        "name": ch.name,
+        "name": ch.name.clone(),
         "status": status,
-        "error": ch.last_error.unwrap_or_default(),
-        "format": ch.input_format.unwrap_or_default(),
+        "error": ch.last_error.clone().unwrap_or_default(),
+        "format": ch.input_format.clone().unwrap_or_default(),
         "bit_depth": ch.bit_depth,
-        "mezz_label": ch.mezz_label,
+        "mezz_label": ch.mezz_label.clone(),
         "hq_recording": ch.hq_recording,
-        "encode_preset": ch.encode_preset,
-        "record_preset": ch.record_preset,
+        "encode_preset": ch.encode_preset.clone(),
+        "record_preset": ch.record_preset.clone(),
         "hls_url": format!("/hls/{}/preview.m3u8", ch.id),
         "preview_epoch": ch.preview_epoch,
         "backend": "media_engine",
-    }))
+    })
 }
 
 /// One REC role (`proxy` / `hq`) as exposed under `recording_json`.
@@ -116,9 +120,17 @@ fn role_json(r: &RoleRec) -> Value {
 /// `hq` objects carry the per-role state for dual recording.
 pub fn recording_json(orch: &Orchestrator, ui: &UiState, id: u32) -> Value {
     let ch = orch.channel(id).ok();
+    recording_json_from(ui, id, ch.as_ref())
+}
+
+pub fn recording_json_from(
+    ui: &UiState,
+    id: u32,
+    ch: Option<&roc_pipelines::ChannelSnapshot>,
+) -> Value {
     let meta = ui.rec_meta(id);
-    let proxy = role_rec(ch.as_ref(), &meta, RecordingRole::Proxy);
-    let hq = role_rec(ch.as_ref(), &meta, RecordingRole::Hq);
+    let proxy = role_rec(ch, &meta, RecordingRole::Proxy);
+    let hq = role_rec(ch, &meta, RecordingRole::Hq);
     let recording = proxy.recording || hq.recording;
 
     // Legacy top-level values: HQ wins when both run, otherwise whichever is active.
@@ -149,13 +161,12 @@ pub fn recording_json(orch: &Orchestrator, ui: &UiState, id: u32) -> Value {
         })
     });
     let name = if meta.name.is_empty() {
-        ch.as_ref()
-            .map(|c| c.name.clone())
+        ch.map(|c| c.name.clone())
             .unwrap_or_else(|| format!("Channel {id}"))
     } else {
         meta.name.clone()
     };
-    let bitrate = ch.as_ref().and_then(|c| c.video_bitrate_kbps).unwrap_or(0.0);
+    let bitrate = ch.and_then(|c| c.video_bitrate_kbps).unwrap_or(0.0);
     json!({
         "id": id,
         "status": if recording { "recording" } else { "idle" },
@@ -175,13 +186,20 @@ pub fn recording_json(orch: &Orchestrator, ui: &UiState, id: u32) -> Value {
 pub fn srt_json(orch: &Orchestrator, ui: &UiState, id: u32) -> Value {
     let ch = orch.channel(id).ok();
     let tc = orch.tc_loop_snapshot(id);
+    srt_json_from(ui, id, ch.as_ref(), tc.as_ref())
+}
+
+pub fn srt_json_from(
+    ui: &UiState,
+    id: u32,
+    ch: Option<&roc_pipelines::ChannelSnapshot>,
+    tc: Option<&roc_pipelines::TcLoopSnapshot>,
+) -> Value {
     let s = ui.srt(id);
-    let streaming = ch.as_ref().map(|c| c.srt).unwrap_or(false)
-        || tc.as_ref().map(|t| t.srt).unwrap_or(false);
+    let streaming = ch.map(|c| c.srt).unwrap_or(false) || tc.map(|t| t.srt).unwrap_or(false);
     let br = ch
-        .as_ref()
         .and_then(|c| c.srt_bitrate_kbps)
-        .or_else(|| tc.as_ref().and_then(|t| t.srt_bitrate_kbps))
+        .or_else(|| tc.and_then(|t| t.srt_bitrate_kbps))
         .unwrap_or(0.0);
     let sending = streaming && br > 0.0;
     let port = if s.port == 0 { 9100 + id as u16 } else { s.port };
@@ -194,7 +212,7 @@ pub fn srt_json(orch: &Orchestrator, ui: &UiState, id: u32) -> Value {
         "has_passphrase": !s.passphrase.is_empty(),
         "latency_ms": if s.latency_ms == 0 { 120 } else { s.latency_ms },
         "publish_url": ui.srt_publish_url(id),
-        "error": ch.and_then(|c| c.last_error).unwrap_or_default(),
+        "error": ch.and_then(|c| c.last_error.clone()).unwrap_or_default(),
         "bitrate_kbps": br,
         "sending": sending,
     })
@@ -376,6 +394,7 @@ pub fn meters_maps(orch: &Orchestrator) -> (serde_json::Map<String, Value>, serd
 }
 
 pub fn dashboard_snapshot(orch: &Orchestrator, ui: &UiState) -> Value {
+    // One poll pass each — do not re-enter channel_snapshot / tc_loop_snapshot per id.
     let channels = orch.list_channels();
     let tc_by_id: std::collections::HashMap<u32, _> = orch
         .list_tc_loops()
@@ -389,11 +408,9 @@ pub fn dashboard_snapshot(orch: &Orchestrator, ui: &UiState) -> Value {
     let mut workflows = serde_json::Map::new();
     for ch in &channels {
         ui.ensure_channel(ch.id, &ch.name);
-        if let Some(s) = stream_json(orch, ui, ch.id) {
-            streams.push(s);
-        }
-        recordings.push(recording_json(orch, ui, ch.id));
-        srt.push(srt_json(orch, ui, ch.id));
+        streams.push(stream_json_from(ch));
+        recordings.push(recording_json_from(ui, ch.id, Some(ch)));
+        srt.push(srt_json_from(ui, ch.id, Some(ch), tc_by_id.get(&ch.id)));
         workflows.insert(
             ch.id.to_string(),
             json!({ "mode": ui.workflow_mode(ch.id) }),
@@ -406,6 +423,7 @@ pub fn dashboard_snapshot(orch: &Orchestrator, ui: &UiState) -> Value {
     recordings.sort_by_key(|v| v.get("id").and_then(|x| x.as_u64()).unwrap_or(0));
     srt.sort_by_key(|v| v.get("id").and_then(|x| x.as_u64()).unwrap_or(0));
     tc.sort_by_key(|v| v.get("id").and_then(|x| x.as_u64()).unwrap_or(0));
+    // Peaks already refreshed by the 33ms meters tick; reuse light maps here.
     let (meters_encode, meters_playout) = meters_maps(orch);
     json!({
         "type": "snapshot",

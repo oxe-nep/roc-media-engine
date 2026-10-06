@@ -19,7 +19,7 @@ Capture graph:
 |--------|-------|-----------|--------|
 | `dnxhd_sq` / `dnxhd_hq` / `dnxhd_hqx` | `avenc_dnxhd` | `.mxf` (`mxfmux`) | Class selects SQ/HQ/HQX; **bitrate + scan follow live signal** (e.g. 1080i50 HQ → 185 Mbps interlaced). Tap is **pre-deinterlace** `raw`. HQX needs a real 10-bit source (`v210`). 10-bit source + SQ/HQ quietly downconverts to 8-bit (`Y42B`). MediaInfo may label HQ as “220” (NTSC family name) even when the OP is **185**. |
 | `dnxhd_145` / `dnxhd_185` | same | `.mxf` | Legacy ids → SQ / HQ |
-| `prores_proxy` / `prores_lt` / `prores_422` / `prores_hq` | `avenc_prores_ks` | `.mov` (`qtmux`) | Profile-driven (Proxy / LT / 422 / HQ). Tap is **progressive** tee `t` (interlace is deinterlaced before ProRes). 10-bit 4:2:2 (`I422_10LE`). **CPU encode** — Proxy/LT usually sustain 1080p50; 422/HQ may drop frames under load. |
+| `prores_proxy` / `prores_lt` / `prores_422` / `prores_hq` | `avenc_prores_ks` | `.mov` (`qtmux`) | Profile-driven (Proxy / LT / 422 / HQ). Tap is **progressive** tee `t` (interlace is deinterlaced before ProRes). 10-bit 4:2:2 (`I422_10LE`). **CPU encode** — Proxy/LT usually sustain 1080p50; 422/HQ may drop frames under load. Mezz shares the live graph behind a leaky 2s queue so stalls drop mezz frames rather than wedging proxy/WebRTC. |
 
 ### DNxHD operating points (1080 — **i50 / p50 only**)
 
@@ -53,6 +53,12 @@ mezz encoder. Proxy and REC are selected independently in the UI
 | AV1 NVENC | P2000 unlikely | Skip |
 | **TC interlaced SRT/WebRTC** | done via deinterlace | DeckLink OUT stays interlaced; proxy encode deinterlaces before NVENC so SRT + WebRTC are progressive |
 | DNxHR / 4:4:4 | not started | UHD / 444 mezz |
+
+## Dual REC + audio
+
+Proxy REC and encoded HQ each attach their own AAC from tee `a` (`voaacenc` per
+stereo pair). Running **both** encoded roles at once is rejected — use mezz HQ
+(`dnxhd_*` / `prores_*`, PCM) together with proxy instead.
 
 ## Deferred audio
 
