@@ -159,7 +159,7 @@ impl WebRtcPreview {
             branch,
             parked: false,
         };
-        preview.emit_offer(pipeline, signal_tx)?;
+        preview.emit_offer(pipeline, signal_tx, false)?;
         info!(
             channel,
             pair,
@@ -184,14 +184,8 @@ impl WebRtcPreview {
         info!(session = %self.session_id, "parked webrtc preview");
     }
 
-    /// Re-open a parked session (same pair): open valves + fresh SDP offer.
+    /// Re-open a parked session (same pair): open valves + ICE-restart offer.
     pub fn unpark(&mut self, pipeline: &Pipeline, signal_tx: PreviewSignalTx) -> Result<String> {
-        if !self.parked {
-            // Already live — mint a fresh offer/session for the new WS client.
-            self.session_id = uuid::Uuid::new_v4().to_string();
-            self.emit_offer(pipeline, signal_tx)?;
-            return Ok(self.session_id.clone());
-        }
         if let Some(v) = pipeline.by_name("wpv_vv") {
             v.set_property("drop", false);
         }
@@ -200,12 +194,13 @@ impl WebRtcPreview {
         }
         self.parked = false;
         self.session_id = uuid::Uuid::new_v4().to_string();
-        self.emit_offer(pipeline, signal_tx)?;
+        // Must ICE-restart: browser creates a new PC each open; old ufrag/pwd won't connect.
+        self.emit_offer(pipeline, signal_tx, true)?;
         info!(
             channel = self.channel,
             pair = self.pair,
             session = %self.session_id,
-            "unparked webrtc preview"
+            "unparked webrtc preview (ice-restart)"
         );
         Ok(self.session_id.clone())
     }
@@ -254,7 +249,12 @@ impl WebRtcPreview {
             .emit_by_name::<()>("add-ice-candidate", &[&sdp_mline_index, &candidate]);
     }
 
-    fn emit_offer(&self, pipeline: &Pipeline, signal_tx: PreviewSignalTx) -> Result<()> {
+    fn emit_offer(
+        &self,
+        pipeline: &Pipeline,
+        signal_tx: PreviewSignalTx,
+        ice_restart: bool,
+    ) -> Result<()> {
         let _ = pipeline;
         let vpay_name = format!("vpay_wpv{}p{}", self.channel, self.pair);
         if let Some(vpay) = self.branch.by_name(&vpay_name) {
@@ -270,6 +270,16 @@ impl WebRtcPreview {
                 }
             }
         }
+
+        let options = if ice_restart {
+            Some(
+                gstreamer::Structure::builder("application/x-gst-webrtc")
+                    .field("ice-restart", true)
+                    .build(),
+            )
+        } else {
+            None
+        };
 
         let (offer_tx, offer_rx) = mpsc::channel::<Result<String>>();
         let promise = Promise::with_change_func({
@@ -295,16 +305,17 @@ impl WebRtcPreview {
                 let _ = offer_tx.send(res);
             }
         });
-        self.webrtc.emit_by_name::<()>(
-            "create-offer",
-            &[&None::<gstreamer::Structure>, &promise],
-        );
+        self.webrtc
+            .emit_by_name::<()>("create-offer", &[&options, &promise]);
         let sdp = offer_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .context("create-offer timeout")?
             .context("create-offer")?;
         if !sdp.contains("m=video") || !sdp.contains("m=audio") {
             bail!("webrtc offer missing media lines (sdp_len={})", sdp.len());
+        }
+        if ice_restart && !sdp.to_ascii_lowercase().contains("ice-ufrag") {
+            tracing::warn!(session = %self.session_id, "ice-restart offer missing ice-ufrag");
         }
         if let Some(tx) = signal_tx.lock().as_ref() {
             let _ = tx.send(PreviewSignal::Offer {
