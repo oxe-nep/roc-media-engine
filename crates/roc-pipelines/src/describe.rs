@@ -186,14 +186,17 @@ fn mpegts_program_aac(
             .valve_prefix
             .map(|p| format!("valve name={p}0 drop=true ! "))
             .unwrap_or_default();
-        // Named AAC tee so WebRTC preview can tap pair 0 without touching raw tee `a`.
+        // Named AAC tee + standing WebRTC valve (never request/release pads on detach).
         return format!(
             "a. ! {q} ! \
              audioconvert mix-matrix=\"{matrix}\" ! {aac_caps} ! \
              voaacenc bitrate={aac_bps} ! aacparse ! \
              capsfilter caps=audio/mpeg,mpegversion=4,stream-format=adts ! \
              tee name={name_prefix}_aac0 allow-not-linked=true \
-             {name_prefix}_aac0. ! {q} ! {valve}{mux}.",
+             {name_prefix}_aac0. ! {q} ! {valve}{mux}. \
+             {name_prefix}_aac0. ! queue max-size-buffers=2 leaky=downstream ! \
+               valve name=wpv_av0 drop=true ! \
+               fakesink name=wpv_as0 sync=false async=false",
             mux = out.mux_name,
         );
     }
@@ -226,6 +229,13 @@ fn mpegts_program_aac(
                  max-size-time=500000000 leaky=downstream ! hls_l{pair}.audio"
             ));
         }
+        // Standing WebRTC listen tap — rewired on preview open/close without
+        // releasing AAC tee pads (pad release was flushing upstream into ameter).
+        parts.push(format!(
+            "{aac_tee}. ! queue max-size-buffers=2 leaky=downstream ! \
+             valve name=wpv_av{pair} drop=true ! \
+             fakesink name=wpv_as{pair} sync=false async=false"
+        ));
     }
     parts.join(" ")
 }

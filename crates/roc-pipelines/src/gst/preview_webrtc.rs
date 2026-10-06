@@ -1,11 +1,9 @@
 //! On-demand WebRTC encode preview (sendonly) via `webrtcbin`.
 //!
-//! Video is taken from the **proxy encode tee `e`** (NVENC/x264 already running)
-//! so preview matches live/proxy quality without a second encode.
-//!
-//! Audio is taken from the **already-encoded stereo AAC tee** (`prog_aacN` /
-//! `tc_aacN`) — never from raw tee `a`. Tapping `a` (even via a valve) was
-//! flushing/killing the card `ameter` branch after preview close.
+//! Video is taken from the **proxy encode tee `e`** (NVENC/x264 already running).
+//! Audio is taken from a **standing valve tap** on the AAC pair tee (`wpv_avN`),
+//! so preview never request/releases pads on raw tee `a` or the AAC tees —
+//! releasing those pads was flushing upstream and killing card `ameter`.
 
 use anyhow::{anyhow, bail, Context, Result};
 use gstreamer::prelude::*;
@@ -24,8 +22,7 @@ pub struct WebRtcPreview {
     pub pair: u8,
     pub webrtc: Element,
     pub tee_pad: Pad,
-    pub audio_tee_pad: Pad,
-    pub audio_tee_name: String,
+    pub audio_ghost: Pad,
     pub branch: Bin,
 }
 
@@ -42,16 +39,14 @@ impl WebRtcPreview {
         let video_tee = pipeline
             .by_name("e")
             .ok_or_else(|| anyhow!("encoded tee `e` missing"))?;
-        let (audio_tee_name, audio_tee) = find_aac_pair_tee(pipeline, pair)?;
-        if audio_tee.find_property("allow-not-linked").is_some() {
-            audio_tee.set_property("allow-not-linked", true);
+        // Standing AAC listen valve must exist (built with MPEG-TS program AAC).
+        if pipeline.by_name(&format!("wpv_av{pair}")).is_none() {
+            bail!("wpv_av{pair} missing — is MPEG-TS egress / AAC encode enabled?");
         }
 
         let session_id = uuid::Uuid::new_v4().to_string();
         let tag = format!("wpv{channel}p{pair}");
 
-        // Video: re-payload existing H264. Audio: decode standing AAC pair → Opus.
-        // Do not touch raw tee `a` / ameter.
         let desc = format!(
             "queue name=q_v_{tag} max-size-buffers=4 leaky=downstream ! \
              h264parse config-interval=-1 ! \
@@ -114,15 +109,9 @@ impl WebRtcPreview {
             return Err(e);
         }
 
-        let audio_tee_pad = audio_tee
-            .request_pad_simple("src_%u")
-            .ok_or_else(|| anyhow!("request AAC tee pad"))?;
-        if let Err(e) = audio_tee_pad
-            .link(&ghost_a)
-            .context("link AAC tee → webrtc branch")
-        {
+        let audio_ghost: Pad = ghost_a.upcast();
+        if let Err(e) = wire_audio_valve(pipeline, pair, &audio_ghost) {
             cut_tee_pad(pipeline, "e", &tee_pad);
-            audio_tee.release_request_pad(&audio_tee_pad);
             let _ = branch.set_state(State::Null);
             let _ = pipeline.remove(&branch);
             return Err(e);
@@ -151,8 +140,8 @@ impl WebRtcPreview {
         }
 
         if let Err(e) = branch.sync_state_with_parent().context("sync webrtc branch") {
+            let _ = restore_audio_valve(pipeline, pair, &audio_ghost);
             cut_tee_pad(pipeline, "e", &tee_pad);
-            cut_tee_pad(pipeline, &audio_tee_name, &audio_tee_pad);
             let _ = branch.set_state(State::Null);
             let _ = pipeline.remove(&branch);
             return Err(e);
@@ -214,16 +203,16 @@ impl WebRtcPreview {
         {
             Ok(s) => s,
             Err(e) => {
+                let _ = restore_audio_valve(pipeline, pair, &audio_ghost);
                 cut_tee_pad(pipeline, "e", &tee_pad);
-                cut_tee_pad(pipeline, &audio_tee_name, &audio_tee_pad);
                 let _ = branch.set_state(State::Null);
                 let _ = pipeline.remove(&branch);
                 return Err(e);
             }
         };
         if !sdp.contains("m=video") || !sdp.contains("m=audio") {
+            let _ = restore_audio_valve(pipeline, pair, &audio_ghost);
             cut_tee_pad(pipeline, "e", &tee_pad);
-            cut_tee_pad(pipeline, &audio_tee_name, &audio_tee_pad);
             let _ = branch.set_state(State::Null);
             let _ = pipeline.remove(&branch);
             bail!("webrtc offer missing media lines (sdp_len={})", sdp.len());
@@ -239,16 +228,14 @@ impl WebRtcPreview {
             channel,
             pair,
             %session_id,
-            audio_tee = %audio_tee_name,
-            "attached webrtc preview (proxy encode + AAC pair)"
+            "attached webrtc preview (proxy encode + AAC valve)"
         );
         Ok(Self {
             session_id,
             pair,
             webrtc,
             tee_pad,
-            audio_tee_pad,
-            audio_tee_name,
+            audio_ghost,
             branch,
         })
     }
@@ -278,36 +265,72 @@ impl WebRtcPreview {
     }
 
     pub fn detach(self, pipeline: &Pipeline) {
-        // Cut only encode + AAC tees — raw tee `a` / ameter stay untouched.
+        // Restore AAC valve→fakesink first (no tee pad release on audio path).
+        if let Err(e) = restore_audio_valve(pipeline, self.pair, &self.audio_ghost) {
+            tracing::warn!(error = %e, pair = self.pair, "failed to restore webrtc AAC valve");
+        }
         cut_tee_pad(pipeline, "e", &self.tee_pad);
-        cut_tee_pad(pipeline, &self.audio_tee_name, &self.audio_tee_pad);
         let _ = self.branch.set_state(State::Null);
         let _ = pipeline.remove(&self.branch);
         info!(session = %self.session_id, "detached webrtc preview");
     }
 }
 
-fn find_aac_pair_tee(pipeline: &Pipeline, pair: u8) -> Result<(String, Element)> {
-    for prefix in ["prog", "tc"] {
-        let name = format!("{prefix}_aac{pair}");
-        if let Some(el) = pipeline.by_name(&name) {
-            return Ok((name, el));
-        }
+fn wire_audio_valve(pipeline: &Pipeline, pair: u8, ghost_a: &Pad) -> Result<()> {
+    let valve = pipeline
+        .by_name(&format!("wpv_av{pair}"))
+        .ok_or_else(|| anyhow!("wpv_av{pair} missing"))?;
+    let fakesink = pipeline
+        .by_name(&format!("wpv_as{pair}"))
+        .ok_or_else(|| anyhow!("wpv_as{pair} missing"))?;
+    valve.set_property("drop", true);
+    let src = valve
+        .static_pad("src")
+        .ok_or_else(|| anyhow!("wpv_av{pair} src"))?;
+    if let Some(peer) = src.peer() {
+        let _ = src.unlink(&peer);
     }
-    // Older single-pair graphs sometimes only expose pair 0 under a different name.
-    if pair == 0 {
-        for name in ["prog_aac0", "tc_aac0"] {
-            if let Some(el) = pipeline.by_name(name) {
-                return Ok((name.to_string(), el));
-            }
-        }
-    }
-    Err(anyhow!(
-        "AAC pair tee prog_aac{pair}/tc_aac{pair} missing — is MPEG-TS egress enabled?"
-    ))
+    let _ = fakesink.set_state(State::Ready);
+    src.link(ghost_a)
+        .with_context(|| format!("link wpv_av{pair} → webrtc audio"))?;
+    valve.set_property("drop", false);
+    Ok(())
 }
 
-/// Unlink + release a tee request pad when the pad is idle (safe vs racing buffers).
+fn restore_audio_valve(pipeline: &Pipeline, pair: u8, ghost_a: &Pad) -> Result<()> {
+    let valve = pipeline
+        .by_name(&format!("wpv_av{pair}"))
+        .ok_or_else(|| anyhow!("wpv_av{pair} missing"))?;
+    let fakesink = pipeline
+        .by_name(&format!("wpv_as{pair}"))
+        .ok_or_else(|| anyhow!("wpv_as{pair} missing"))?;
+    valve.set_property("drop", true);
+    let src = valve
+        .static_pad("src")
+        .ok_or_else(|| anyhow!("wpv_av{pair} src"))?;
+    if let Some(peer) = src.peer() {
+        let parent = peer
+            .parent_element()
+            .map(|e| e.name().to_string())
+            .unwrap_or_default();
+        if parent == format!("wpv_as{pair}") {
+            let _ = fakesink.sync_state_with_parent();
+            return Ok(());
+        }
+        let _ = src.unlink(&peer);
+        let _ = ghost_a; // ghost may already be unlinked with peer
+    }
+    let fs_sink = fakesink
+        .static_pad("sink")
+        .ok_or_else(|| anyhow!("wpv_as{pair} sink"))?;
+    if src.peer().is_none() {
+        src.link(&fs_sink)
+            .with_context(|| format!("relink wpv_av{pair} → wpv_as{pair}"))?;
+    }
+    let _ = fakesink.sync_state_with_parent();
+    Ok(())
+}
+
 fn cut_tee_pad(pipeline: &Pipeline, tee_name: &str, tee_pad: &Pad) {
     let tee = pipeline.by_name(tee_name);
     let (tx, rx) = mpsc::channel::<()>();
