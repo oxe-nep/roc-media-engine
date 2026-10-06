@@ -12,6 +12,7 @@ use tokio::fs::File;
 use roc_pipelines::RecordingRole;
 use tokio_util::io::ReaderStream;
 
+use crate::gst_task::run_blocking;
 use crate::ui::library;
 use crate::ui::snapshot;
 use crate::ui::tc;
@@ -84,14 +85,18 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn list_streams(State(st): State<AppState>) -> Json<Value> {
-    let mut out = Vec::new();
-    for ch in st.orch.list_channels() {
-        st.ui.ensure_channel(ch.id, &ch.name);
-        if let Some(s) = snapshot::stream_json(st.orch.as_ref(), st.ui.as_ref(), ch.id) {
-            out.push(s);
+    let st2 = st.clone();
+    run_blocking(move || {
+        let mut out = Vec::new();
+        for ch in st2.orch.list_channels() {
+            st2.ui.ensure_channel(ch.id, &ch.name);
+            if let Some(s) = snapshot::stream_json(st2.orch.as_ref(), st2.ui.as_ref(), ch.id) {
+                out.push(s);
+            }
         }
-    }
-    Json(Value::Array(out))
+        Json(Value::Array(out))
+    })
+    .await
 }
 
 async fn start_stream(
@@ -101,27 +106,35 @@ async fn start_stream(
     if st.ui.workflow_mode(id) == "tc" || st.ui.tc(id).enabled {
         return Err(UiError::bad("stop TC burn-in before starting encode"));
     }
-    st.orch.start_capture(id).map_err(UiError::from)?;
-    st.ui.set_encode_wanted(id, true);
-    snapshot::stream_json(st.orch.as_ref(), st.ui.as_ref(), id)
-        .map(Json)
-        .ok_or_else(|| UiError::not_found("channel not found"))
+    let st2 = st.clone();
+    run_blocking(move || {
+        st2.orch.start_capture(id).map_err(UiError::from)?;
+        st2.ui.set_encode_wanted(id, true);
+        snapshot::stream_json(st2.orch.as_ref(), st2.ui.as_ref(), id)
+            .map(Json)
+            .ok_or_else(|| UiError::not_found("channel not found"))
+    })
+    .await
 }
 
 async fn stop_stream(
     State(st): State<AppState>,
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
-    let _ = st.orch.stop_srt(id);
-    let _ = st.orch.stop_proxy_recording(id);
-    let _ = st.orch.stop_hq_recording(id);
-    st.ui.mark_recording_stopped_role(id, RecordingRole::Proxy);
-    st.ui.mark_recording_stopped_role(id, RecordingRole::Hq);
-    st.orch.stop_capture(id).map_err(UiError::from)?;
-    st.ui.set_encode_wanted(id, false);
-    snapshot::stream_json(st.orch.as_ref(), st.ui.as_ref(), id)
-        .map(Json)
-        .ok_or_else(|| UiError::not_found("channel not found"))
+    let st2 = st.clone();
+    run_blocking(move || {
+        let _ = st2.orch.stop_srt(id);
+        let _ = st2.orch.stop_proxy_recording(id);
+        let _ = st2.orch.stop_hq_recording(id);
+        st2.ui.mark_recording_stopped_role(id, RecordingRole::Proxy);
+        st2.ui.mark_recording_stopped_role(id, RecordingRole::Hq);
+        st2.orch.stop_capture(id).map_err(UiError::from)?;
+        st2.ui.set_encode_wanted(id, false);
+        snapshot::stream_json(st2.orch.as_ref(), st2.ui.as_ref(), id)
+            .map(Json)
+            .ok_or_else(|| UiError::not_found("channel not found"))
+    })
+    .await
 }
 
 async fn stream_logs(Path(_id): Path<u32>) -> Json<Value> {
@@ -138,12 +151,17 @@ async fn set_stream_preset(
     Path(id): Path<u32>,
     Json(body): Json<PresetBody>,
 ) -> Result<Json<Value>, UiError> {
-    st.orch
-        .set_encode_preset(id, body.preset.trim())
-        .map_err(UiError::from)?;
-    snapshot::stream_json(st.orch.as_ref(), st.ui.as_ref(), id)
-        .map(Json)
-        .ok_or_else(|| UiError::not_found("channel not found"))
+    let preset = body.preset.trim().to_string();
+    let st2 = st.clone();
+    run_blocking(move || {
+        st2.orch
+            .set_encode_preset(id, &preset)
+            .map_err(UiError::from)?;
+        snapshot::stream_json(st2.orch.as_ref(), st2.ui.as_ref(), id)
+            .map(Json)
+            .ok_or_else(|| UiError::not_found("channel not found"))
+    })
+    .await
 }
 
 async fn set_stream_record_preset(
@@ -151,24 +169,33 @@ async fn set_stream_record_preset(
     Path(id): Path<u32>,
     Json(body): Json<PresetBody>,
 ) -> Result<Json<Value>, UiError> {
-    st.orch
-        .set_record_preset(id, body.preset.trim())
-        .map_err(UiError::from)?;
-    snapshot::stream_json(st.orch.as_ref(), st.ui.as_ref(), id)
-        .map(Json)
-        .ok_or_else(|| UiError::not_found("channel not found"))
+    let preset = body.preset.trim().to_string();
+    let st2 = st.clone();
+    run_blocking(move || {
+        st2.orch
+            .set_record_preset(id, &preset)
+            .map_err(UiError::from)?;
+        snapshot::stream_json(st2.orch.as_ref(), st2.ui.as_ref(), id)
+            .map(Json)
+            .ok_or_else(|| UiError::not_found("channel not found"))
+    })
+    .await
 }
 
 async fn list_recordings(State(st): State<AppState>) -> Json<Value> {
-    let mut out = Vec::new();
-    for ch in st.orch.list_channels() {
-        out.push(snapshot::recording_json(
-            st.orch.as_ref(),
-            st.ui.as_ref(),
-            ch.id,
-        ));
-    }
-    Json(Value::Array(out))
+    let st2 = st.clone();
+    run_blocking(move || {
+        let mut out = Vec::new();
+        for ch in st2.orch.list_channels() {
+            out.push(snapshot::recording_json(
+                st2.orch.as_ref(),
+                st2.ui.as_ref(),
+                ch.id,
+            ));
+        }
+        Json(Value::Array(out))
+    })
+    .await
 }
 
 /// Start a REC role using the channel's UI name/category. Proxy files get a
@@ -234,7 +261,8 @@ async fn start_recording(
     State(st): State<AppState>,
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
-    start_role_recording(&st, id, RecordingRole::Hq)
+    let st2 = st.clone();
+    run_blocking(move || start_role_recording(&st2, id, RecordingRole::Hq)).await
 }
 
 /// `POST /api/recordings/{id}/stop` — alias for HQ stop.
@@ -242,35 +270,40 @@ async fn stop_recording(
     State(st): State<AppState>,
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
-    stop_role_recording(&st, id, RecordingRole::Hq)
+    let st2 = st.clone();
+    run_blocking(move || stop_role_recording(&st2, id, RecordingRole::Hq)).await
 }
 
 async fn start_proxy_recording(
     State(st): State<AppState>,
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
-    start_role_recording(&st, id, RecordingRole::Proxy)
+    let st2 = st.clone();
+    run_blocking(move || start_role_recording(&st2, id, RecordingRole::Proxy)).await
 }
 
 async fn stop_proxy_recording(
     State(st): State<AppState>,
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
-    stop_role_recording(&st, id, RecordingRole::Proxy)
+    let st2 = st.clone();
+    run_blocking(move || stop_role_recording(&st2, id, RecordingRole::Proxy)).await
 }
 
 async fn start_hq_recording(
     State(st): State<AppState>,
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
-    start_role_recording(&st, id, RecordingRole::Hq)
+    let st2 = st.clone();
+    run_blocking(move || start_role_recording(&st2, id, RecordingRole::Hq)).await
 }
 
 async fn stop_hq_recording(
     State(st): State<AppState>,
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
-    stop_role_recording(&st, id, RecordingRole::Hq)
+    let st2 = st.clone();
+    run_blocking(move || stop_role_recording(&st2, id, RecordingRole::Hq)).await
 }
 
 #[derive(Deserialize)]
@@ -409,26 +442,34 @@ async fn start_srt(
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
     let url = st.ui.srt_output_url(id).map_err(UiError::from)?;
-    st.orch
-        .start_srt(id, Some(url))
-        .map_err(UiError::from)?;
-    Ok(Json(snapshot::srt_json(
-        st.orch.as_ref(),
-        st.ui.as_ref(),
-        id,
-    )))
+    let st2 = st.clone();
+    run_blocking(move || {
+        st2.orch
+            .start_srt(id, Some(url))
+            .map_err(UiError::from)?;
+        Ok(Json(snapshot::srt_json(
+            st2.orch.as_ref(),
+            st2.ui.as_ref(),
+            id,
+        )))
+    })
+    .await
 }
 
 async fn stop_srt(
     State(st): State<AppState>,
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
-    st.orch.stop_srt(id).map_err(UiError::from)?;
-    Ok(Json(snapshot::srt_json(
-        st.orch.as_ref(),
-        st.ui.as_ref(),
-        id,
-    )))
+    let st2 = st.clone();
+    run_blocking(move || {
+        st2.orch.stop_srt(id).map_err(UiError::from)?;
+        Ok(Json(snapshot::srt_json(
+            st2.orch.as_ref(),
+            st2.ui.as_ref(),
+            id,
+        )))
+    })
+    .await
 }
 
 async fn list_presets_ui(State(st): State<AppState>) -> Json<Value> {
@@ -972,29 +1013,35 @@ fn playout_format_list() -> Vec<Value> {
 
 async fn playout_devices(State(st): State<AppState>) -> Json<Value> {
     let formats = playout_format_list();
-    let mut devices = Vec::new();
-    if let Ok(report) = st.orch.probe() {
-        for d in report.devices {
-            if matches!(
-                d.direction,
-                roc_devices::DeviceDirection::Output | roc_devices::DeviceDirection::Unknown
-            ) {
-                devices.push(json!({
-                    "name": d.name,
-                    "label": d.name,
-                    "open_name": d.name,
-                    "formats": formats.clone(),
-                    "probe_log": report.notes.join("\n"),
-                }));
+    let st2 = st.clone();
+    let formats2 = formats.clone();
+    let mut devices = run_blocking(move || {
+        let mut devices = Vec::new();
+        if let Ok(report) = st2.orch.probe() {
+            let notes = report.notes.join("\n");
+            for d in report.devices {
+                if matches!(
+                    d.direction,
+                    roc_devices::DeviceDirection::Output | roc_devices::DeviceDirection::Unknown
+                ) {
+                    devices.push(json!({
+                        "name": d.name,
+                        "label": d.name,
+                        "open_name": d.name,
+                        "formats": formats2.clone(),
+                        "probe_log": notes.clone(),
+                    }));
+                }
             }
+            let mut seen = std::collections::HashSet::new();
+            devices.retain(|d| {
+                let name = d.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                seen.insert(name.to_string())
+            });
         }
-        // Deduplicate by name (probe may list in+out with same label).
-        let mut seen = std::collections::HashSet::new();
-        devices.retain(|d| {
-            let name = d.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            seen.insert(name.to_string())
-        });
-    }
+        devices
+    })
+    .await;
     if devices.is_empty() {
         for p in &st.orch.cfg.playout {
             devices.push(json!({

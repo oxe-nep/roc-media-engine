@@ -1,6 +1,7 @@
 //! roc-media-engine control plane: HTTP/WS UI API + GStreamer orchestrator.
 
 mod api;
+mod gst_task;
 mod orchestrator;
 mod ui;
 mod workflows;

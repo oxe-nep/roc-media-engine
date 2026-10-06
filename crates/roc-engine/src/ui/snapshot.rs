@@ -377,6 +377,11 @@ pub fn meters_maps(orch: &Orchestrator) -> (serde_json::Map<String, Value>, serd
 
 pub fn dashboard_snapshot(orch: &Orchestrator, ui: &UiState) -> Value {
     let channels = orch.list_channels();
+    let tc_by_id: std::collections::HashMap<u32, _> = orch
+        .list_tc_loops()
+        .into_iter()
+        .map(|t| (t.id, t))
+        .collect();
     let mut streams = Vec::new();
     let mut recordings = Vec::new();
     let mut srt = Vec::new();
@@ -394,8 +399,8 @@ pub fn dashboard_snapshot(orch: &Orchestrator, ui: &UiState) -> Value {
             json!({ "mode": ui.workflow_mode(ch.id) }),
         );
         let meta = ui.tc(ch.id);
-        let live = orch.tc_loop_snapshot(ch.id);
-        tc.push(crate::ui::tc::tc_info_json(ch.id, &meta, live.as_ref()));
+        let live = tc_by_id.get(&ch.id);
+        tc.push(crate::ui::tc::tc_info_json(ch.id, &meta, live));
     }
     streams.sort_by_key(|v| v.get("id").and_then(|x| x.as_u64()).unwrap_or(0));
     recordings.sort_by_key(|v| v.get("id").and_then(|x| x.as_u64()).unwrap_or(0));

@@ -270,13 +270,6 @@ fn hls_dir_from_playlist(playlist: &str) -> String {
         .unwrap_or_else(|| ".".into())
 }
 
-fn hls_generation() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 fn encode_family(video_codec: &str) -> EncodeFamily {
     let c = video_codec.to_ascii_lowercase();
     if c.contains("265") || c.contains("hevc") {

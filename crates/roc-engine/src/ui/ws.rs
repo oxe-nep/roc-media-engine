@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tracing::warn;
 
+use crate::gst_task::run_blocking;
 use crate::ui::{snapshot, AppState};
 
 pub async fn ws_handler(
@@ -33,13 +34,17 @@ struct ClientMsg {
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
-    let snap = snapshot::dashboard_snapshot(state.orch.as_ref(), state.ui.as_ref());
-    if sender
-        .send(Message::Text(snap.to_string().into()))
-        .await
-        .is_err()
     {
-        return;
+        let orch = state.orch.clone();
+        let ui = state.ui.clone();
+        let snap = run_blocking(move || snapshot::dashboard_snapshot(orch.as_ref(), ui.as_ref())).await;
+        if sender
+            .send(Message::Text(snap.to_string().into()))
+            .await
+            .is_err()
+        {
+            return;
+        }
     }
 
     let mut tick_snap = tokio::time::interval(Duration::from_millis(500));
@@ -73,7 +78,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 &mut preview_session,
                                 &mut preview_rx,
                                 &out_tx,
-                            );
+                            )
+                            .await;
                         }
                     }
                     Some(Ok(_)) => {}
@@ -86,13 +92,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
             _ = tick_snap.tick() => {
-                let snap = snapshot::dashboard_snapshot(state.orch.as_ref(), state.ui.as_ref());
+                let orch = state.orch.clone();
+                let ui = state.ui.clone();
+                let snap = run_blocking(move || {
+                    snapshot::dashboard_snapshot(orch.as_ref(), ui.as_ref())
+                })
+                .await;
                 if sender.send(Message::Text(snap.to_string().into())).await.is_err() {
                     break;
                 }
             }
             _ = tick_meters.tick() => {
-                let frame = snapshot::meters_frame(state.orch.as_ref());
+                let orch = state.orch.clone();
+                let frame = run_blocking(move || snapshot::meters_frame(orch.as_ref())).await;
                 if sender.send(Message::Text(frame.to_string().into())).await.is_err() {
                     break;
                 }
@@ -102,7 +114,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Only tear down if this socket still owns the active session (pop-out handoff).
     if let (Some(ch), Some(sid)) = (preview_channel.take(), preview_session.take()) {
-        let _ = state.orch.stop_webrtc_preview_session(ch, &sid);
+        let orch = state.orch.clone();
+        let _ = run_blocking(move || orch.stop_webrtc_preview_session(ch, &sid)).await;
     }
 }
 
@@ -131,7 +144,7 @@ fn preview_signal_json(sig: PreviewSignal) -> Value {
     }
 }
 
-fn handle_client_msg(
+async fn handle_client_msg(
     state: &AppState,
     m: &ClientMsg,
     preview_channel: &mut Option<u32>,
@@ -144,11 +157,13 @@ fn handle_client_msg(
             let Some(channel) = m.channel else { return };
             let pair = m.pair.unwrap_or(0);
             if let (Some(prev), Some(sid)) = (preview_channel.take(), preview_session.take()) {
-                let _ = state.orch.stop_webrtc_preview_session(prev, &sid);
+                let orch = state.orch.clone();
+                let _ = run_blocking(move || orch.stop_webrtc_preview_session(prev, &sid)).await;
             }
             *preview_rx = None;
             let (tx, rx) = new_preview_signal_tx();
-            match state.orch.start_webrtc_preview(channel, pair, tx) {
+            let orch = state.orch.clone();
+            match run_blocking(move || orch.start_webrtc_preview(channel, pair, tx)).await {
                 Ok(session_id) => {
                     *preview_channel = Some(channel);
                     *preview_session = Some(session_id.clone());
@@ -172,8 +187,9 @@ fn handle_client_msg(
         }
         "preview_answer" => {
             let Some(channel) = m.channel.or(*preview_channel) else { return };
-            let Some(sdp) = m.sdp.as_deref() else { return };
-            if let Err(err) = state.orch.set_webrtc_answer(channel, sdp) {
+            let Some(sdp) = m.sdp.clone() else { return };
+            let orch = state.orch.clone();
+            if let Err(err) = run_blocking(move || orch.set_webrtc_answer(channel, &sdp)).await {
                 warn!(channel, error = %err, "preview_answer failed");
                 let _ = out_tx.send(json!({
                     "type": "preview_error",
@@ -184,15 +200,19 @@ fn handle_client_msg(
         }
         "preview_ice" => {
             let Some(channel) = m.channel.or(*preview_channel) else { return };
-            let Some(candidate) = m.candidate.as_deref() else { return };
+            let Some(candidate) = m.candidate.clone() else { return };
             let mline = m.sdp_mline_index.unwrap_or(0);
-            if let Err(err) = state.orch.add_webrtc_ice(channel, mline, candidate) {
+            let orch = state.orch.clone();
+            if let Err(err) =
+                run_blocking(move || orch.add_webrtc_ice(channel, mline, &candidate)).await
+            {
                 warn!(channel, error = %err, "preview_ice failed");
             }
         }
         "preview_close" => {
             if let (Some(ch), Some(sid)) = (preview_channel.take(), preview_session.take()) {
-                let _ = state.orch.stop_webrtc_preview_session(ch, &sid);
+                let orch = state.orch.clone();
+                let _ = run_blocking(move || orch.stop_webrtc_preview_session(ch, &sid)).await;
             }
             *preview_rx = None;
             let _ = out_tx.send(json!({ "type": "preview_closed" }));

@@ -7,6 +7,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
+use crate::gst_task::run_blocking;
 use crate::orchestrator::Orchestrator;
 use crate::workflows;
 
@@ -42,18 +43,22 @@ async fn health(State(orch): State<ApiState>) -> Json<serde_json::Value> {
 }
 
 async fn devices(State(orch): State<ApiState>) -> Result<Json<serde_json::Value>, ApiError> {
-    let report = orch.probe().map_err(ApiError::from)?;
+    let report = run_blocking(move || orch.probe())
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(report).unwrap()))
 }
 
 async fn list_channels(State(orch): State<ApiState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "channels": orch.list_channels() }))
+    let channels = run_blocking(move || orch.list_channels()).await;
+    Json(serde_json::json!({ "channels": channels }))
 }
 
-/// Peak meters for all channels (`level` element → dBFS). Polled by Go WS at ~80ms.
+/// Peak meters for all channels (`level` element → dBFS).
 async fn meters(State(orch): State<ApiState>) -> Json<serde_json::Value> {
+    let channels = run_blocking(move || orch.list_channel_meters()).await;
     let mut map = serde_json::Map::new();
-    for ch in orch.list_channels() {
+    for ch in channels {
         let peaks = ch.audio_peaks.unwrap_or_else(|| vec![-90.0; 8]);
         let l = peaks.first().copied().unwrap_or(-90.0);
         let r = peaks.get(1).copied().unwrap_or(-90.0);
@@ -69,7 +74,9 @@ async fn get_channel(
     State(orch): State<ApiState>,
     Path(id): Path<u32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let snap = orch.channel(id).map_err(ApiError::from)?;
+    let snap = run_blocking(move || orch.channel(id))
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }
 
@@ -77,7 +84,9 @@ async fn start_capture(
     State(orch): State<ApiState>,
     Path(id): Path<u32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let snap = orch.start_capture(id).map_err(ApiError::from)?;
+    let snap = run_blocking(move || orch.start_capture(id))
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }
 
@@ -85,7 +94,9 @@ async fn stop_capture(
     State(orch): State<ApiState>,
     Path(id): Path<u32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let snap = orch.stop_capture(id).map_err(ApiError::from)?;
+    let snap = run_blocking(move || orch.stop_capture(id))
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }
 
@@ -102,9 +113,11 @@ async fn start_record(
     Path(id): Path<u32>,
     Query(q): Query<RecordQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let snap = orch
-        .start_recording(id, q.path, q.label, q.category)
-        .map_err(ApiError::from)?;
+    let snap = run_blocking(move || {
+        orch.start_recording(id, q.path, q.label, q.category)
+    })
+    .await
+    .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }
 
@@ -112,7 +125,9 @@ async fn stop_record(
     State(orch): State<ApiState>,
     Path(id): Path<u32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let snap = orch.stop_recording(id).map_err(ApiError::from)?;
+    let snap = run_blocking(move || orch.stop_recording(id))
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }
 
@@ -121,9 +136,11 @@ async fn start_record_proxy(
     Path(id): Path<u32>,
     Query(q): Query<RecordQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let snap = orch
-        .start_proxy_recording(id, q.path, q.label, q.category)
-        .map_err(ApiError::from)?;
+    let snap = run_blocking(move || {
+        orch.start_proxy_recording(id, q.path, q.label, q.category)
+    })
+    .await
+    .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }
 
@@ -131,7 +148,9 @@ async fn stop_record_proxy(
     State(orch): State<ApiState>,
     Path(id): Path<u32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let snap = orch.stop_proxy_recording(id).map_err(ApiError::from)?;
+    let snap = run_blocking(move || orch.stop_proxy_recording(id))
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }
 
@@ -140,9 +159,11 @@ async fn start_record_hq(
     Path(id): Path<u32>,
     Query(q): Query<RecordQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let snap = orch
-        .start_hq_recording(id, q.path, q.label, q.category)
-        .map_err(ApiError::from)?;
+    let snap = run_blocking(move || {
+        orch.start_hq_recording(id, q.path, q.label, q.category)
+    })
+    .await
+    .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }
 
@@ -150,7 +171,9 @@ async fn stop_record_hq(
     State(orch): State<ApiState>,
     Path(id): Path<u32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let snap = orch.stop_hq_recording(id).map_err(ApiError::from)?;
+    let snap = run_blocking(move || orch.stop_hq_recording(id))
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }
 
@@ -165,7 +188,9 @@ async fn start_srt(
     body: Result<Json<SrtBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let url = body.ok().and_then(|b| b.url.clone());
-    let snap = orch.start_srt(id, url).map_err(ApiError::from)?;
+    let snap = run_blocking(move || orch.start_srt(id, url))
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }
 
@@ -173,7 +198,9 @@ async fn stop_srt(
     State(orch): State<ApiState>,
     Path(id): Path<u32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let snap = orch.stop_srt(id).map_err(ApiError::from)?;
+    let snap = run_blocking(move || orch.stop_srt(id))
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }
 
@@ -190,8 +217,9 @@ async fn set_encode_preset(
     if body.preset.trim().is_empty() {
         return Err(ApiError::bad_request("preset is required"));
     }
-    let snap = orch
-        .set_encode_preset(id, body.preset.trim())
+    let preset = body.preset.trim().to_string();
+    let snap = run_blocking(move || orch.set_encode_preset(id, &preset))
+        .await
         .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }
@@ -204,8 +232,9 @@ async fn set_record_preset(
     if body.preset.trim().is_empty() {
         return Err(ApiError::bad_request("preset is required"));
     }
-    let snap = orch
-        .set_record_preset(id, body.preset.trim())
+    let preset = body.preset.trim().to_string();
+    let snap = run_blocking(move || orch.set_record_preset(id, &preset))
+        .await
         .map_err(ApiError::from)?;
     Ok(Json(serde_json::to_value(snap).unwrap()))
 }

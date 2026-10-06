@@ -749,17 +749,36 @@ impl PipelineBackend for GstBackend {
     }
 
     fn stop_capture(&self, channel_id: u32) -> Result<()> {
-        let _gst = self.gst_op.lock();
-        let mut map = self.channels.lock();
-        let pipe = map
-            .get_mut(&channel_id)
-            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
-        let was_live = matches!(pipe.status, ChannelStatus::Running | ChannelStatus::Waiting);
-        pipe.stop()?;
-        if was_live {
-            let prev = self.nvenc_used.fetch_sub(1, Ordering::SeqCst);
-            if prev == 0 {
-                self.nvenc_used.store(0, Ordering::SeqCst);
+        // Finalize REC EOS outside gst_op (same pattern as stop_*_recording).
+        let (pending_proxy, pending_hq, was_live) = {
+            let _gst = self.gst_op.lock();
+            let mut map = self.channels.lock();
+            let pipe = map
+                .get_mut(&channel_id)
+                .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+            let was_live =
+                matches!(pipe.status, ChannelStatus::Running | ChannelStatus::Waiting);
+            let pending_proxy = pipe.begin_stop_proxy_recording()?;
+            let pending_hq = pipe.begin_stop_hq_recording()?;
+            (pending_proxy, pending_hq, was_live)
+        };
+        for pending in [pending_proxy, pending_hq].into_iter().flatten() {
+            pending.wait_eos();
+            let _gst = self.gst_op.lock();
+            pending.finish();
+        }
+        {
+            let _gst = self.gst_op.lock();
+            let mut map = self.channels.lock();
+            let pipe = map
+                .get_mut(&channel_id)
+                .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+            pipe.stop()?;
+            if was_live {
+                let prev = self.nvenc_used.fetch_sub(1, Ordering::SeqCst);
+                if prev == 0 {
+                    self.nvenc_used.store(0, Ordering::SeqCst);
+                }
             }
         }
         Ok(())

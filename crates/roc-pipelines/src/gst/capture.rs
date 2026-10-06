@@ -1274,14 +1274,6 @@ impl ChannelPipeline {
         self.begin_detach_recording(RecordingRole::Proxy, true)
     }
 
-    pub fn stop_proxy_recording(&mut self) -> Result<()> {
-        if let Some(pending) = self.begin_stop_proxy_recording()? {
-            pending.wait_eos();
-            pending.finish();
-        }
-        Ok(())
-    }
-
     /// HQ REC: mezz from raw tee `t` when the record preset is mezz, otherwise
     /// the encoded bitstream from tee `e`.
     pub fn start_hq_recording(&mut self, path: &str) -> Result<()> {
@@ -1311,14 +1303,6 @@ impl ChannelPipeline {
         self.hq_recording = false;
         self.hq_recording_path = None;
         self.begin_detach_recording(RecordingRole::Hq, true)
-    }
-
-    pub fn stop_hq_recording(&mut self) -> Result<()> {
-        if let Some(pending) = self.begin_stop_hq_recording()? {
-            pending.wait_eos();
-            pending.finish();
-        }
-        Ok(())
     }
 
     pub fn start_srt(&mut self, url: &str) -> Result<()> {
@@ -2626,6 +2610,17 @@ impl ChannelPipeline {
     }
 
     fn adapt_to_mode(&mut self, new_mode: &str) -> Result<()> {
+        // Relaunch hard-cuts the graph. Finalizing REC under the global gst_op lock
+        // would stall every channel; skipping adapt keeps the muxer footer intact.
+        if self.proxy_recording || self.hq_recording {
+            tracing::warn!(
+                channel = self.id,
+                from = %self.locked_mode,
+                to = %new_mode,
+                "skipping format adapt while recording"
+            );
+            return Ok(());
+        }
         self.last_adapt = Some(std::time::Instant::now());
         self.locked_mode = new_mode.to_string();
         self.relaunch_preserving_branches(new_mode)
