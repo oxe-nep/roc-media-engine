@@ -8,9 +8,10 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use gstreamer::prelude::*;
-use gstreamer::{Bin, Element, GhostPad, Pad, Pipeline, Promise, State};
+use gstreamer::{Bin, Element, GhostPad, Pad, PadProbeReturn, PadProbeType, Pipeline, Promise, State};
 use gstreamer_sdp::SDPMessage;
 use gstreamer_webrtc::{WebRTCSDPType, WebRTCSessionDescription};
+use std::sync::mpsc;
 use tracing::info;
 
 use crate::describe::stereo_pair_matrix;
@@ -42,6 +43,11 @@ impl WebRtcPreview {
         let audio_tee = pipeline
             .by_name("a")
             .ok_or_else(|| anyhow!("audio tee `a` missing"))?;
+        // Survives brief unlink gaps during detach; also covers pipelines launched
+        // before launch-string `allow-not-linked=true` was added.
+        if audio_tee.find_property("allow-not-linked").is_some() {
+            audio_tee.set_property("allow-not-linked", true);
+        }
 
         let session_id = uuid::Uuid::new_v4().to_string();
         let tag = format!("wpv{channel}p{pair}");
@@ -237,22 +243,58 @@ impl WebRtcPreview {
     }
 
     pub fn detach(self, pipeline: &Pipeline) {
-        let video_tee = pipeline.by_name("e");
-        let audio_tee = pipeline.by_name("a");
-        if let Some(peer) = self.tee_pad.peer() {
-            let _ = self.tee_pad.unlink(&peer);
-        }
-        if let Some(t) = video_tee {
-            t.release_request_pad(&self.tee_pad);
-        }
-        if let Some(peer) = self.audio_tee_pad.peer() {
-            let _ = self.audio_tee_pad.unlink(&peer);
-        }
-        if let Some(t) = audio_tee {
-            t.release_request_pad(&self.audio_tee_pad);
-        }
+        // Cut tee pads on the streaming thread (IDLE probe) so Null/remove cannot
+        // push FLOW_FLUSHING into shared tees — that was killing card `ameter`.
+        cut_tee_pad(pipeline, "e", &self.tee_pad);
+        cut_tee_pad(pipeline, "a", &self.audio_tee_pad);
         let _ = self.branch.set_state(State::Null);
         let _ = pipeline.remove(&self.branch);
+        revive_audio_meter(pipeline);
         info!(session = %self.session_id, "detached webrtc preview");
+    }
+}
+
+/// Unlink + release a tee request pad when the pad is idle (safe vs racing buffers).
+fn cut_tee_pad(pipeline: &Pipeline, tee_name: &str, tee_pad: &Pad) {
+    let tee = pipeline.by_name(tee_name);
+    let (tx, rx) = mpsc::channel::<()>();
+    let tee_for_probe = tee.clone();
+    let probe_id = tee_pad.add_probe(PadProbeType::IDLE, move |pad, _| {
+        if let Some(peer) = pad.peer() {
+            let _ = pad.unlink(&peer);
+        }
+        if let Some(ref t) = tee_for_probe {
+            t.release_request_pad(pad);
+        }
+        let _ = tx.send(());
+        PadProbeReturn::Remove
+    });
+
+    if rx
+        .recv_timeout(std::time::Duration::from_millis(750))
+        .is_err()
+    {
+        if let Some(id) = probe_id {
+            tee_pad.remove_probe(id);
+        }
+        // Fallback: pad never went idle (stalled branch) — cut synchronously.
+        if let Some(peer) = tee_pad.peer() {
+            let _ = tee_pad.unlink(&peer);
+        }
+        if let Some(t) = tee {
+            // Safe if IDLE already released — GStreamer ignores unknown pads.
+            t.release_request_pad(tee_pad);
+        }
+    }
+}
+
+/// Re-sync the standing meter branch after a dynamic audio-tee cut.
+fn revive_audio_meter(pipeline: &Pipeline) {
+    for name in ["ameter_q", "ameter", "ameter_sink"] {
+        if let Some(el) = pipeline.by_name(name) {
+            if let Err(e) = el.sync_state_with_parent() {
+                tracing::warn!(element = name, error = %e, "failed to revive audio meter element");
+            }
+        }
     }
 }

@@ -230,10 +230,11 @@ fn mpegts_program_aac(
 
 /// Bus-message peak meters for the 8ch audio tee (`level` → Element "level").
 /// ~30 Hz for snappy LED meters without flooding the UI WebSocket.
+/// Named elements so WebRTC detach can re-sync the branch if a flush stalls it.
 fn meter_branch() -> &'static str {
-    "a. ! queue max-size-buffers=8 leaky=downstream ! \
+    "a. ! queue name=ameter_q max-size-buffers=8 leaky=downstream ! \
      level name=ameter interval=33000000 post-messages=true ! \
-     fakesink sync=false async=false"
+     fakesink name=ameter_sink sync=false async=false"
 }
 
 /// 1 fps JPEG thumbnail for the encode grid (`/thumb/{id}`).
@@ -625,7 +626,8 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         (
             format!(
                 "decklinkaudiosrc device-number={num} channels=8 ! \
-                 audioconvert ! audio/x-raw,channels=8,rate=48000,layout=interleaved ! tee name=a"
+                 audioconvert ! audio/x-raw,channels=8,rate=48000,layout=interleaved ! \
+                 tee name=a allow-not-linked=true"
             ),
             meter_branch().to_string(),
         )
@@ -670,9 +672,9 @@ fn build_playout_audio(pairs: usize, compressed: bool, asink: &str, named_pads: 
     let stereo = "audio/x-raw,format=S16LE,channels=2,rate=48000,layout=interleaved";
     let out8 = "audio/x-raw,format=S16LE,channels=8,rate=48000,layout=interleaved";
     let meter = format!(
-        "a. ! queue max-size-buffers=8 leaky=downstream ! \
+        "a. ! queue name=ameter_q max-size-buffers=8 leaky=downstream ! \
            level name=ameter interval=33000000 post-messages=true ! \
-           fakesink sync=false async=false"
+           fakesink name=ameter_sink sync=false async=false"
     );
     let pad = |n: usize| -> String {
         if named_pads {
@@ -688,7 +690,7 @@ fn build_playout_audio(pairs: usize, compressed: bool, asink: &str, named_pads: 
         let src = pad(0);
         return format!(
             "{src} ! {q} ! {dec} ! audioconvert ! audioresample ! {stereo} ! \
-             audioconvert mix-matrix=\"{matrix}\" ! {out8} ! tee name=a \
+             audioconvert mix-matrix=\"{matrix}\" ! {out8} ! tee name=a allow-not-linked=true \
              a. ! {q} ! {asink} \
              {meter}"
         );
@@ -705,7 +707,7 @@ fn build_playout_audio(pairs: usize, compressed: bool, asink: &str, named_pads: 
         ));
     }
     parts.push(format!(
-        "mix. ! audioconvert ! {out8} ! tee name=a \
+        "mix. ! audioconvert ! {out8} ! tee name=a allow-not-linked=true \
          a. ! {q} ! {asink} \
          {meter}"
     ));
@@ -948,7 +950,8 @@ pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
            mpegtsmux name=tsmux alignment=7 ! {srt_appsink} \
          e. ! queue leaky=downstream ! fakesink sync=false \
          decklinkaudiosrc device-number={in_num} channels=8 ! \
-           audioconvert ! audio/x-raw,channels=8,rate=48000,layout=interleaved ! tee name=a \
+           audioconvert ! audio/x-raw,channels=8,rate=48000,layout=interleaved ! \
+           tee name=a allow-not-linked=true \
          a. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
            audioconvert ! audio/x-raw,format=S16LE,channels=8,rate=48000,layout=interleaved ! \
            {asink} \
