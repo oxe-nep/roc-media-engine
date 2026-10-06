@@ -1889,6 +1889,17 @@ impl ChannelPipeline {
             .name(format!("mux_{tag}_{}", self.id))
             .build()
             .with_context(|| format!("make {mux_name}"))?;
+        if mux_name == "qtmux" {
+            // Keep a playable moov even if final EOS is slow/missed (ProRes drain).
+            let _ = mux.set_property(
+                "reserved-max-duration",
+                gstreamer::ClockTime::from_seconds(8 * 3600),
+            );
+            let _ = mux.set_property(
+                "reserved-moov-update-period",
+                gstreamer::ClockTime::from_seconds(1),
+            );
+        }
         let sink = gstreamer::ElementFactory::make("filesink")
             .name(format!("fs_{tag}_{}", self.id))
             .property("location", path)
@@ -1935,38 +1946,27 @@ impl ChannelPipeline {
             None
         };
         let audio_queue_prefix = format!("q_{tag}_pcm");
-        // ProRes/qtmux: attach PCM only after video is healthy — multi-pad EOS was
-        // leaving moov-less files while A/V pacing settled. Prefer a playable
-        // video-only .mov over a corrupt A/V file; PCM can be re-enabled once
-        // finalize is proven. DNxHD/mxfmux keeps PCM as before.
-        if !codec.contains("prores") {
-            if let Some(a_tee) = audio_tee {
-                match self.link_mezz_pcm(pipeline, &a_tee, &mux, tag, video_pts_ns.clone()) {
-                    Ok((a_pads, audio_els)) => {
-                        for el in &audio_els {
-                            if el.name().starts_with(&audio_queue_prefix) {
-                                install_av_start_gate(el, av_gate.clone());
-                            }
+        if let Some(a_tee) = audio_tee {
+            match self.link_mezz_pcm(pipeline, &a_tee, &mux, tag, video_pts_ns.clone()) {
+                Ok((a_pads, audio_els)) => {
+                    for el in &audio_els {
+                        if el.name().starts_with(&audio_queue_prefix) {
+                            install_av_start_gate(el, av_gate.clone());
                         }
-                        branch.audio_tee_pads = a_pads;
-                        branch.elements.extend(audio_els);
-                        install_mux_av_sync_log("mezz");
                     }
-                    Err(err) => {
-                        tracing::warn!(
-                            channel = self.id,
-                            role = tag,
-                            error = %err,
-                            "mezz REC video-only — audio attach failed"
-                        );
-                    }
+                    branch.audio_tee_pads = a_pads;
+                    branch.elements.extend(audio_els);
+                    install_mux_av_sync_log("mezz");
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        channel = self.id,
+                        role = tag,
+                        error = %err,
+                        "mezz REC video-only — audio attach failed"
+                    );
                 }
             }
-        } else {
-            tracing::info!(
-                channel = self.id,
-                "ProRes REC video-only for now (PCM deferred until qtmux EOS finalize is solid)"
-            );
         }
 
         for el in &branch.elements {
@@ -2181,11 +2181,13 @@ impl ChannelPipeline {
             .ok_or_else(|| anyhow!("no pipeline"))?
             .clone();
 
-        // 1) Cut data path from the video/audio tees before touching downstream state.
-        Self::unlink_branch(&pipeline, &branch);
-
-        // 2) Optional EOS for a cleaner mp4/mxf footer. Do NOT wait on the pipeline
-        //    bus: that raced under multi-channel stop and held the global lock for seconds.
+        // Optional EOS for a cleaner mp4/mxf/mov footer. Do NOT wait on the
+        // pipeline bus: that raced under multi-channel stop and held the global
+        // lock for seconds.
+        //
+        // Order matters for qtmux: block live tee input, inject EOS while the
+        // branch is still linked, wait for filesink, THEN unlink. Unlinking
+        // first left ProRes/qtmux without a reachable EOS (moov-less .mov).
         if finalize {
             use gstreamer::{PadProbeReturn, PadProbeType};
             use std::sync::mpsc;
@@ -2213,6 +2215,18 @@ impl ChannelPipeline {
                 });
             drop(tx);
 
+            // Drop further live buffers on record queues while we finalize.
+            let mut block_probes = Vec::new();
+            for el in &branch.elements {
+                if el.name().starts_with(&queue_prefix) {
+                    if let Some(pad) = el.static_pad("sink") {
+                        block_probes.push(pad.add_probe(PadProbeType::BUFFER, |_pad, _info| {
+                            PadProbeReturn::Drop
+                        }));
+                    }
+                }
+            }
+
             // Inject EOS *into* each record queue sink (downstream). Element-level
             // send_event(EOS) on a filter goes to its sink pads (upstream) and
             // never reaches the muxer — leaving a moov-less "corrupt" file.
@@ -2226,7 +2240,7 @@ impl ChannelPipeline {
             }
             // Progressive mp4mux/qtmux writes moov only on EOS — wait generously
             // (ProRes software encode can take longer to drain).
-            match rx.recv_timeout(std::time::Duration::from_millis(12000)) {
+            match rx.recv_timeout(std::time::Duration::from_millis(15000)) {
                 Ok(()) => tracing::info!(
                     channel = self.id,
                     role = tag,
@@ -2239,9 +2253,13 @@ impl ChannelPipeline {
                 ),
             }
             drop(eos_probe);
+            drop(block_probes);
         }
 
-        // 3) Null from sink → source, then remove.
+        // Cut data path from the video/audio tees, then Null/remove.
+        Self::unlink_branch(&pipeline, &branch);
+
+        // Null from sink → source, then remove.
         for el in branch.elements.iter().rev() {
             let _ = el.set_state(gstreamer::State::Null);
         }
