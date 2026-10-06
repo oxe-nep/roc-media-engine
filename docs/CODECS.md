@@ -21,13 +21,14 @@ Capture graph:
 | `dnxhd_145` / `dnxhd_185` | same | `.mxf` | Legacy ids → SQ / HQ |
 | `xavc_intra_hd` | `x264enc` High 4:2:2 Intra | `.mxf` (`mxfmux`) | Open-source XAVC Intra HD **approximation** (not Sony Class 100) |
 
-### DNxHD operating points (1080)
+### DNxHD operating points (1080 — **i50 / p50 only**)
 
 | Signal | SQ (8-bit) | HQ (8-bit) | HQX (10-bit) |
 |--------|------------|------------|--------------|
-| 1080i50 / 1080p25 | 120 | 185 | 185x |
-| 1080i59.94 / 1080p29.97 | 145 | 220 | 220x |
+| 1080i50 | 120 | 185 | 185x |
 | 1080p50 | 240 | 365 | 365x |
+
+Other rates (e.g. i59.94) are rejected with a clear error.
 
 Timecode: GStreamer `timecodestamper source=rtc set=always` — uses the host
 real-time clock. Capture host has **no PTP**; chrony syncs RTC from LAN NTP:

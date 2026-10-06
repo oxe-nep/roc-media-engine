@@ -1,7 +1,7 @@
 //! Avid DNxHD / VC-3 operating points for mezz REC.
 //!
-//! Preset selects **class** (SQ / HQ / HQX). Bitrate and pixel format come from
-//! the live signal geometry so 1080i50 stays interlaced at the correct Mbps.
+//! Supported rasters for this deployment: **1080i50** and **1080p50** only.
+//! Preset selects class (SQ / HQ / HQX); bitrate follows the live signal.
 
 use anyhow::{bail, Result};
 
@@ -10,11 +10,11 @@ use crate::signal_format::InputFormat;
 /// DNxHD quality class (maps to Avid SQ / HQ / HQX families).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnxhdClass {
-    /// Standard Quality — 8-bit 4:2:2 (e.g. 120 @ 1080i50).
+    /// Standard Quality — 8-bit 4:2:2 (120 @ i50 / 240 @ p50).
     Sq,
-    /// High Quality — 8-bit 4:2:2 (e.g. 185 @ 1080i50).
+    /// High Quality — 8-bit 4:2:2 (185 @ i50 / 365 @ p50).
     Hq,
-    /// High Quality 10-bit — HQX (e.g. 185x @ 1080i50).
+    /// High Quality 10-bit — HQX (185x @ i50 / 365x @ p50).
     Hqx,
 }
 
@@ -40,20 +40,23 @@ impl DnxhdClass {
         if p.contains("hqx") || (p.ends_with('x') && p.contains("dnx")) {
             return Self::Hqx;
         }
-        if p == "sq" || p.contains("_sq") || p.contains("145") || p.contains("120") {
+        if p == "sq" || p.contains("_sq") || p.contains("120") || p.contains("240") {
             return Self::Sq;
         }
-        if p == "hq" || p.contains("_hq") || p.contains("185") || p.contains("220") {
+        if p == "hq" || p.contains("_hq") || p.contains("185") || p.contains("365") {
             return Self::Hq;
         }
+        // Legacy ids / labels.
+        if p.contains("145") {
+            return Self::Sq;
+        }
         if p == "dnxhd" || p.is_empty() {
-            // Legacy single preset — prefer HQ unless bitrate looks like SQ.
             if let Some(br) = bitrate_hint {
                 let mbps = br / 1_000_000;
-                if matches!(mbps, 115 | 120 | 145 | 240) {
+                if matches!(mbps, 120 | 240 | 145) {
                     return Self::Sq;
                 }
-                if matches!(mbps, 175 | 185 | 220 | 365) {
+                if matches!(mbps, 185 | 365) {
                     return Self::Hq;
                 }
             }
@@ -105,101 +108,62 @@ fn approx_fps(num: i32, den: i32, target: f64) -> bool {
     ((num as f64 / den as f64) - target).abs() < 0.08
 }
 
-/// Frame rate + scan for DNxHD (field rate collapsed to frame rate for interlaced).
-fn dnxhd_timebase(fmt: &InputFormat) -> Result<(i32, i32, bool)> {
-    let interlaced = fmt.interlaced;
-    if interlaced {
-        if approx_fps(fmt.fps_num, fmt.fps_den, 25.0) || approx_fps(fmt.fps_num, fmt.fps_den, 50.0)
-        {
-            return Ok((25, 1, true));
-        }
-        if approx_fps(fmt.fps_num, fmt.fps_den, 29.97)
-            || approx_fps(fmt.fps_num, fmt.fps_den, 59.94)
-        {
-            return Ok((30000, 1001, true));
-        }
-        if approx_fps(fmt.fps_num, fmt.fps_den, 30.0) || approx_fps(fmt.fps_num, fmt.fps_den, 60.0)
-        {
-            return Ok((30, 1, true));
-        }
-        bail!(
-            "unsupported interlaced rate {}/{} for DNxHD",
-            fmt.fps_num,
-            fmt.fps_den
-        );
-    }
-    Ok((fmt.fps_num.max(1), fmt.fps_den.max(1), false))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DnxhdRaster {
+    /// 1080i50 — frame rate 25/1, interlaced.
+    I50,
+    /// 1080p50 — frame rate 50/1, progressive.
+    P50,
 }
 
-/// Mbps for (class, interlaced, fps family) at 1920x1080.
-fn bitrate_mbps_1080(
-    class: DnxhdClass,
-    interlaced: bool,
-    fps_num: i32,
-    fps_den: i32,
-) -> Result<(u64, &'static str)> {
-    let fps = fps_num as f64 / fps_den.max(1) as f64;
-    let family_25 = approx_fps(fps_num, fps_den, 25.0);
-    let family_30 = approx_fps(fps_num, fps_den, 29.97) || approx_fps(fps_num, fps_den, 30.0);
-    let family_50p = !interlaced && approx_fps(fps_num, fps_den, 50.0);
-    let family_60p =
-        !interlaced && (approx_fps(fps_num, fps_den, 59.94) || approx_fps(fps_num, fps_den, 60.0));
-
-    let (mbps, tag) = match class {
-        DnxhdClass::Sq => {
-            if family_50p {
-                (240, "DNxHD 240")
-            } else if family_60p {
-                (290, "DNxHD 290")
-            } else if family_30 {
-                (145, "DNxHD 145")
-            } else if family_25 || interlaced {
-                (120, "DNxHD 120")
-            } else {
-                bail!("unsupported progressive rate {fps:.3} for DNxHD SQ");
-            }
-        }
-        DnxhdClass::Hq => {
-            if family_50p {
-                (365, "DNxHD 365")
-            } else if family_60p {
-                (440, "DNxHD 440")
-            } else if family_30 {
-                (220, "DNxHD 220")
-            } else if family_25 || interlaced {
-                (185, "DNxHD 185")
-            } else {
-                bail!("unsupported progressive rate {fps:.3} for DNxHD HQ");
-            }
-        }
-        DnxhdClass::Hqx => {
-            if family_50p {
-                (365, "DNxHD 365x")
-            } else if family_60p {
-                (440, "DNxHD 440x")
-            } else if family_30 {
-                (220, "DNxHD 220x")
-            } else if family_25 || interlaced {
-                (185, "DNxHD 185x")
-            } else {
-                bail!("unsupported progressive rate {fps:.3} for DNxHD HQX");
-            }
-        }
-    };
-    Ok((mbps * 1_000_000, tag))
-}
-
-/// Resolve DNxHD encode parameters from live format + preset class.
-pub fn resolve_dnxhd(fmt: &InputFormat, class: DnxhdClass) -> Result<DnxhdOperatingPoint> {
-    if fmt.width < 1280 || fmt.height < 720 {
+fn classify_raster(fmt: &InputFormat) -> Result<DnxhdRaster> {
+    if fmt.width < 1920 || fmt.height < 1080 {
         bail!(
-            "DNxHD requires HD geometry (got {}x{})",
+            "DNxHD requires 1920x1080 (got {}x{})",
             fmt.width,
             fmt.height
         );
     }
-    let (fps_num, fps_den, interlaced) = dnxhd_timebase(fmt)?;
-    let (bitrate, tag) = bitrate_mbps_1080(class, interlaced, fps_num, fps_den)?;
+    if fmt.interlaced {
+        if approx_fps(fmt.fps_num, fmt.fps_den, 25.0) || approx_fps(fmt.fps_num, fmt.fps_den, 50.0)
+        {
+            return Ok(DnxhdRaster::I50);
+        }
+        bail!(
+            "DNxHD only supports 1080i50 and 1080p50 (got interlaced {}/{})",
+            fmt.fps_num,
+            fmt.fps_den
+        );
+    }
+    if approx_fps(fmt.fps_num, fmt.fps_den, 50.0) {
+        return Ok(DnxhdRaster::P50);
+    }
+    bail!(
+        "DNxHD only supports 1080i50 and 1080p50 (got progressive {}/{})",
+        fmt.fps_num,
+        fmt.fps_den
+    );
+}
+
+fn bitrate_for(class: DnxhdClass, raster: DnxhdRaster) -> (u64, &'static str) {
+    match (raster, class) {
+        (DnxhdRaster::I50, DnxhdClass::Sq) => (120_000_000, "DNxHD 120"),
+        (DnxhdRaster::I50, DnxhdClass::Hq) => (185_000_000, "DNxHD 185"),
+        (DnxhdRaster::I50, DnxhdClass::Hqx) => (185_000_000, "DNxHD 185x"),
+        (DnxhdRaster::P50, DnxhdClass::Sq) => (240_000_000, "DNxHD 240"),
+        (DnxhdRaster::P50, DnxhdClass::Hq) => (365_000_000, "DNxHD 365"),
+        (DnxhdRaster::P50, DnxhdClass::Hqx) => (365_000_000, "DNxHD 365x"),
+    }
+}
+
+/// Resolve DNxHD encode parameters from live format + preset class.
+pub fn resolve_dnxhd(fmt: &InputFormat, class: DnxhdClass) -> Result<DnxhdOperatingPoint> {
+    let raster = classify_raster(fmt)?;
+    let (fps_num, fps_den, interlaced) = match raster {
+        DnxhdRaster::I50 => (25, 1, true),
+        DnxhdRaster::P50 => (50, 1, false),
+    };
+    let (bitrate, tag) = bitrate_for(class, raster);
     let raw_format = match class {
         DnxhdClass::Sq | DnxhdClass::Hq => "Y42B",
         DnxhdClass::Hqx => "v210",
@@ -208,8 +172,8 @@ pub fn resolve_dnxhd(fmt: &InputFormat, class: DnxhdClass) -> Result<DnxhdOperat
         class,
         bitrate,
         label: tag.into(),
-        width: fmt.width,
-        height: fmt.height,
+        width: fmt.width.max(1920),
+        height: fmt.height.max(1080),
         fps_num,
         fps_den,
         interlaced,
@@ -243,12 +207,33 @@ mod tests {
         }
     }
 
+    fn fmt_p50() -> InputFormat {
+        InputFormat {
+            mode: "1080p50".into(),
+            width: 1920,
+            height: 1080,
+            fps_num: 50,
+            fps_den: 1,
+            interlaced: false,
+        }
+    }
+
+    fn fmt_i5994() -> InputFormat {
+        InputFormat {
+            mode: "1080i5994".into(),
+            width: 1920,
+            height: 1080,
+            fps_num: 30000,
+            fps_den: 1001,
+            interlaced: true,
+        }
+    }
+
     #[test]
-    fn i50_hq_is_185_interlaced_no_fps_doubling() {
+    fn i50_hq_is_185_interlaced() {
         let op = resolve_dnxhd(&fmt_i50(), DnxhdClass::Hq).unwrap();
         assert_eq!(op.bitrate, 185_000_000);
         assert_eq!(op.fps_num, 25);
-        assert_eq!(op.fps_den, 1);
         assert!(op.interlaced);
         assert_eq!(op.raw_format, "Y42B");
         assert!(op.video_caps().contains("interlace-mode=interleaved"));
@@ -263,17 +248,31 @@ mod tests {
     }
 
     #[test]
+    fn p50_hq_is_365_progressive() {
+        let op = resolve_dnxhd(&fmt_p50(), DnxhdClass::Hq).unwrap();
+        assert_eq!(op.bitrate, 365_000_000);
+        assert_eq!(op.fps_num, 50);
+        assert!(!op.interlaced);
+        assert!(!op.video_caps().contains("interlace-mode"));
+    }
+
+    #[test]
     fn i50_hqx_requests_v210() {
         let op = resolve_dnxhd(&fmt_i50(), DnxhdClass::Hqx).unwrap();
         assert_eq!(op.raw_format, "v210");
-        assert_eq!(op.bitrate, 185_000_000);
         assert!(op.label.contains('x'));
+    }
+
+    #[test]
+    fn i5994_is_rejected() {
+        let err = resolve_dnxhd(&fmt_i5994(), DnxhdClass::Hq).unwrap_err();
+        assert!(err.to_string().contains("1080i50"));
     }
 
     #[test]
     fn parse_class_from_legacy_preset() {
         assert_eq!(
-            DnxhdClass::parse("dnxhd", Some(145_000_000)),
+            DnxhdClass::parse("dnxhd", Some(120_000_000)),
             DnxhdClass::Sq
         );
         assert_eq!(

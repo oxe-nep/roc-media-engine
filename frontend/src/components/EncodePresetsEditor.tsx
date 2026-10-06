@@ -25,8 +25,8 @@ const PROXY_MBPS = [3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40] as const;
 /** NVENC mezz file bitrates when used as REC. */
 const REC_NVENC_MBPS = [12, 15, 20, 25, 30, 40, 50, 60] as const;
 
-/** Valid-ish DNxHD Mbps for display only — live REC uses class + signal. */
-const DNXHD_MBPS = [120, 145, 185, 220, 240, 365] as const;
+/** Nominal DNxHD Mbps for i50/p50 (live REC overrides from signal). */
+const DNXHD_MBPS = [120, 185, 240, 365] as const;
 
 /** XAVC Intra HD approximation bitrate steps. */
 const XAVC_MBPS = [50, 75, 100, 111, 140, 160, 200] as const;
@@ -408,7 +408,7 @@ export default function EncodePresetsEditor({
       <p className="settings-tab-intro">
         {kind === "proxy"
           ? "Live / SRT / preview encode (NVENC). Selected per channel as Proxy preset."
-          : "Recording encode (NVENC mezz, DNxHD, or XAVC). Selected per channel as HQ preset. Mezz writes MXF with PCM. DNxHD bitrate follows the live signal (class + format)."}
+          : "Recording encode (NVENC mezz, DNxHD, or XAVC). Selected per channel as HQ preset. Mezz writes MXF with PCM. DNxHD supports 1080i50 / 1080p50; bitrate follows class + live signal."}
       </p>
 
       <div className="presets-layout">
@@ -488,7 +488,7 @@ export default function EncodePresetsEditor({
                 disabled={busy || formDnxhd}
                 title={
                   formDnxhd
-                    ? "DNxHD Mbps is chosen from class + live format (e.g. HQ + 1080i50 → 185)"
+                    ? "DNxHD Mbps is chosen from class + live format (HQ + 1080i50 → 185, HQ + 1080p50 → 365)"
                     : undefined
                 }
               >
