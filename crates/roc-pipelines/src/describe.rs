@@ -237,6 +237,14 @@ fn meter_branch() -> &'static str {
      fakesink name=ameter_sink sync=false async=false"
 }
 
+/// Always-linked WebRTC audio tap. Preview rewires `wpv_avalve` → opus instead of
+/// requesting/releasing tee pads (that was killing card `ameter` after close).
+fn webrtc_audio_standby_branch() -> &'static str {
+    "a. ! queue name=wpv_aq max-size-buffers=4 leaky=downstream ! \
+     valve name=wpv_avalve drop=true ! \
+     fakesink name=wpv_asink sync=false async=false"
+}
+
 /// 1 fps JPEG thumbnail for the encode grid (`/thumb/{id}`).
 fn thumb_jpeg_branch(hls_dir: &str) -> String {
     // max-files=1 + %05d keeps a single rolling frame; API serves newest match.
@@ -629,7 +637,7 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
                  audioconvert ! audio/x-raw,channels=8,rate=48000,layout=interleaved ! \
                  tee name=a allow-not-linked=true"
             ),
-            meter_branch().to_string(),
+            format!("{} {}", meter_branch(), webrtc_audio_standby_branch()),
         )
     } else {
         (String::new(), String::new())
@@ -957,8 +965,10 @@ pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
            {asink} \
          {aac} \
          {meter} \
+         {wpv_a} \
          {thumb}",
         meter = meter_branch(),
+        wpv_a = webrtc_audio_standby_branch(),
     )
 }
 
