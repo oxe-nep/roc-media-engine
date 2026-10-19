@@ -838,6 +838,10 @@ pub struct ChannelPipeline {
     no_signal_since: Option<std::time::Instant>,
     /// After lock, per outage: 0 = not tried, 1 = tried alternate, 2 = reverted / done.
     post_lock_flip_attempts: u8,
+    /// Last observed DeckLink `signal` (for rising-edge format re-probe).
+    last_decklink_signal: Option<bool>,
+    /// Set when signal returns after a real outage — engine re-probes with mode=auto.
+    pending_format_reprobe: bool,
     /// Format-adapt hysteresis: mode must stay stable before relaunch.
     pending_adapt_mode: Option<(String, std::time::Instant)>,
     /// Peak dBFS per discrete channel (8). Updated from `level` bus messages.
@@ -980,6 +984,8 @@ impl ChannelPipeline {
             last_good_mode: None,
             no_signal_since: None,
             post_lock_flip_attempts: 0,
+            last_decklink_signal: None,
+            pending_format_reprobe: false,
             pending_adapt_mode: None,
             audio_peaks: [-90.0; 8],
             last_level_at: None,
@@ -1265,6 +1271,8 @@ impl ChannelPipeline {
         self.last_good_mode = None;
         self.no_signal_since = None;
         self.post_lock_flip_attempts = 0;
+        self.last_decklink_signal = None;
+        self.pending_format_reprobe = false;
         self.signal_flip_attempts = 0;
         self.last_signal_flip = None;
         Ok(())
@@ -2433,6 +2441,7 @@ impl ChannelPipeline {
                 if self.no_signal_since.is_none() {
                     self.no_signal_since = Some(std::time::Instant::now());
                 }
+                self.last_decklink_signal = Some(false);
                 self.status = ChannelStatus::Waiting;
             }
             Some(true) => {
@@ -2442,12 +2451,35 @@ impl ChannelPipeline {
                     .last_adapt
                     .map(|t| t.elapsed() < std::time::Duration::from_secs(4))
                     .unwrap_or(false);
+                let rising = self.last_decklink_signal != Some(true);
+                let outage = self
+                    .no_signal_since
+                    .map(|t| t.elapsed())
+                    .unwrap_or(std::time::Duration::ZERO);
+                let had_lock_before = self.had_signal_lock;
                 if !relaunching {
                     self.signal_flip_attempts = 0;
                     self.post_lock_flip_attempts = 0;
                     self.had_signal_lock = true;
                     self.last_good_mode = Some(self.locked_mode.clone());
                 }
+                // After a prior lock + real outage, re-probe with mode=auto so i↔p
+                // (and other mode changes) are detected — locked caps alone lie.
+                if rising
+                    && had_lock_before
+                    && !relaunching
+                    && is_auto_mode(&self.configured_mode)
+                    && !self.proxy_recording
+                    && !self.hq_recording
+                    && outage >= std::time::Duration::from_secs(1)
+                    && self
+                        .last_adapt
+                        .map(|t| t.elapsed() > std::time::Duration::from_secs(8))
+                        .unwrap_or(true)
+                {
+                    self.pending_format_reprobe = true;
+                }
+                self.last_decklink_signal = Some(true);
                 self.no_signal_since = None;
                 self.status = ChannelStatus::Running;
             }
@@ -2458,6 +2490,84 @@ impl ChannelPipeline {
                 }
             }
         }
+    }
+
+    /// True when signal return requested a mode=auto re-probe.
+    pub fn pending_format_reprobe(&self) -> bool {
+        self.pending_format_reprobe
+    }
+
+    /// Release the DeckLink device so the engine can `probe_input_format` outside `gst_op`.
+    /// Returns the device name when a probe should run.
+    pub fn begin_format_reprobe(&mut self) -> Option<String> {
+        if !self.pending_format_reprobe {
+            return None;
+        }
+        self.pending_format_reprobe = false;
+        if self.proxy_recording || self.hq_recording {
+            tracing::info!(
+                channel = self.id,
+                "skip format re-probe while recording"
+            );
+            return None;
+        }
+        if !is_auto_mode(&self.configured_mode) {
+            return None;
+        }
+        tracing::info!(
+            channel = self.id,
+            locked = %self.locked_mode,
+            "signal returned — releasing device for format re-probe"
+        );
+        self.dispose_webrtc_preview();
+        let _ = self.detach_recording(RecordingRole::Proxy, false);
+        let _ = self.detach_recording(RecordingRole::Hq, false);
+        if let Some(p) = self.pipeline.take() {
+            let _ = p.set_state(gstreamer::State::Null);
+        }
+        self.proxy_recording = false;
+        self.hq_recording = false;
+        self.proxy_recording_path = None;
+        self.hq_recording_path = None;
+        self.srt_bitrate = None;
+        self.status = ChannelStatus::Waiting;
+        self.last_adapt = Some(std::time::Instant::now());
+        Some(self.device.clone())
+    }
+
+    /// Finish rising-edge re-probe: relaunch locked to probed mode (or keep previous).
+    pub fn complete_format_reprobe(&mut self, probed: Option<InputFormat>) -> Result<()> {
+        let mode = match &probed {
+            Some(fmt) if fmt.width >= 1280 => {
+                tracing::info!(
+                    channel = self.id,
+                    format = %fmt.summary(),
+                    previous = %self.locked_mode,
+                    "re-probed input format after signal return"
+                );
+                self.detected = Some(fmt.clone());
+                fmt.mode.clone()
+            }
+            Some(fmt) => {
+                tracing::warn!(
+                    channel = self.id,
+                    format = %fmt.summary(),
+                    "re-probe returned weak caps — keeping locked mode"
+                );
+                self.locked_mode.clone()
+            }
+            None => {
+                tracing::warn!(
+                    channel = self.id,
+                    keeping = %self.locked_mode,
+                    "re-probe failed after signal return — relaunching previous mode"
+                );
+                self.locked_mode.clone()
+            }
+        };
+        self.last_adapt = Some(std::time::Instant::now());
+        self.locked_mode = mode.clone();
+        self.relaunch_preserving_branches(&mode)
     }
 
     /// If `level` goes quiet (no posts), decay meters so silence / stalled audio

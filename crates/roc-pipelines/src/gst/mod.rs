@@ -686,6 +686,57 @@ impl GstBackend {
         self.max_nvenc = limit;
         self
     }
+
+    /// Rising-edge format check: release DeckLink → `probe_input_format` (mode=auto)
+    /// outside `gst_op` → relaunch locked to the probed mode.
+    fn drain_pending_format_reprobes(&self) {
+        use crate::signal_format::probe_input_format;
+
+        loop {
+            let job = {
+                let _gst = self.gst_op.lock();
+                let mut map = self.channels.lock();
+                let id = map.iter().find_map(|(id, p)| {
+                    if p.pending_format_reprobe() {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                });
+                match id {
+                    Some(id) => map
+                        .get_mut(&id)
+                        .and_then(|pipe| pipe.begin_format_reprobe().map(|device| (id, device))),
+                    None => None,
+                }
+            };
+            let Some((id, device)) = job else {
+                break;
+            };
+            let probed = match probe_input_format(&device, 3000) {
+                Ok(fmt) => Some(fmt),
+                Err(err) => {
+                    tracing::warn!(
+                        channel = id,
+                        error = %err,
+                        "format re-probe after signal return failed"
+                    );
+                    None
+                }
+            };
+            let _gst = self.gst_op.lock();
+            let mut map = self.channels.lock();
+            if let Some(pipe) = map.get_mut(&id) {
+                if let Err(err) = pipe.complete_format_reprobe(probed) {
+                    tracing::error!(
+                        channel = id,
+                        error = %err,
+                        "relaunch after format re-probe failed"
+                    );
+                }
+            }
+        }
+    }
 }
 
 impl PipelineBackend for GstBackend {
@@ -1106,44 +1157,90 @@ impl PipelineBackend for GstBackend {
 
     fn channel_snapshot(&self, channel_id: u32) -> Result<ChannelSnapshot> {
         // Same lock order as mutations: gst_op → channels (poll_bus may adapt/relaunch).
-        let _gst = self.gst_op.lock();
-        let mut map = self.channels.lock();
-        let pipe = map
-            .get_mut(&channel_id)
-            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
-        pipe.poll_bus();
-        Ok(pipe.snapshot(self.nvenc_used.load(Ordering::SeqCst)))
+        let snap = {
+            let _gst = self.gst_op.lock();
+            let mut map = self.channels.lock();
+            let pipe = map
+                .get_mut(&channel_id)
+                .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+            pipe.poll_bus();
+            let pending = pipe.pending_format_reprobe();
+            let snap = pipe.snapshot(self.nvenc_used.load(Ordering::SeqCst));
+            (snap, pending)
+        };
+        if snap.1 {
+            self.drain_pending_format_reprobes();
+            let _gst = self.gst_op.lock();
+            let mut map = self.channels.lock();
+            let pipe = map
+                .get_mut(&channel_id)
+                .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+            return Ok(pipe.snapshot(self.nvenc_used.load(Ordering::SeqCst)));
+        }
+        Ok(snap.0)
     }
 
     fn list_channels(&self) -> Vec<ChannelSnapshot> {
-        let _gst = self.gst_op.lock();
-        let mut map = self.channels.lock();
-        let used = self.nvenc_used.load(Ordering::SeqCst);
-        let mut ids: Vec<u32> = map.keys().copied().collect();
-        ids.sort_unstable();
-        ids.into_iter()
-            .filter_map(|id| {
-                let p = map.get_mut(&id)?;
-                p.poll_bus();
-                Some(p.snapshot(used))
-            })
-            .collect()
+        let mut pending = false;
+        let snaps = {
+            let _gst = self.gst_op.lock();
+            let mut map = self.channels.lock();
+            let used = self.nvenc_used.load(Ordering::SeqCst);
+            let mut ids: Vec<u32> = map.keys().copied().collect();
+            ids.sort_unstable();
+            ids.into_iter()
+                .filter_map(|id| {
+                    let p = map.get_mut(&id)?;
+                    p.poll_bus();
+                    if p.pending_format_reprobe() {
+                        pending = true;
+                    }
+                    Some(p.snapshot(used))
+                })
+                .collect::<Vec<_>>()
+        };
+        if pending {
+            self.drain_pending_format_reprobes();
+            let _gst = self.gst_op.lock();
+            let mut map = self.channels.lock();
+            let used = self.nvenc_used.load(Ordering::SeqCst);
+            let mut ids: Vec<u32> = map.keys().copied().collect();
+            ids.sort_unstable();
+            return ids
+                .into_iter()
+                .filter_map(|id| map.get(&id).map(|p| p.snapshot(used)))
+                .collect();
+        }
+        snaps
     }
 
     fn list_channel_meters(&self) -> Vec<ChannelSnapshot> {
         // Meter tick: peaks/status only — never adapt/relaunch under gst_op.
-        let _gst = self.gst_op.lock();
-        let mut map = self.channels.lock();
-        let used = self.nvenc_used.load(Ordering::SeqCst);
-        let mut ids: Vec<u32> = map.keys().copied().collect();
-        ids.sort_unstable();
-        ids.into_iter()
-            .filter_map(|id| {
-                let p = map.get_mut(&id)?;
-                p.poll_bus_light();
-                Some(p.snapshot(used))
-            })
-            .collect()
+        // Rising-edge re-probe is flagged here; drained after the lock is released.
+        let (snaps, pending) = {
+            let _gst = self.gst_op.lock();
+            let mut map = self.channels.lock();
+            let used = self.nvenc_used.load(Ordering::SeqCst);
+            let mut ids: Vec<u32> = map.keys().copied().collect();
+            ids.sort_unstable();
+            let mut pending = false;
+            let snaps = ids
+                .into_iter()
+                .filter_map(|id| {
+                    let p = map.get_mut(&id)?;
+                    p.poll_bus_light();
+                    if p.pending_format_reprobe() {
+                        pending = true;
+                    }
+                    Some(p.snapshot(used))
+                })
+                .collect::<Vec<_>>();
+            (snaps, pending)
+        };
+        if pending {
+            self.drain_pending_format_reprobes();
+        }
+        snaps
     }
 
     fn nvenc_used(&self) -> usize {
