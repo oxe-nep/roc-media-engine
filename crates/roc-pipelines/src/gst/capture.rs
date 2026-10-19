@@ -2463,7 +2463,7 @@ impl ChannelPipeline {
                     self.had_signal_lock = true;
                     self.last_good_mode = Some(self.locked_mode.clone());
                 }
-                // After a prior lock + real outage, re-probe with mode=auto so i↔p
+                // After a prior lock + outage, re-probe with mode=auto so i↔p
                 // (and other mode changes) are detected — locked caps alone lie.
                 if rising
                     && had_lock_before
@@ -2471,10 +2471,10 @@ impl ChannelPipeline {
                     && is_auto_mode(&self.configured_mode)
                     && !self.proxy_recording
                     && !self.hq_recording
-                    && outage >= std::time::Duration::from_secs(1)
+                    && outage >= std::time::Duration::from_millis(500)
                     && self
                         .last_adapt
-                        .map(|t| t.elapsed() > std::time::Duration::from_secs(8))
+                        .map(|t| t.elapsed() > std::time::Duration::from_secs(3))
                         .unwrap_or(true)
                 {
                     self.pending_format_reprobe = true;
@@ -2627,14 +2627,16 @@ impl ChannelPipeline {
         self.apply_signal_status(playing);
         self.decay_stale_peaks();
 
-        // p↔i scan recovery (auto only), when Waiting + no DeckLink signal:
-        // 1) Cold start (!had_signal_lock): try alternate once after ~12s.
+        // p↔i scan recovery (auto only), when Waiting + no DeckLink signal.
+        // Rising-edge re-probe handles the common "signal came back" path; these
+        // flips are only the fallback when signal stays false (wrong scan).
+        // 1) Cold start: try alternate once after ~4s.
         // 2) After lock, short blinds: stay on last_good_mode (no flip).
-        // 3) After lock, long outage (~18s): try alternate once (real format change).
-        // 4) If alternate still has no signal (~8s): revert to last_good_mode.
+        // 3) After lock, ~4s still dark: try alternate once.
+        // 4) If alternate still dark (~3s): revert to last_good_mode.
         let adapt_cool = self
             .last_adapt
-            .map(|t| t.elapsed() > std::time::Duration::from_secs(8))
+            .map(|t| t.elapsed() > std::time::Duration::from_secs(3))
             .unwrap_or(true);
         let no_signal_for = self.no_signal_since.map(|t| t.elapsed());
         let flip_to = if playing
@@ -2656,21 +2658,25 @@ impl ChannelPipeline {
             };
             let flip_cool = self
                 .last_signal_flip
-                .map(|t| t.elapsed() > std::time::Duration::from_secs(12))
+                .map(|t| t.elapsed() > std::time::Duration::from_secs(4))
                 .unwrap_or(true);
-            if !self.had_signal_lock && self.signal_flip_attempts < 1 && flip_cool {
+            if !self.had_signal_lock
+                && self.signal_flip_attempts < 1
+                && flip_cool
+                && no_signal_for.is_some_and(|d| d > std::time::Duration::from_secs(4))
+            {
                 alternate(&self.locked_mode).map(|m| (m.to_string(), "cold-start"))
             } else if self.had_signal_lock
                 && self.post_lock_flip_attempts == 0
                 && flip_cool
-                && no_signal_for.is_some_and(|d| d > std::time::Duration::from_secs(18))
+                && no_signal_for.is_some_and(|d| d > std::time::Duration::from_secs(4))
             {
                 alternate(&self.locked_mode).map(|m| (m.to_string(), "format-change"))
             } else if self.had_signal_lock
                 && self.post_lock_flip_attempts == 1
                 && self
                     .last_signal_flip
-                    .map(|t| t.elapsed() > std::time::Duration::from_secs(8))
+                    .map(|t| t.elapsed() > std::time::Duration::from_secs(3))
                     .unwrap_or(false)
             {
                 self.last_good_mode

@@ -713,7 +713,7 @@ impl GstBackend {
             let Some((id, device)) = job else {
                 break;
             };
-            let probed = match probe_input_format(&device, 3000) {
+            let probed = match probe_input_format(&device, 2000) {
                 Ok(fmt) => Some(fmt),
                 Err(err) => {
                     tracing::warn!(
@@ -1202,13 +1202,16 @@ impl PipelineBackend for GstBackend {
         if pending {
             self.drain_pending_format_reprobes();
             let _gst = self.gst_op.lock();
-            let mut map = self.channels.lock();
+            let map = self.channels.lock();
             let used = self.nvenc_used.load(Ordering::SeqCst);
             let mut ids: Vec<u32> = map.keys().copied().collect();
             ids.sort_unstable();
             return ids
                 .into_iter()
-                .filter_map(|id| map.get(&id).map(|p| p.snapshot(used)))
+                .filter_map(|id| {
+                    let p = map.get(&id)?;
+                    Some(p.snapshot(used))
+                })
                 .collect();
         }
         snaps
