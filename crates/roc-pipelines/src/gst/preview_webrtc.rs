@@ -1,6 +1,9 @@
 //! On-demand WebRTC encode preview (sendonly) via `webrtcbin`.
 //!
-//! Video/audio use standing valve taps (`wpv_vv`, `wpv_avN`).
+//! Video taps progressive tee valve `wpv_vv` (raw from `t`, not program encode).
+//! On attach we spin up a dedicated H.264 encode (x264 zerolatency) at source
+//! geometry so preview works with HEVC proxy without a second NVENC session.
+//! Audio uses standing AAC valves `wpv_avN`.
 //!
 //! Lifecycle policy:
 //! - **Close** → [`Self::park`] (valves `drop=true`, bin stays linked so card meters live)
@@ -42,7 +45,7 @@ impl WebRtcPreview {
             bail!("listen pair must be 0..=3");
         }
         if pipeline.by_name("wpv_vv").is_none() {
-            bail!("wpv_vv missing — capture encode tee has no WebRTC video tap");
+            bail!("wpv_vv missing — capture has no WebRTC video tap");
         }
         if pipeline.by_name(&format!("wpv_av{pair}")).is_none() {
             bail!("wpv_av{pair} missing — is MPEG-TS egress / AAC encode enabled?");
@@ -51,8 +54,14 @@ impl WebRtcPreview {
         let session_id = uuid::Uuid::new_v4().to_string();
         let tag = format!("wpv{channel}p{pair}");
 
+        // Dedicated preview encode from raw progressive frames at source size.
+        // x264 avoids a second NVENC session when all 8 channels already use the GPU.
         let desc = format!(
             "queue name=q_v_{tag} max-size-buffers=4 leaky=downstream ! \
+             videoconvert ! video/x-raw,format=I420 ! \
+             x264enc name=wpv_enc_{tag} tune=zerolatency speed-preset=ultrafast \
+             bitrate=8000 key-int-max=50 bframes=0 ! \
+             video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline ! \
              h264parse config-interval=-1 ! \
              rtph264pay name=vpay_{tag} pt=96 config-interval=-1 aggregate-mode=zero-latency ! \
              application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! \
@@ -172,7 +181,7 @@ impl WebRtcPreview {
             channel,
             pair,
             session = %preview.session_id,
-            "attached webrtc preview bin (offer pending)"
+            "attached webrtc preview bin with dedicated H.264 encode (offer pending)"
         );
         Ok(preview)
     }
@@ -318,7 +327,12 @@ fn wire_valve(pipeline: &Pipeline, valve_name: &str, sink_name: &str, ghost: &Pa
     Ok(())
 }
 
-fn restore_valve(pipeline: &Pipeline, valve_name: &str, sink_name: &str, ghost: &Pad) -> Result<()> {
+fn restore_valve(
+    pipeline: &Pipeline,
+    valve_name: &str,
+    sink_name: &str,
+    ghost: &Pad,
+) -> Result<()> {
     let valve = pipeline
         .by_name(valve_name)
         .ok_or_else(|| anyhow!("{valve_name} missing"))?;
@@ -330,22 +344,15 @@ fn restore_valve(pipeline: &Pipeline, valve_name: &str, sink_name: &str, ghost: 
         .static_pad("src")
         .ok_or_else(|| anyhow!("{valve_name} src"))?;
     if let Some(peer) = src.peer() {
-        let parent = peer
-            .parent_element()
-            .map(|e| e.name().to_string())
-            .unwrap_or_default();
-        if parent == sink_name {
-            let _ = fakesink.sync_state_with_parent();
-            return Ok(());
+        if peer == *ghost {
+            let _ = src.unlink(ghost);
         }
-        let _ = src.unlink(&peer);
-        let _ = ghost;
     }
-    let fs_sink = fakesink
+    let sink = fakesink
         .static_pad("sink")
         .ok_or_else(|| anyhow!("{sink_name} sink"))?;
     if src.peer().is_none() {
-        src.link(&fs_sink)
+        src.link(&sink)
             .with_context(|| format!("relink {valve_name} → {sink_name}"))?;
     }
     let _ = fakesink.sync_state_with_parent();

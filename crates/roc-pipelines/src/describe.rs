@@ -500,10 +500,13 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
     let bs = family.byte_stream_caps();
     let has_udp = opts.udp_egress.is_some();
     let has_ts_egress = has_udp || opts.srt_url.is_some();
-    let srt_appsink = "queue name=q_srt max-size-buffers=8 max-size-time=0 max-size-bytes=0 \
-         leaky=downstream ! \
+    // Deep non-leaky queue ahead of appsink. Keep drop=true so idle channels
+    // (no SRT consumer) don't stall/OOM; when SRT is armed the pull path
+    // drains promptly and the larger queue absorbs short MediaMTX stalls.
+    let srt_appsink = "queue name=q_srt max-size-buffers=120 max-size-time=500000000 \
+         max-size-bytes=0 ! \
          appsink name=srt_in emit-signals=true sync=false async=false \
-         max-buffers=8 drop=true";
+         max-buffers=30 drop=true";
     match &opts.udp_egress {
         Some(udp) => {
             let (host, port) = udp_host_port(udp);
@@ -522,9 +525,10 @@ pub fn build_capture_encode_once_launch(opts: &CaptureLaunchOpts) -> String {
         }
         None => {}
     }
-    // Standing WebRTC video tap (valve rewired on preview; never release tee pads).
+    // Standing WebRTC video tap from progressive tee `t` (not program encode).
+    // Preview attaches an on-demand H.264 encode here so HEVC proxy still works.
     out_branches.push(
-        "e. ! queue name=wpv_vq max-size-buffers=4 leaky=downstream ! \
+        "t. ! queue name=wpv_vq max-size-buffers=2 leaky=downstream ! \
          valve name=wpv_vv drop=true ! \
          fakesink name=wpv_vs sync=false async=false"
             .into(),
@@ -837,10 +841,13 @@ pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
         false,
     );
 
-    let srt_appsink = "queue name=q_srt max-size-buffers=8 max-size-time=0 max-size-bytes=0 \
-         leaky=downstream ! \
+    // Deep non-leaky queue ahead of appsink. Keep drop=true so idle channels
+    // (no SRT consumer) don't stall/OOM; when SRT is armed the pull path
+    // drains promptly and the larger queue absorbs short MediaMTX stalls.
+    let srt_appsink = "queue name=q_srt max-size-buffers=120 max-size-time=500000000 \
+         max-size-bytes=0 ! \
          appsink name=srt_in emit-signals=true sync=false async=false \
-         max-buffers=8 drop=true";
+         max-buffers=30 drop=true";
 
     // OUT: same geometry/interlace as IN. Avoid videorate on interlaced (destroys fields).
     let out_branch = if interlaced {
@@ -860,20 +867,19 @@ pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
         )
     };
 
-    // Proxy encode (+ WebRTC/SRT): deinterlace so NVENC/browsers get progressive.
-    let enc_prefix = if interlaced {
-        "v. ! queue ! deinterlace mode=auto ! "
+    // Progressive tee `t` for program encode + on-demand WebRTC H.264 preview.
+    let prog_tee = if interlaced {
+        "v. ! queue ! deinterlace mode=auto ! tee name=t"
     } else {
-        "v. ! queue ! "
+        "v. ! queue ! tee name=t"
     };
 
     let thumb = if let Some(dir) = &opts.hls_dir {
         let _ = std::fs::create_dir_all(dir);
         let loc = format!("{dir}/thumb%05d.jpg");
-        // Thumb only: deinterlace so JPEG is progressive 1 fps.
         format!(
-            "v. ! queue max-size-buffers=2 leaky=downstream ! \
-               deinterlace mode=auto ! videoconvert ! videoscale ! videorate skip-to-first=true ! \
+            "t. ! queue max-size-buffers=2 leaky=downstream ! \
+               videoconvert ! videoscale ! videorate skip-to-first=true ! \
                video/x-raw,width=640,height=360,framerate=1/1 ! \
                jpegenc quality=80 idct-method=float ! \
                multifilesink location=\"{loc}\" max-files=1 next-file=buffer \
@@ -887,10 +893,11 @@ pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
         "{src} ! \
            videoconvert ! {overlay} ! tee name=v \
          {out_branch} \
-         {enc_prefix}{enc} ! tee name=e \
+         {prog_tee} \
+         t. ! queue ! {enc} ! tee name=e \
          e. ! queue ! {parse} config-interval=-1 ! {bs} ! \
            mpegtsmux name=tsmux alignment=7 ! {srt_appsink} \
-         e. ! queue name=wpv_vq max-size-buffers=4 leaky=downstream ! \
+         t. ! queue name=wpv_vq max-size-buffers=2 leaky=downstream ! \
            valve name=wpv_vv drop=true ! \
            fakesink name=wpv_vs sync=false async=false \
          decklinkaudiosrc device-number={in_num} channels=8 ! \
@@ -1003,6 +1010,12 @@ mod tests {
         assert!(!with_thumb.contains("hlssink2"));
         assert!(with_thumb.contains("appsink name=srt_in"));
         assert!(with_thumb.contains("interval=33000000"));
+        // WebRTC taps progressive `t`, not program encode `e` (HEVC-safe).
+        assert!(
+            with_thumb.contains("t. ! queue name=wpv_vq"),
+            "wpv must tap tee t: {with_thumb}"
+        );
+        assert!(!with_thumb.contains("e. ! queue name=wpv_vq"));
         // UDP-only graphs still expose srt_in so SRT can hot-attach without relaunch.
         let udp_only = build_capture_encode_once_launch(&CaptureLaunchOpts {
             device: "DeckLink IP 100G (1)".into(),
