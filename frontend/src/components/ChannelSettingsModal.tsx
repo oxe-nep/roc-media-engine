@@ -24,6 +24,8 @@ import {
 } from "@/lib/api";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { formatPresetLabel, isProresCodec, isProxyPreset, isRecPreset } from "@/lib/presetRoles";
+import { isTcWorkflow } from "@/lib/workflow";
+import { useWorkflows } from "@/hooks/useWorkflows";
 
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
@@ -66,6 +68,7 @@ export default function ChannelSettingsModal({
   const [category, setCategory] = useState("_unsorted");
   const [proxyPreset, setProxyPreset] = useState("");
   const [recPreset, setRecPreset] = useState("");
+  const { workflows } = useWorkflows();
   const [busy, setBusy] = useState(false);
   const [srtBusy, setSrtBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -252,9 +255,14 @@ export default function ChannelSettingsModal({
       }
 
       // Name / category / HQ preset are metadata only — never bounce capture.
-      // Proxy preset: backend relaunches when capture is already running.
-      // If capture is off and proxy changed, start once so the new preset is live.
-      if (proxyChanged && !captureOn) {
+      // Proxy preset: backend relaunches capture when live, or TC burn-in when
+      // insert workflow owns the channel. Only auto-start encode in pair mode.
+      if (
+        proxyChanged &&
+        !captureOn &&
+        stream &&
+        !isTcWorkflow(workflows, stream.id)
+      ) {
         await startStream(stream.id);
       }
 

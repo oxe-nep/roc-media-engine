@@ -174,7 +174,8 @@ fn relaunch_tc_for_mode(rt: &mut TcLoopRuntime, channel_id: u32, new_mode: &str)
         from = %rt.locked_mode,
         to = %new_mode,
         flip,
-        "TC input format adapt — relaunching"
+        codec = %rt.launch_opts.preset.video_codec,
+        "TC relaunching"
     );
 
     dispose_tc_webrtc(rt);
@@ -772,11 +773,42 @@ impl PipelineBackend for GstBackend {
         if let Some(ch) = self.configs.lock().get_mut(&channel_id) {
             ch.encode_preset = Some(preset_id.to_string());
         }
-        let mut map = self.channels.lock();
-        let pipe = map
-            .get_mut(&channel_id)
-            .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
-        pipe.apply_encode_preset(preset_id, preset)
+        {
+            let mut map = self.channels.lock();
+            let pipe = map
+                .get_mut(&channel_id)
+                .ok_or_else(|| anyhow!("channel {channel_id} not registered"))?;
+            // Capture is usually Stopped during TC; this still stores the preset
+            // for when the channel returns to pair/encode workflow.
+            pipe.apply_encode_preset(preset_id, preset)?;
+        }
+
+        // TC burn-in owns its own NVENC proxy graph — relaunch so HEVC/H.264
+        // (and bitrate) changes take effect while insert is live.
+        let mut tc = self.tc_loops.lock();
+        if let Some(rt) = tc.get_mut(&channel_id) {
+            if rt.pipeline.is_some()
+                && matches!(
+                    rt.status,
+                    TcLoopStatus::Running | TcLoopStatus::Restarting
+                )
+            {
+                tracing::info!(
+                    channel = channel_id,
+                    preset_id,
+                    codec = %preset.video_codec,
+                    "encode preset changed — relaunching TC burn-in"
+                );
+                rt.launch_opts.preset = preset.clone();
+                let mode = if rt.locked_mode.is_empty() {
+                    rt.launch_opts.input_mode.clone()
+                } else {
+                    rt.locked_mode.clone()
+                };
+                return relaunch_tc_for_mode(rt, channel_id, &mode);
+            }
+        }
+        Ok(())
     }
 
     fn apply_record_preset(
