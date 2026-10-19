@@ -823,24 +823,15 @@ pub struct ChannelPipeline {
     hq_branch: Option<Branch>,
     /// On-demand WebRTC encode preview (modal). At most one per channel.
     webrtc_preview: Option<crate::gst::preview_webrtc::WebRtcPreview>,
-    /// Avoid relaunch storms: last adapt attempt.
+    /// Avoid relaunch storms: last adapt / re-probe attempt.
     last_adapt: Option<std::time::Instant>,
-    /// Last p↔i mode flip while waiting for signal (auto only).
-    last_signal_flip: Option<std::time::Instant>,
-    /// How many p↔i flips while waiting since last Running (cap to avoid relaunch storms).
-    signal_flip_attempts: u8,
-    /// True after DeckLink `signal=true` while Playing. Suppresses short-blind
-    /// p↔i flips so a router "blind" does not relock the wrong scan (i50→p50).
+    /// True after DeckLink `signal=true` while Playing (enables rising-edge re-probe).
     had_signal_lock: bool,
-    /// Mode that last had Running + signal — used to revert a failed format probe.
-    last_good_mode: Option<String>,
-    /// When Waiting + no DeckLink signal began (for post-lock format-change probe).
+    /// When Waiting + no DeckLink signal began.
     no_signal_since: Option<std::time::Instant>,
-    /// After lock, per outage: 0 = not tried, 1 = tried alternate, 2 = reverted / done.
-    post_lock_flip_attempts: u8,
     /// Last observed DeckLink `signal` (for rising-edge format re-probe).
     last_decklink_signal: Option<bool>,
-    /// Set when signal returns after a real outage — engine re-probes with mode=auto.
+    /// Engine should release device and `probe_input_format` (mode=auto).
     pending_format_reprobe: bool,
     /// Format-adapt hysteresis: mode must stay stable before relaunch.
     pending_adapt_mode: Option<(String, std::time::Instant)>,
@@ -978,12 +969,8 @@ impl ChannelPipeline {
             hq_branch: None,
             webrtc_preview: None,
             last_adapt: None,
-            last_signal_flip: None,
-            signal_flip_attempts: 0,
             had_signal_lock: false,
-            last_good_mode: None,
             no_signal_since: None,
-            post_lock_flip_attempts: 0,
             last_decklink_signal: None,
             pending_format_reprobe: false,
             pending_adapt_mode: None,
@@ -1268,13 +1255,9 @@ impl ChannelPipeline {
         self.encode_bitrate.reset();
         self.srt_bitrate = None;
         self.had_signal_lock = false;
-        self.last_good_mode = None;
         self.no_signal_since = None;
-        self.post_lock_flip_attempts = 0;
         self.last_decklink_signal = None;
         self.pending_format_reprobe = false;
-        self.signal_flip_attempts = 0;
-        self.last_signal_flip = None;
         Ok(())
     }
 
@@ -2443,10 +2426,32 @@ impl ChannelPipeline {
                 }
                 self.last_decklink_signal = Some(false);
                 self.status = ChannelStatus::Waiting;
+                // Wrong locked scan often keeps signal=false forever — rising-edge
+                // never fires. Same mode=auto re-probe as on signal return.
+                let adapt_cool = self
+                    .last_adapt
+                    .map(|t| t.elapsed() > std::time::Duration::from_secs(3))
+                    .unwrap_or(true);
+                let dark_long = self
+                    .no_signal_since
+                    .is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(3));
+                if is_auto_mode(&self.configured_mode)
+                    && !self.pending_format_reprobe
+                    && !self.proxy_recording
+                    && !self.hq_recording
+                    && adapt_cool
+                    && dark_long
+                {
+                    tracing::info!(
+                        channel = self.id,
+                        locked = %self.locked_mode,
+                        "no signal — scheduling format re-probe"
+                    );
+                    self.pending_format_reprobe = true;
+                    self.pending_adapt_mode = None;
+                }
             }
             Some(true) => {
-                // Only clear flip budget after a real signal lock, not during relaunch
-                // where `signal` can flicker and reset the counter forever.
                 let relaunching = self
                     .last_adapt
                     .map(|t| t.elapsed() < std::time::Duration::from_secs(4))
@@ -2458,13 +2463,10 @@ impl ChannelPipeline {
                     .unwrap_or(std::time::Duration::ZERO);
                 let had_lock_before = self.had_signal_lock;
                 if !relaunching {
-                    self.signal_flip_attempts = 0;
-                    self.post_lock_flip_attempts = 0;
                     self.had_signal_lock = true;
-                    self.last_good_mode = Some(self.locked_mode.clone());
                 }
-                // After a prior lock + outage, re-probe with mode=auto so i↔p
-                // (and other mode changes) are detected — locked caps alone lie.
+                // Signal returned after an outage — re-probe with mode=auto.
+                // Locked caps cannot reliably report a scan/format change.
                 if rising
                     && had_lock_before
                     && !relaunching
@@ -2626,89 +2628,6 @@ impl ChannelPipeline {
         };
         self.apply_signal_status(playing);
         self.decay_stale_peaks();
-
-        // p↔i scan recovery (auto only), when Waiting + no DeckLink signal.
-        // Rising-edge re-probe handles the common "signal came back" path; these
-        // flips are only the fallback when signal stays false (wrong scan).
-        // 1) Cold start: try alternate once after ~4s.
-        // 2) After lock, short blinds: stay on last_good_mode (no flip).
-        // 3) After lock, ~4s still dark: try alternate once.
-        // 4) If alternate still dark (~3s): revert to last_good_mode.
-        let adapt_cool = self
-            .last_adapt
-            .map(|t| t.elapsed() > std::time::Duration::from_secs(3))
-            .unwrap_or(true);
-        let no_signal_for = self.no_signal_since.map(|t| t.elapsed());
-        let flip_to = if playing
-            && is_auto_mode(&self.configured_mode)
-            && self.status == ChannelStatus::Waiting
-            && self.decklink_signal_present() == Some(false)
-            && adapt_cool
-        {
-            let alternate = |mode: &str| -> Option<&'static str> {
-                match mode {
-                    "1080p50" => Some("1080i50"),
-                    "1080i50" => Some("1080p50"),
-                    "1080p5994" => Some("1080i5994"),
-                    "1080i5994" => Some("1080p5994"),
-                    "1080p60" => Some("1080i60"),
-                    "1080i60" => Some("1080p60"),
-                    _ => None,
-                }
-            };
-            let flip_cool = self
-                .last_signal_flip
-                .map(|t| t.elapsed() > std::time::Duration::from_secs(4))
-                .unwrap_or(true);
-            if !self.had_signal_lock
-                && self.signal_flip_attempts < 1
-                && flip_cool
-                && no_signal_for.is_some_and(|d| d > std::time::Duration::from_secs(4))
-            {
-                alternate(&self.locked_mode).map(|m| (m.to_string(), "cold-start"))
-            } else if self.had_signal_lock
-                && self.post_lock_flip_attempts == 0
-                && flip_cool
-                && no_signal_for.is_some_and(|d| d > std::time::Duration::from_secs(4))
-            {
-                alternate(&self.locked_mode).map(|m| (m.to_string(), "format-change"))
-            } else if self.had_signal_lock
-                && self.post_lock_flip_attempts == 1
-                && self
-                    .last_signal_flip
-                    .map(|t| t.elapsed() > std::time::Duration::from_secs(3))
-                    .unwrap_or(false)
-            {
-                self.last_good_mode
-                    .as_ref()
-                    .filter(|m| m.as_str() != self.locked_mode.as_str())
-                    .cloned()
-                    .map(|m| (m, "revert"))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        if let Some((mode, reason)) = flip_to {
-            tracing::info!(
-                channel = self.id,
-                from = %self.locked_mode,
-                to = %mode,
-                reason,
-                "no signal — scan mode recovery"
-            );
-            self.last_signal_flip = Some(std::time::Instant::now());
-            if reason == "cold-start" {
-                self.signal_flip_attempts = self.signal_flip_attempts.saturating_add(1);
-            } else {
-                self.post_lock_flip_attempts = self.post_lock_flip_attempts.saturating_add(1);
-            }
-            self.pending_adapt_mode = None;
-            // Keep outage clock running across the probe so revert can arm on time.
-            let _ = self.adapt_to_mode(&mode);
-            return;
-        }
 
         let adapt_to = {
             if let Some(fmt) = self.read_live_format() {
