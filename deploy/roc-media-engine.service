@@ -10,6 +10,8 @@ User=root
 Group=root
 WorkingDirectory=/opt/applications/roc-media-engine
 Environment=RUST_LOG=info
+# API_KEY (required when bound to 0.0.0.0) and other overrides; mode 600, root-owned.
+EnvironmentFile=-/etc/roc-media-engine/env
 ExecStart=/opt/applications/roc-media-engine/target/release/roc-media-engine --config /opt/applications/roc-media-engine/config.yaml
 # Build with: cargo build --release -p roc-engine --features gst
 Restart=on-failure
