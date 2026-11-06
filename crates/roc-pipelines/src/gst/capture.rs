@@ -833,6 +833,9 @@ pub struct ChannelPipeline {
     last_decklink_signal: Option<bool>,
     /// Engine should release device and `probe_input_format` (mode=auto).
     pending_format_reprobe: bool,
+    /// Dark-path (stuck no-signal) re-probe attempts since last `signal=true`.
+    /// Caps the forever-loop that OOM'd the host when auto channels sit dark.
+    dark_reprobe_attempts: u32,
     /// Format-adapt hysteresis: mode must stay stable before relaunch.
     pending_adapt_mode: Option<(String, std::time::Instant)>,
     /// Peak dBFS per discrete channel (8). Updated from `level` bus messages.
@@ -973,6 +976,7 @@ impl ChannelPipeline {
             no_signal_since: None,
             last_decklink_signal: None,
             pending_format_reprobe: false,
+            dark_reprobe_attempts: 0,
             pending_adapt_mode: None,
             audio_peaks: [-90.0; 8],
             last_level_at: None,
@@ -1258,6 +1262,7 @@ impl ChannelPipeline {
         self.no_signal_since = None;
         self.last_decklink_signal = None;
         self.pending_format_reprobe = false;
+        self.dark_reprobe_attempts = 0;
         Ok(())
     }
 
@@ -2426,16 +2431,27 @@ impl ChannelPipeline {
                 }
                 self.last_decklink_signal = Some(false);
                 self.status = ChannelStatus::Waiting;
-                // Wrong locked scan often keeps signal=false forever — rising-edge
-                // never fires. Same mode=auto re-probe as on signal return.
+                // Wrong locked scan can keep signal=false forever — rising-edge
+                // never fires. Re-probe a few times with backoff, then stop.
+                // Never thrash channels that never locked (dark autostart) — that
+                // loop OOM-killed the capture host (open/close + NVENC relaunch).
+                const MAX_DARK_REPROBES: u32 = 2;
+                let backoff_secs: u64 = match self.dark_reprobe_attempts {
+                    0 => 8,
+                    1 => 45,
+                    _ => 0,
+                };
                 let adapt_cool = self
                     .last_adapt
-                    .map(|t| t.elapsed() > std::time::Duration::from_secs(3))
+                    .map(|t| t.elapsed() > std::time::Duration::from_secs(backoff_secs.max(8)))
                     .unwrap_or(true);
-                let dark_long = self
-                    .no_signal_since
-                    .is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(3));
-                if is_auto_mode(&self.configured_mode)
+                let dark_long = backoff_secs > 0
+                    && self
+                        .no_signal_since
+                        .is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(backoff_secs));
+                if self.had_signal_lock
+                    && self.dark_reprobe_attempts < MAX_DARK_REPROBES
+                    && is_auto_mode(&self.configured_mode)
                     && !self.pending_format_reprobe
                     && !self.proxy_recording
                     && !self.hq_recording
@@ -2445,6 +2461,7 @@ impl ChannelPipeline {
                     tracing::info!(
                         channel = self.id,
                         locked = %self.locked_mode,
+                        attempt = self.dark_reprobe_attempts + 1,
                         "no signal — scheduling format re-probe"
                     );
                     self.pending_format_reprobe = true;
@@ -2465,6 +2482,7 @@ impl ChannelPipeline {
                 if !relaunching {
                     self.had_signal_lock = true;
                 }
+                self.dark_reprobe_attempts = 0;
                 // Signal returned after an outage — re-probe with mode=auto.
                 // Locked caps cannot reliably report a scan/format change.
                 if rising
@@ -2516,10 +2534,14 @@ impl ChannelPipeline {
         if !is_auto_mode(&self.configured_mode) {
             return None;
         }
+        // Count dark-path attempts (had lock, then stuck no-signal). Rising-edge
+        // re-probes also pass through here; incrementing is harmless and caps storms.
+        self.dark_reprobe_attempts = self.dark_reprobe_attempts.saturating_add(1);
         tracing::info!(
             channel = self.id,
             locked = %self.locked_mode,
-            "signal returned — releasing device for format re-probe"
+            attempt = self.dark_reprobe_attempts,
+            "releasing device for format re-probe"
         );
         self.dispose_webrtc_preview();
         let _ = self.detach_recording(RecordingRole::Proxy, false);

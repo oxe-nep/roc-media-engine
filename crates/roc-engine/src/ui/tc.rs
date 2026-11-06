@@ -96,7 +96,9 @@ pub fn build_launch_opts(
     }
 
     // Prefer live probe so OUT/SRT match the actual IN (locked_mode is cleared when
-    // encode stops for exclusive TC). Fall back to last lock / config / 1080i50.
+    // encode stops for exclusive TC). Fall back to last lock / config / 1080p50
+    // (facility default — 1080i50 fallback previously left OUT black on p50 routers
+    // when DeckLink IP probe timed out).
     let input_mode = match roc_pipelines::probe_input_format(&ch.device, 4000) {
         Ok(fmt) => {
             tracing::info!(
@@ -112,12 +114,14 @@ pub fn build_launch_opts(
                 .as_ref()
                 .and_then(|s| s.locked_mode.clone())
                 .filter(|m| !m.is_empty() && m != "auto")
+                // Stale i50 lock after a failed probe is worse than facility p50.
+                .filter(|m| m != "1080i50")
                 .or_else(|| {
                     ch.mode
                         .clone()
                         .filter(|m| !m.is_empty() && !m.eq_ignore_ascii_case("auto"))
                 })
-                .unwrap_or_else(|| "1080i50".into());
+                .unwrap_or_else(|| "1080p50".into());
             tracing::warn!(
                 channel = id,
                 error = %err,

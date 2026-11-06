@@ -407,10 +407,31 @@ fn gst_mode_is_interlaced(mode: &str) -> bool {
 }
 
 fn decklink_video_sink(device: &str, mode: &str) -> String {
+    // Default video-format is 8bit-yuv (UYVY only). 10bit-yuv unlocks v210 for
+    // ST 2110-20 facility TX; without it the sink rejects format=v210 at link time.
     format!(
-        "decklinkvideosink device-number={} mode={} profile=one-sub-device-full sync=true",
+        "decklinkvideosink device-number={} mode={} profile=one-sub-device-full \
+         video-format=10bit-yuv sync=true",
         decklink_device_number(device),
         mode
+    )
+}
+
+/// Raw format into `decklinkvideosink` for ST 2110-20 TX.
+///
+/// Facility routers expect **10-bit 4:2:2**; `UYVY` (8-bit) negotiates but often
+/// shows black / ~1.7 Gbit on monitors locked to 10-bit. `v210` is packed 10-bit
+/// 4:2:2. DeckLink GST pad templates list `v210` only with an explicit
+/// `colorimetry` (bt709/bt2020/…); omitting it fails link at parse time.
+fn decklink_sink_raw_caps(width: &str, height: &str, fr: &str, interlaced: bool) -> String {
+    let interlace = if interlaced {
+        ",interlace-mode=interleaved"
+    } else {
+        ""
+    };
+    format!(
+        "video/x-raw,format=v210,width={width},height={height},framerate={fr},\
+         colorimetry=bt709{interlace}"
     )
 }
 
@@ -730,11 +751,12 @@ pub fn build_playout_launch(opts: &PlayoutLaunchOpts) -> String {
            video/x-h264 ! h264parse config-interval=-1 ! avdec_h264 ! \
            videoconvert ! identity name=vpos silent=true ! tee name=v \
          v. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
-           videoscale ! videorate skip-to-first=true ! \
-           video/x-raw,format=UYVY,width=1920,height={height},framerate={fr} ! \
+           videoscale ! videorate skip-to-first=true ! videoconvert ! \
+           {raw_caps} ! \
            {vsink} \
          {audio} \
          {preview}",
+        raw_caps = decklink_sink_raw_caps("1920", height, fr, false),
         vsink = decklink_video_sink(&opts.device, mode),
     )
 }
@@ -850,19 +872,20 @@ pub fn build_tc_loop_launch(opts: &TcLoopLaunchOpts) -> String {
          max-buffers=30 drop=true";
 
     // OUT: same geometry/interlace as IN. Avoid videorate on interlaced (destroys fields).
+    // Force v210 (10-bit 4:2:2) for ST 2110-20 facility TX — UYVY is 8-bit.
+    let raw_caps = decklink_sink_raw_caps("1920", height, fr, interlaced);
     let out_branch = if interlaced {
         format!(
             "v. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
                videoconvert ! \
-               video/x-raw,format=UYVY,width=1920,height={height},framerate={fr},\
-               interlace-mode=interleaved ! \
+               {raw_caps} ! \
                {vsink}"
         )
     } else {
         format!(
             "v. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! \
-               videoscale ! videorate skip-to-first=true ! \
-               video/x-raw,format=UYVY,width=1920,height={height},framerate={fr} ! \
+               videoscale ! videorate skip-to-first=true ! videoconvert ! \
+               {raw_caps} ! \
                {vsink}"
         )
     };
@@ -1107,16 +1130,25 @@ mod tests {
         });
         assert!(launch.contains("mode=1080i50"), "{launch}");
         assert!(launch.contains("interlace-mode=interleaved"), "{launch}");
+        assert!(
+            launch.contains("format=v210")
+                && launch.contains("colorimetry=bt709")
+                && launch.contains("video-format=10bit-yuv"),
+            "DeckLink OUT must be 10bit-yuv + v210+bt709: {launch}"
+        );
+        assert!(
+            !launch.contains("format=UYVY"),
+            "DeckLink OUT must not use 8-bit UYVY: {launch}"
+        );
         assert!(!launch.contains("interlaced-encoding="), "{launch}");
         assert!(launch.contains("appsink name=srt_in"), "{launch}");
         assert!(launch.contains("tee name=e"), "{launch}");
-        // OUT stays interlaced; encode + JPEG deinterlace for progressive proxy/WebRTC/SRT.
+        // OUT stays interlaced; one deinterlace feeds progressive tee `t` (encode+thumb).
         assert_eq!(
             launch.matches("deinterlace").count(),
-            2,
-            "expected encode+thumb deinterlace: {launch}"
+            1,
+            "expected single progressive-tee deinterlace: {launch}"
         );
-        // Encode branch deinterlaces before NVENC.
         assert!(
             launch.contains("deinterlace mode=auto ! ")
                 && launch.contains("nvh264enc"),

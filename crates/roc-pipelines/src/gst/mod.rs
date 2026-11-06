@@ -111,6 +111,7 @@ fn tc_read_live_format(rt: &TcLoopRuntime) -> Option<crate::InputFormat> {
     crate::format_from_caps(&caps)
 }
 
+#[allow(dead_code)] // kept for future TC signal diagnostics / UI
 fn tc_decklink_signal_present(rt: &TcLoopRuntime) -> Option<bool> {
     use gstreamer::prelude::*;
     let pipeline = rt.pipeline.as_ref()?;
@@ -142,18 +143,17 @@ fn tc_adapt_candidate(rt: &TcLoopRuntime) -> Option<String> {
         t.map(|x| x.elapsed() > std::time::Duration::from_secs(secs))
             .unwrap_or(true)
     };
-    // Wrong scan lock with no signal → try alternate once after a long wait.
-    if tc_decklink_signal_present(rt) == Some(false)
-        && rt.signal_flip_attempts < 1
-        && cool(rt.last_signal_flip, 12)
-        && cool(rt.last_adapt, 12)
-    {
-        if let Some(alt) = tc_alternate_scan(&rt.locked_mode) {
-            return Some(alt.to_string());
-        }
-    }
+    // Do NOT auto-flip p↔i on signal=false. On DeckLink IP that path was
+    // thrashing OUT (i50 vs p50) while GST thumbs still looked fine — receivers
+    // subscribed to the wrong scan see black. Prefer stable lock; operator can
+    // restart TC to re-probe. Real caps changes below still adapt.
     let fmt = tc_read_live_format(rt)?;
     if fmt.width < 1280 || fmt.mode == rt.locked_mode {
+        return None;
+    }
+    // Ignore p↔i-only caps chatter — scan toggles from locked-mode noise are
+    // unreliable on IP and break ST2110 subscribers.
+    if tc_alternate_scan(&rt.locked_mode) == Some(fmt.mode.as_str()) {
         return None;
     }
     if !cool(rt.last_adapt, 10) {
