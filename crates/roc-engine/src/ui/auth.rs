@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use axum::body::Body;
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::Next;
@@ -19,6 +18,24 @@ impl ApiKey {
             .map(|s| Arc::from(s.into_boxed_str()));
         Self(key)
     }
+
+    pub fn is_set(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+/// Compare without short-circuiting on the first differing byte.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Pull `api_key` out of a query string (used by WebSocket / <video> URLs that
+/// cannot set headers).
+fn query_key(query: &str) -> Option<&str> {
+    query.split('&').find_map(|p| p.strip_prefix("api_key="))
 }
 
 pub async fn require_api_key(api: ApiKey, req: Request, next: Next) -> Response {
@@ -29,17 +46,19 @@ pub async fn require_api_key(api: ApiKey, req: Request, next: Next) -> Response 
     if path == "/health" || path == "/api/health" {
         return next.run(req).await;
     }
-    let header = req
+    let expected = expected.as_bytes();
+    let header_ok = req
         .headers()
         .get("X-API-Key")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let query = req.uri().query().unwrap_or("");
-    let qkey = query
-        .split('&')
-        .find_map(|p| p.strip_prefix("api_key="))
-        .unwrap_or("");
-    if header == expected.as_ref() || qkey == expected.as_ref() {
+        .map(|v| constant_time_eq(v.as_bytes(), expected))
+        .unwrap_or(false);
+    let query_ok = req
+        .uri()
+        .query()
+        .and_then(query_key)
+        .map(|k| constant_time_eq(k.as_bytes(), expected))
+        .unwrap_or(false);
+    if header_ok || query_ok {
         return next.run(req).await;
     }
     (
@@ -49,6 +68,22 @@ pub async fn require_api_key(api: ApiKey, req: Request, next: Next) -> Response 
         .into_response()
 }
 
-/// Discard body type helper for middleware that doesn't need Body rename.
-#[allow(dead_code)]
-pub type _Body = Body;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ct_eq() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"secret", b"secret2"));
+        assert!(!constant_time_eq(b"", b"x"));
+    }
+
+    #[test]
+    fn query_key_parse() {
+        assert_eq!(query_key("a=1&api_key=abc&b=2"), Some("abc"));
+        assert_eq!(query_key("x_api_key=abc"), None);
+        assert_eq!(query_key(""), None);
+    }
+}

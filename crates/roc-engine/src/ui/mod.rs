@@ -5,6 +5,8 @@ mod routes;
 mod snapshot;
 pub mod state;
 mod sysmetrics;
+
+pub use library::safe_file_label;
 mod tc;
 mod ws;
 
@@ -67,16 +69,52 @@ pub fn router(
     // Native engine API (kept for soak/scripts) + UI façade + static HLS.
     let native = crate::api::router(orch);
 
-    Router::new()
+    let mut app = Router::new()
         .merge(ui_routes)
         .merge(native)
         .nest_service("/hls", hls)
         .layer(from_fn(move |req: Request, next: Next| {
             let key = key_for_mw.clone();
             async move { require_api_key(key, req, next).await }
-        }))
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        }));
+    if let Some(cors) = cors_from_env() {
+        app = app.layer(cors);
+    }
+    // Log method + path only: the query string can carry `api_key=`.
+    app.layer(TraceLayer::new_for_http().make_span_with(|req: &Request| {
+        tracing::info_span!("http", method = %req.method(), path = %req.uri().path())
+    }))
+}
+
+/// True when `API_KEY` is set in the environment.
+pub fn api_key_configured() -> bool {
+    ApiKey::from_env().is_set()
+}
+
+/// CORS is off by default: production is same-origin behind the frontend's
+/// nginx. For local dev (`next dev` on :3000 → engine on :8080) set
+/// `ROC_MEDIA_CORS_ORIGINS=http://localhost:3000` (comma-separated).
+fn cors_from_env() -> Option<CorsLayer> {
+    use axum::http::{HeaderName, HeaderValue, Method};
+    let raw = std::env::var("ROC_MEDIA_CORS_ORIGINS").ok()?;
+    let origins: Vec<HeaderValue> = raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| HeaderValue::from_str(s).ok())
+        .collect();
+    if origins.is_empty() {
+        return None;
+    }
+    Some(
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+            .allow_headers([
+                axum::http::header::CONTENT_TYPE,
+                HeaderName::from_static("x-api-key"),
+            ]),
+    )
 }
 
 /// Background ticker: honor recording schedules for armed PROXY and/or HQ roles.
@@ -102,7 +140,11 @@ pub fn spawn_encode_autostart(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
                 }
                 _ => {}
             }
-            match orch.start_capture(id) {
+            let o = orch.clone();
+            let started = tokio::task::spawn_blocking(move || o.start_capture(id))
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("start_capture panicked: {e}")));
+            match started {
                 Ok(_) => {
                     ui.set_encode_wanted(id, true);
                     tracing::info!(channel = id, "encode autostart");
@@ -126,7 +168,11 @@ pub fn spawn_tc_autostart(orch: Arc<Orchestrator>, ui: Arc<UiState>, hls_dir: Pa
             if ui.workflow_mode(id) != "tc" && !ui.tc(id).enabled {
                 continue;
             }
-            match tc::start_tc(orch.as_ref(), ui.as_ref(), id, &hls) {
+            let (o, u, h) = (orch.clone(), ui.clone(), hls.clone());
+            let started = tokio::task::spawn_blocking(move || tc::start_tc(o.as_ref(), u.as_ref(), id, &h))
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("start_tc panicked: {e}")));
+            match started {
                 Ok(_) => tracing::info!(channel = id, "TC burn-in autostart"),
                 Err(e) => tracing::warn!(channel = id, error = %e, "TC autostart failed"),
             }
@@ -138,9 +184,22 @@ pub fn spawn_tc_autostart(orch: Arc<Orchestrator>, ui: Arc<UiState>, hls_dir: Pa
 pub fn spawn_schedule_ticker(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
-            let now = Utc::now();
+            let (o, u) = (orch.clone(), ui.clone());
+            // Recording start/stop takes the GStreamer op lock — keep it off the reactor.
+            if let Err(e) = tokio::task::spawn_blocking(move || schedule_tick(&o, &u)).await {
+                tracing::error!(error = %e, "schedule tick panicked");
+            }
+        }
+    });
+}
+
+fn schedule_tick(orch: &Arc<Orchestrator>, ui: &Arc<UiState>) {
+    {
+        let now = Utc::now();
+        {
             for (id, sched) in ui.all_schedules() {
                 let ch = match orch.channel(id) {
                     Ok(c) => c,
@@ -155,10 +214,13 @@ pub fn spawn_schedule_ticker(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
                         Some(meta.name.clone())
                     };
                     let stamp = now.format("%Y%m%d_%H%M%S").to_string();
-                    let label = name
-                        .clone()
-                        .unwrap_or_else(|| format!("ch{id}"))
-                        .replace(' ', "_");
+                    let label = safe_file_label(
+                        &name.clone().unwrap_or_else(|| format!("ch{id}")),
+                    );
+                    if library::sanitize_segment(&meta.category).is_err() {
+                        tracing::warn!(channel = id, category = %meta.category, "schedule skipped: invalid category");
+                        continue;
+                    }
 
                     if sched.arm_hq && !ch.hq_recording {
                         let path = schedule_recording_path(
@@ -255,7 +317,7 @@ pub fn spawn_schedule_ticker(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
                 }
             }
         }
-    });
+    }
 }
 
 fn schedule_recording_path(
@@ -267,6 +329,7 @@ fn schedule_recording_path(
     label: &str,
     stamp: &str,
 ) -> String {
+    // Callers validate `category` with `library::sanitize_segment` first.
     let root = ui.recordings_dir();
     let _ = std::fs::create_dir_all(root.join(category));
     root.join(category)

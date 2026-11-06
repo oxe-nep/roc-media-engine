@@ -321,6 +321,7 @@ mod gst_probe {
 
     /// Probe file or SRT source video geometry (decode to raw caps, no DeckLink).
     pub fn probe_playout_source(source: &str, timeout_ms: u64) -> Result<InputFormat> {
+        crate::validate_playout_source(source)?;
         let src = if source.starts_with("srt://") {
             format!("srtsrc uri=\"{source}\" ! tsdemux name=d")
         } else if source.ends_with(".ts") {
@@ -376,6 +377,7 @@ mod gst_probe {
 
     /// Best-effort media duration for a local file (seconds).
     pub fn probe_file_duration(path: &str, timeout_ms: u64) -> Option<f64> {
+        crate::validate_launch_value(path).ok()?;
         let src = if path.ends_with(".ts") {
             format!("filesrc location=\"{path}\" ! tsdemux name=d")
         } else {
@@ -427,6 +429,9 @@ mod gst_probe {
             audio_tracks: 1,
             audio_channels: 2,
         };
+        if crate::validate_playout_source(source).is_err() {
+            return default;
+        }
         if source.starts_with("srt://") {
             // Our encode egress is 4×AAC stereo pairs → 8ch DeckLink (same as file REC).
             return PlayoutAudioProbe {
@@ -540,6 +545,12 @@ pub use gst_probe::{
 #[cfg(not(feature = "gst"))]
 pub fn probe_file_duration(_path: &str, _timeout_ms: u64) -> Option<f64> {
     None
+}
+
+/// Mock build: no DeckLink to probe (callers fall back to the configured mode).
+#[cfg(not(feature = "gst"))]
+pub fn probe_input_format(device: &str, _timeout_ms: u64) -> anyhow::Result<InputFormat> {
+    anyhow::bail!("input probe unavailable without the gst feature ({device})")
 }
 
 #[cfg(not(feature = "gst"))]

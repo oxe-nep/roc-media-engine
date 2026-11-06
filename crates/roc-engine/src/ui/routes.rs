@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -8,12 +8,14 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::fs::File;
 use roc_pipelines::RecordingRole;
-use tokio_util::io::ReaderStream;
+use tokio::io::AsyncWriteExt;
+use tower::ServiceExt;
+use tower_http::services::ServeFile;
 
 use crate::gst_task::run_blocking;
 use crate::ui::library;
+use crate::ui::playout_media::MAX_MEDIA_UPLOAD_BYTES;
 use crate::ui::snapshot;
 use crate::ui::tc;
 use crate::ui::AppState;
@@ -48,7 +50,13 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/encode/options", get(encode_options))
         .route("/api/playout", get(list_playout_ui))
-        .route("/api/playout/media", get(list_playout_media).post(upload_playout_media))
+        .route(
+            "/api/playout/media",
+            get(list_playout_media).post(upload_playout_media).layer(DefaultBodyLimit::max(
+                // file + multipart framing
+                (MAX_MEDIA_UPLOAD_BYTES + (1 << 20)) as usize,
+            )),
+        )
         .route("/api/playout/media/{id}", axum::routing::delete(delete_playout_media))
         .route(
             "/api/playout/{id}",
@@ -210,11 +218,12 @@ fn start_role_recording(
         meta.name.clone()
     };
     let root = st.ui.recordings_dir();
-    let cat = meta.category.clone();
+    let cat = library::sanitize_segment(&meta.category)
+        .map_err(|_| UiError::bad(format!("invalid recording category {:?}", meta.category)))?;
     let dir = root.join(&cat);
     std::fs::create_dir_all(&dir).map_err(UiError::from)?;
     let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-    let safe = name.replace(' ', "_");
+    let safe = library::safe_file_label(&name);
     let path = dir
         .join(st.orch.recording_file_name(id, role, &safe, &stamp))
         .to_string_lossy()
@@ -313,13 +322,16 @@ async fn set_rec_name(
     State(st): State<AppState>,
     Path(id): Path<u32>,
     Json(body): Json<NameBody>,
-) -> Json<Value> {
+) -> Result<Json<Value>, UiError> {
+    if body.name.chars().any(|c| c.is_control()) || body.name.len() > 200 {
+        return Err(UiError::bad("invalid recording name"));
+    }
     st.ui.set_rec_name(id, body.name);
-    Json(snapshot::recording_json(
+    Ok(Json(snapshot::recording_json(
         st.orch.as_ref(),
         st.ui.as_ref(),
         id,
-    ))
+    )))
 }
 
 #[derive(Deserialize)]
@@ -335,7 +347,9 @@ async fn set_rec_category(
     if body.category.trim().is_empty() {
         return Err(UiError::bad("category required"));
     }
-    st.ui.set_rec_category(id, body.category);
+    let category = library::sanitize_segment(&body.category)
+        .map_err(|_| UiError::bad("invalid category name"))?;
+    st.ui.set_rec_category(id, category);
     Ok(Json(snapshot::recording_json(
         st.orch.as_ref(),
         st.ui.as_ref(),
@@ -430,7 +444,8 @@ async fn put_srt(
     State(st): State<AppState>,
     Path(id): Path<u32>,
     Json(body): Json<SrtUpdate>,
-) -> Json<Value> {
+) -> Result<Json<Value>, UiError> {
+    validate_srt_fields(body.target.as_deref(), body.passphrase.as_deref())?;
     let mut s = st.ui.srt(id);
     if let Some(m) = body.mode {
         s.mode = m;
@@ -448,7 +463,21 @@ async fn put_srt(
         s.latency_ms = l;
     }
     st.ui.set_srt(id, s);
-    Json(snapshot::srt_json(st.orch.as_ref(), st.ui.as_ref(), id))
+    Ok(Json(snapshot::srt_json(st.orch.as_ref(), st.ui.as_ref(), id)))
+}
+
+/// SRT target / passphrase end up in a GStreamer URI; reject anything that
+/// could break out of it. Empty target is allowed (clears it).
+fn validate_srt_fields(target: Option<&str>, passphrase: Option<&str>) -> Result<(), UiError> {
+    if let Some(t) = target.map(str::trim).filter(|t| !t.is_empty()) {
+        roc_pipelines::validate_srt_target(t).map_err(UiError::from)?;
+    }
+    if let Some(p) = passphrase {
+        if p.len() > 79 || p.chars().any(|c| c.is_control()) {
+            return Err(UiError::bad("SRT passphrase must be at most 79 printable characters"));
+        }
+    }
+    Ok(())
 }
 
 async fn start_srt(
@@ -743,6 +772,16 @@ async fn put_playout_ui(
     Path(id): Path<u32>,
     Json(body): Json<PlayoutUpdateBody>,
 ) -> Result<Json<Value>, UiError> {
+    validate_srt_fields(body.target.as_deref(), body.passphrase.as_deref())?;
+    // Probing the file (duration / codecs) blocks for up to a few seconds.
+    run_blocking(move || put_playout_blocking(st, id, body)).await
+}
+
+fn put_playout_blocking(
+    st: AppState,
+    id: u32,
+    body: PlayoutUpdateBody,
+) -> Result<Json<Value>, UiError> {
     let client_id = format!("decode-{id}");
     if !st.orch.cfg.playout.iter().any(|c| c.id == client_id) {
         return Err(UiError::not_found("playout not found"));
@@ -848,10 +887,7 @@ fn resolve_playout_file_path(st: &AppState, file_id: &str) -> Result<String, UiE
     if let Some(path) = st.playout_media.path_for(file_id) {
         return Ok(path.to_string_lossy().into_owned());
     }
-    // Absolute path passthrough for advanced use.
-    if PathBuf::from(file_id).is_file() {
-        return Ok(file_id.to_string());
-    }
+    // No absolute-path passthrough: only library refs and uploaded media.
     Err(UiError::bad(format!("media `{file_id}` not found")))
 }
 
@@ -899,7 +935,13 @@ fn resolve_playout_source(st: &AppState, id: u32, body: &PlayoutStartBody) -> Re
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
     {
-        return Ok((s, body.format_code.clone()));
+        let resolved = if s.starts_with("srt://") {
+            roc_pipelines::validate_srt_target(&s).map_err(UiError::from)?;
+            s
+        } else {
+            resolve_playout_file_path(st, &s)?
+        };
+        return Ok((resolved, body.format_code.clone()));
     }
     let client_id = format!("decode-{id}");
     let cfg_name = st
@@ -944,48 +986,60 @@ async fn start_playout_ui(
         target: None,
         format_code: None,
     });
-    let client_id = format!("decode-{id}");
-    let (source, format_code) = resolve_playout_source(&st, id, &body)?;
-    st.orch
-        .start_playout(&client_id, source, format_code)
-        .map_err(UiError::from)?;
-    let mut meta = st.ui.playout(id);
-    if meta.source == "file" {
-        refresh_file_duration(&st, &mut meta);
-        st.ui.set_playout(id, meta.clone());
-        apply_playout_file_control(&st, id, &meta);
-        if meta.mark_in_sec > 0.05 {
-            let _ = st.orch.seek_playout(&client_id, meta.mark_in_sec);
+    run_blocking(move || {
+        let client_id = format!("decode-{id}");
+        let (source, format_code) = resolve_playout_source(&st, id, &body)?;
+        st.orch
+            .start_playout(&client_id, source, format_code)
+            .map_err(UiError::from)?;
+        let mut meta = st.ui.playout(id);
+        if meta.source == "file" {
+            refresh_file_duration(&st, &mut meta);
+            st.ui.set_playout(id, meta.clone());
+            apply_playout_file_control(&st, id, &meta);
+            if meta.mark_in_sec > 0.05 {
+                let _ = st.orch.seek_playout(&client_id, meta.mark_in_sec);
+            }
         }
-    }
-    Ok(Json(playout_client_json(&st, id)?))
+        Ok(Json(playout_client_json(&st, id)?))
+    })
+    .await
 }
 
 async fn stop_playout_ui(
     State(st): State<AppState>,
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
-    let client_id = format!("decode-{id}");
-    st.orch.stop_playout(&client_id).map_err(UiError::from)?;
-    Ok(Json(playout_client_json(&st, id)?))
+    run_blocking(move || {
+        let client_id = format!("decode-{id}");
+        st.orch.stop_playout(&client_id).map_err(UiError::from)?;
+        Ok(Json(playout_client_json(&st, id)?))
+    })
+    .await
 }
 
 async fn pause_playout_ui(
     State(st): State<AppState>,
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
-    let client_id = format!("decode-{id}");
-    st.orch.pause_playout(&client_id).map_err(UiError::from)?;
-    Ok(Json(playout_client_json(&st, id)?))
+    run_blocking(move || {
+        let client_id = format!("decode-{id}");
+        st.orch.pause_playout(&client_id).map_err(UiError::from)?;
+        Ok(Json(playout_client_json(&st, id)?))
+    })
+    .await
 }
 
 async fn resume_playout_ui(
     State(st): State<AppState>,
     Path(id): Path<u32>,
 ) -> Result<Json<Value>, UiError> {
-    let client_id = format!("decode-{id}");
-    st.orch.resume_playout(&client_id).map_err(UiError::from)?;
-    Ok(Json(playout_client_json(&st, id)?))
+    run_blocking(move || {
+        let client_id = format!("decode-{id}");
+        st.orch.resume_playout(&client_id).map_err(UiError::from)?;
+        Ok(Json(playout_client_json(&st, id)?))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -998,11 +1052,17 @@ async fn seek_playout_ui(
     Path(id): Path<u32>,
     Json(body): Json<PlayoutSeekBody>,
 ) -> Result<Json<Value>, UiError> {
-    let client_id = format!("decode-{id}");
-    st.orch
-        .seek_playout(&client_id, body.position_sec)
-        .map_err(UiError::from)?;
-    Ok(Json(playout_client_json(&st, id)?))
+    if !body.position_sec.is_finite() || body.position_sec < 0.0 {
+        return Err(UiError::bad("position_sec must be a non-negative number"));
+    }
+    run_blocking(move || {
+        let client_id = format!("decode-{id}");
+        st.orch
+            .seek_playout(&client_id, body.position_sec)
+            .map_err(UiError::from)?;
+        Ok(Json(playout_client_json(&st, id)?))
+    })
+    .await
 }
 
 async fn playout_logs_ui(Path(id): Path<u32>) -> Json<Value> {
@@ -1132,34 +1192,52 @@ async fn lib_file_get(
     State(st): State<AppState>,
     Path((category, name)): Path<(String, String)>,
     Query(q): Query<std::collections::HashMap<String, String>>,
+    req: Request,
 ) -> Result<Response, UiError> {
     let root = st.ui.recordings_dir();
     let path = library::file_path(&root, &category, &name).map_err(UiError::from)?;
     let ctype = library::content_type_for(&path);
-    let file = File::open(&path).await.map_err(UiError::from)?;
-    let meta = tokio::fs::metadata(&path).await.map_err(UiError::from)?;
-    let stream = ReaderStream::new(file);
-    let body = axum::body::Body::from_stream(stream);
-    let mut res = Response::new(body);
-    res.headers_mut().insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static(ctype),
-    );
+    // ServeFile handles Range / If-Range / HEAD, so <video> can seek.
+    let served = ServeFile::new(&path)
+        .oneshot(req)
+        .await
+        .map_err(|e| UiError::from(anyhow::anyhow!("serve file: {e}")))?;
+    let mut res = served.map(axum::body::Body::new);
+    if res.status().is_success() {
+        res.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static(ctype),
+        );
+    }
     res.headers_mut().insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),
     );
     if q.get("download").map(|s| s.as_str()) == Some("1") {
-        let disp = format!("attachment; filename=\"{}\"", name.replace('"', ""));
+        let ascii: String = name
+            .chars()
+            .map(|c| if (c.is_ascii_graphic() || c == ' ') && c != '"' && c != '\\' { c } else { '_' })
+            .collect();
+        let disp = format!(
+            "attachment; filename=\"{ascii}\"; filename*=UTF-8''{}",
+            percent_encode_rfc5987(&name)
+        );
         if let Ok(v) = header::HeaderValue::from_str(&disp) {
             res.headers_mut().insert(header::CONTENT_DISPOSITION, v);
         }
     }
-    res.headers_mut().insert(
-        header::CONTENT_LENGTH,
-        header::HeaderValue::from_str(&meta.len().to_string()).unwrap(),
-    );
     Ok(res)
+}
+
+fn percent_encode_rfc5987(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 async fn lib_file_delete(
@@ -1256,9 +1334,7 @@ async fn upload_playout_media(
     State(st): State<AppState>,
     mut multipart: axum::extract::Multipart,
 ) -> Result<Json<Value>, UiError> {
-    let mut filename = None;
-    let mut bytes: Option<Vec<u8>> = None;
-    while let Some(field) = multipart
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|e| UiError::bad(e.to_string()))?
@@ -1266,28 +1342,52 @@ async fn upload_playout_media(
         if field.name() != Some("file") {
             continue;
         }
-        filename = field.file_name().map(|s| s.to_string());
-        bytes = Some(
-            field
-                .bytes()
+        let name = field
+            .file_name()
+            .map(|s| s.to_string())
+            .ok_or_else(|| UiError::bad("file field requires a filename"))?;
+        let pending = st.playout_media.begin_upload(&name).map_err(UiError::from)?;
+        // Stream chunks straight to disk; never hold the whole file in memory.
+        let written: Result<u64, UiError> = async {
+            let mut file = tokio::fs::File::create(&pending.dest).await?;
+            let mut size: u64 = 0;
+            while let Some(chunk) = field
+                .chunk()
                 .await
                 .map_err(|e| UiError::bad(e.to_string()))?
-                .to_vec(),
-        );
-        break;
+            {
+                size += chunk.len() as u64;
+                if size > MAX_MEDIA_UPLOAD_BYTES {
+                    return Err(UiError::bad(format!(
+                        "file too large (max {MAX_MEDIA_UPLOAD_BYTES} bytes)"
+                    )));
+                }
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+            file.sync_all().await?;
+            Ok(size)
+        }
+        .await;
+        let size = match written {
+            Ok(n) => n,
+            Err(e) => {
+                pending.abort();
+                return Err(e);
+            }
+        };
+        let media = st.playout_media.clone();
+        let item = run_blocking(move || media.commit(pending, size))
+            .await
+            .map_err(UiError::from)?;
+        return Ok(Json(json!({
+            "id": item.id,
+            "name": item.name,
+            "size": item.size,
+            "created_at": item.created_at.to_rfc3339(),
+        })));
     }
-    let name = filename.ok_or_else(|| UiError::bad("file field required"))?;
-    let data = bytes.ok_or_else(|| UiError::bad("file field required"))?;
-    let item = st
-        .playout_media
-        .add_from_reader(&name, data.as_slice())
-        .map_err(UiError::from)?;
-    Ok(Json(json!({
-        "id": item.id,
-        "name": item.name,
-        "size": item.size,
-        "created_at": item.created_at.to_rfc3339(),
-    })))
+    Err(UiError::bad("file field required"))
 }
 
 async fn delete_playout_media(
@@ -1416,6 +1516,11 @@ async fn put_tc_loop(
     Path(id): Path<u32>,
     Json(body): Json<TcLoopBody>,
 ) -> Result<Json<Value>, UiError> {
+    // Starting/stopping/updating the TC pipeline takes the GStreamer op lock.
+    run_blocking(move || put_tc_loop_blocking(st, id, body)).await
+}
+
+fn put_tc_loop_blocking(st: AppState, id: u32, body: TcLoopBody) -> Result<Json<Value>, UiError> {
     if st.orch.channel_config(id).is_err() {
         return Err(UiError::not_found("channel not found"));
     }
@@ -1555,8 +1660,9 @@ fn newest_thumb(dir: &std::path::Path) -> Option<std::path::PathBuf> {
         if !(n.starts_with("thumb") && n.ends_with(".jpg")) {
             continue;
         }
-        let meta = ent.metadata().ok()?;
-        let modified = meta.modified().ok()?;
+        // Thumbs rotate constantly; an entry can vanish between readdir and stat.
+        let Ok(meta) = ent.metadata() else { continue };
+        let Ok(modified) = meta.modified() else { continue };
         if best.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
             best = Some((modified, ent.path()));
         }

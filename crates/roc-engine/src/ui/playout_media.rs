@@ -1,7 +1,6 @@
 //! Uploaded playout media library (`/api/playout/media`).
 
-use std::fs::{self, File};
-use std::io::{copy, Read};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -10,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const MAX_MEDIA_UPLOAD_BYTES: u64 = 16 << 30; // 16 GiB
+pub const MAX_MEDIA_UPLOAD_BYTES: u64 = 16 << 30; // 16 GiB
 
 fn allowed_ext(ext: &str) -> bool {
     matches!(
@@ -106,7 +105,7 @@ impl MediaStore {
             .collect();
         items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         let raw = serde_json::to_vec_pretty(&PersistFile { items })?;
-        fs::write(&self.meta_path, raw).context("write playout-media.json")?;
+        crate::ui::state::write_atomic(&self.meta_path, &raw).context("write playout-media.json")?;
         Ok(())
     }
 
@@ -117,7 +116,10 @@ impl MediaStore {
         out
     }
 
-    pub fn add_from_reader(&self, orig_name: &str, mut reader: impl Read) -> Result<MediaItem> {
+    /// Reserve an id + destination path for an upload. The caller streams the
+    /// body to `PendingUpload::dest`, then calls [`MediaStore::commit`] (or
+    /// [`PendingUpload::abort`] on failure).
+    pub fn begin_upload(&self, orig_name: &str) -> Result<PendingUpload> {
         let ext = Path::new(orig_name)
             .extension()
             .map(|e| format!(".{}", e.to_string_lossy()))
@@ -133,30 +135,29 @@ impl MediaStore {
                 .and_then(|s| s.to_str())
                 .unwrap_or("media"),
         );
-        let filename = format!("{id}_{safe}{ext}");
-        let dest = self.dir.join(&filename);
-        let mut file = File::create(&dest).context("create media file")?;
-        let mut limited = reader.by_ref().take(MAX_MEDIA_UPLOAD_BYTES + 1);
-        let n = copy(&mut limited, &mut file)? as u64;
-        if n > MAX_MEDIA_UPLOAD_BYTES {
-            let _ = fs::remove_file(&dest);
-            bail!("file too large (max {MAX_MEDIA_UPLOAD_BYTES} bytes)");
-        }
+        let ext = ext.to_ascii_lowercase();
+        let dest = self.dir.join(format!("{id}_{safe}{ext}"));
+        let name = Path::new(orig_name)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| orig_name.to_string());
+        Ok(PendingUpload { id, name, dest })
+    }
+
+    /// Register a fully written upload.
+    pub fn commit(&self, up: PendingUpload, size: u64) -> Result<MediaItem> {
         let item = MediaItem {
-            id: id.clone(),
-            name: Path::new(orig_name)
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| orig_name.to_string()),
-            size: n,
+            id: up.id.clone(),
+            name: up.name.clone(),
+            size,
             created_at: Utc::now(),
-            path: dest.clone(),
+            path: up.dest.clone(),
         };
         let mut map = self.items.lock().unwrap();
-        map.insert(id, item.clone());
+        map.insert(item.id.clone(), item.clone());
         if let Err(e) = self.save_locked(&map) {
             map.remove(&item.id);
-            let _ = fs::remove_file(&dest);
+            up.abort();
             return Err(e);
         }
         Ok(item)
@@ -178,6 +179,18 @@ impl MediaStore {
 
     pub fn path_for(&self, id: &str) -> Option<PathBuf> {
         self.get(id).map(|it| it.path)
+    }
+}
+
+pub struct PendingUpload {
+    pub id: String,
+    pub name: String,
+    pub dest: PathBuf,
+}
+
+impl PendingUpload {
+    pub fn abort(&self) {
+        let _ = fs::remove_file(&self.dest);
     }
 }
 

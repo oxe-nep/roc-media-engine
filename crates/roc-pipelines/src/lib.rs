@@ -2,6 +2,7 @@
 
 mod describe;
 mod dnxhd;
+mod launch_safe;
 mod preview_sig;
 mod signal_format;
 mod state;
@@ -9,6 +10,7 @@ mod traits;
 
 pub use describe::*;
 pub use dnxhd::*;
+pub use launch_safe::*;
 pub use preview_sig::*;
 pub use signal_format::*;
 pub use state::*;

@@ -290,6 +290,64 @@ pub struct UiState {
     path: PathBuf,
     public_host: String,
     inner: Mutex<Inner>,
+    /// Serializes `persist` so snapshots are written in the order they're taken.
+    write_lock: Mutex<()>,
+    /// Directories under which the recordings root may be moved via the API.
+    allowed_rec_roots: Vec<PathBuf>,
+}
+
+/// Roots the UI may point the recordings directory at. Override with
+/// `ROC_MEDIA_RECORDINGS_ROOTS` (comma-separated absolute paths).
+fn allowed_recording_roots(cfg_default: &Path, loaded: &Path) -> Vec<PathBuf> {
+    if let Ok(raw) = std::env::var("ROC_MEDIA_RECORDINGS_ROOTS") {
+        let roots: Vec<PathBuf> = raw
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .collect();
+        if !roots.is_empty() {
+            return roots;
+        }
+    }
+    let mut roots = vec![
+        cfg_default.to_path_buf(),
+        loaded.to_path_buf(),
+        PathBuf::from("/mnt"),
+        PathBuf::from("/media"),
+    ];
+    roots.dedup();
+    roots
+}
+
+/// True when `path` is inside (or equal to) one of `roots`, both lexically and
+/// after resolving symlinks.
+fn path_within_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    use std::path::Component;
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return false;
+    }
+    let canon = fs::canonicalize(path).ok();
+    roots.iter().any(|root| {
+        if root.parent().is_none() {
+            return false; // never allow "/" as a root
+        }
+        if !path.starts_with(root) {
+            return false;
+        }
+        match &canon {
+            Some(c) => {
+                let root_canon = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+                c.starts_with(&root_canon) || c.starts_with(root)
+            }
+            None => true,
+        }
+    })
 }
 
 struct Inner {
@@ -313,7 +371,7 @@ impl UiState {
         let mut encode_wanted = HashMap::new();
         let mut tc = HashMap::new();
         let mut workflows = HashMap::new();
-        let mut recordings_dir = default_recordings;
+        let mut recordings_dir = default_recordings.clone();
         if let Ok(raw) = fs::read_to_string(&path) {
             if let Ok(f) = serde_json::from_str::<PersistFile>(&raw) {
                 for (k, v) in f.srt {
@@ -366,9 +424,12 @@ impl UiState {
                 }
             }
         }
+        let allowed_rec_roots = allowed_recording_roots(&default_recordings, &recordings_dir);
         Self {
             path,
             public_host,
+            write_lock: Mutex::new(()),
+            allowed_rec_roots,
             inner: Mutex::new(Inner {
                 srt,
                 recordings,
@@ -382,6 +443,9 @@ impl UiState {
     }
 
     pub fn persist(&self) {
+        // Hold the write lock across snapshot + write so a newer snapshot can
+        // never be overwritten by an older one.
+        let _w = self.write_lock.lock();
         let guard = self.inner.lock();
         let mut f = PersistFile::default();
         for (id, s) in &guard.srt {
@@ -411,8 +475,13 @@ impl UiState {
         }
         f.recordings_dir = Some(guard.recordings_dir.clone());
         drop(guard);
-        if let Ok(raw) = serde_json::to_string_pretty(&f) {
-            let _ = fs::write(&self.path, raw);
+        match serde_json::to_string_pretty(&f) {
+            Ok(raw) => {
+                if let Err(e) = write_atomic(&self.path, raw.as_bytes()) {
+                    tracing::error!(path = %self.path.display(), error = %e, "persist ui-state failed");
+                }
+            }
+            Err(e) => tracing::error!(error = %e, "serialize ui-state failed"),
         }
     }
 
@@ -421,7 +490,22 @@ impl UiState {
     }
 
     pub fn set_recordings_dir(&self, path: PathBuf) -> anyhow::Result<PathBuf> {
+        if !path_within_roots(&path, &self.allowed_rec_roots) {
+            let allowed: Vec<String> = self
+                .allowed_rec_roots
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            anyhow::bail!(
+                "recordings path must be an absolute path under one of: {} (set ROC_MEDIA_RECORDINGS_ROOTS to change)",
+                allowed.join(", ")
+            );
+        }
         fs::create_dir_all(&path)?;
+        // Re-check after creation so a symlink can't redirect outside the roots.
+        if !path_within_roots(&path, &self.allowed_rec_roots) {
+            anyhow::bail!("recordings path resolves outside the allowed roots");
+        }
         self.inner.lock().recordings_dir = path.clone();
         self.persist();
         Ok(path)
@@ -620,10 +704,13 @@ impl UiState {
         include_passphrase: bool,
     ) -> anyhow::Result<String> {
         let latency_ms = if latency_ms == 0 { 120 } else { latency_ms };
-        let latency_us = if latency_ms > 8000 {
+        // Values are milliseconds. Only very large numbers (≥100 000) are treated
+        // as legacy microsecond values; the old 8000 cut-off turned e.g. 9000 ms
+        // into 9 ms.
+        let latency_us = if latency_ms >= 100_000 {
             latency_ms
         } else {
-            latency_ms * 1000
+            latency_ms.saturating_mul(1000)
         };
         match mode {
             "caller" => {
@@ -631,6 +718,8 @@ impl UiState {
                 if target.is_empty() {
                     anyhow::bail!("caller mode requires a target");
                 }
+                // The URL ends up inside a GStreamer property / launch string.
+                roc_pipelines::validate_srt_target(target)?;
                 if target.starts_with("srt://") {
                     // Don't append mode/latency if the URL already carries them
                     // (UI often stores a full publish URL from encode).
@@ -757,4 +846,47 @@ fn urlencoding_lite(s: &str) -> String {
         }
     }
     out
+}
+
+/// Write `data` to `path` via a temp file + rename, so a crash mid-write never
+/// leaves a truncated file behind.
+pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension(format!(
+        "{}.tmp",
+        path.extension().and_then(|e| e.to_str()).unwrap_or("dat")
+    ));
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::*;
+
+    #[test]
+    fn recordings_root_allowlist() {
+        let roots = vec![PathBuf::from("/mnt"), PathBuf::from("/opt/x/recordings")];
+        assert!(path_within_roots(Path::new("/mnt/nas/rec"), &roots));
+        assert!(path_within_roots(Path::new("/opt/x/recordings"), &roots));
+        assert!(!path_within_roots(Path::new("/"), &roots));
+        assert!(!path_within_roots(Path::new("/etc"), &roots));
+        assert!(!path_within_roots(Path::new("/mnt/../etc"), &roots));
+        assert!(!path_within_roots(Path::new("relative/dir"), &roots));
+        assert!(!path_within_roots(Path::new("/mntx"), &roots));
+        assert!(!path_within_roots(Path::new("/etc"), &[PathBuf::from("/")]));
+    }
+
+    #[test]
+    fn atomic_write_replaces() {
+        let p = std::env::temp_dir().join(format!("roc-atomic-{}.json", uuid::Uuid::new_v4()));
+        write_atomic(&p, b"one").unwrap();
+        write_atomic(&p, b"two").unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"two");
+        let _ = fs::remove_file(&p);
+    }
 }

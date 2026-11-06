@@ -67,6 +67,22 @@ async fn main() -> Result<()> {
         cfg.bind = bind;
     }
 
+    // Fail fast, before any pipeline starts.
+    let addr: SocketAddr = cfg.bind.parse().context("parse bind address")?;
+    if !addr.ip().is_loopback() && !ui::api_key_configured() {
+        let allow = std::env::var("ROC_MEDIA_ALLOW_NO_AUTH")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if allow {
+            tracing::warn!(%addr, "API_KEY not set and bound to a non-loopback address — API is UNAUTHENTICATED (ROC_MEDIA_ALLOW_NO_AUTH)");
+        } else {
+            anyhow::bail!(
+                "refusing to listen on {addr} without API_KEY; set API_KEY, bind to 127.0.0.1, \
+                 or set ROC_MEDIA_ALLOW_NO_AUTH=1 to override"
+            );
+        }
+    }
+
     if let Ok(hls) = std::env::var("ROC_MEDIA_HLS_DIR") {
         if !hls.trim().is_empty() {
             cfg.hls_dir = PathBuf::from(hls);
@@ -115,7 +131,6 @@ async fn main() -> Result<()> {
     ui::spawn_schedule_ticker(orch.clone(), ui.clone());
 
     let app = ui::router(orch, ui, cfg.hls_dir.clone(), data_dir.clone());
-    let addr: SocketAddr = cfg.bind.parse().context("parse bind address")?;
     tracing::info!(%addr, hls = %cfg.hls_dir.display(), "roc-media-engine listening (UI cutover)");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

@@ -1290,6 +1290,9 @@ impl PipelineBackend for GstBackend {
         use gstreamer::prelude::*;
         use crate::resolve_playout_format_code;
 
+        // Value is interpolated into a parse_launch string below.
+        crate::validate_playout_source(source)?;
+
         // Serialize with capture/TC — DeckLink device claim races without gst_op.
         let _gst = self.gst_op.lock();
 

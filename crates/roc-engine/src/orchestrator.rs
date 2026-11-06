@@ -45,6 +45,25 @@ fn sanitize_category(raw: &str) -> String {
     }
 }
 
+/// Basic sanity for an explicit recording file path: absolute, no `..`/`.`
+/// components, no control characters. Callers decide which root it must be in.
+pub fn check_recording_path(path: &std::path::Path) -> Result<()> {
+    use std::path::Component;
+    if !path.is_absolute() {
+        bail!("recording path must be absolute");
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        bail!("recording path must not contain '..' or '.'");
+    }
+    if path.to_string_lossy().chars().any(|c| c.is_control()) {
+        bail!("recording path contains control characters");
+    }
+    Ok(())
+}
+
 pub struct Orchestrator {
     pub cfg: Config,
     /// Path to `config.yaml` — presets / channel assignments are written back here.
@@ -307,6 +326,7 @@ impl Orchestrator {
     ) -> Result<ChannelSnapshot> {
         let path_str = if let Some(p) = path.filter(|s| !s.trim().is_empty()) {
             let pb = PathBuf::from(&p);
+            check_recording_path(&pb)?;
             if let Some(parent) = pb.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("create recording parent {}", parent.display()))?;
@@ -315,7 +335,7 @@ impl Orchestrator {
         } else {
             // Fallback when called without Go/UI path (soak scripts / direct API).
             let ch = self.cfg.channel(id)?;
-            let name = label.unwrap_or_else(|| ch.name.replace(' ', "_"));
+            let name = crate::ui::safe_file_label(label.as_deref().unwrap_or(&ch.name));
             let stamp = stamp_now();
             let cat = sanitize_category(category.as_deref().unwrap_or("_unsorted"));
             let dir = self.cfg.recordings_dir.join(&cat);
@@ -351,6 +371,10 @@ impl Orchestrator {
         let url = url
             .or_else(|| ch.srt_url.clone())
             .with_context(|| format!("no SRT URL for channel {id}"))?;
+        if !url.starts_with("srt://") {
+            bail!("SRT URL must start with srt://");
+        }
+        roc_pipelines::validate_srt_target(&url)?;
         self.backend.start_srt(id, &url)?;
         self.backend.channel_snapshot(id)
     }
@@ -445,6 +469,8 @@ impl Orchestrator {
         if let Some(fc) = format_code.filter(|s| !s.trim().is_empty()) {
             client.format_code = Some(fc);
         }
+        // `source` is interpolated into a GStreamer launch string.
+        roc_pipelines::validate_playout_source(&source)?;
         self.backend.start_playout(&client, &source)?;
         self.list_playout()
             .into_iter()

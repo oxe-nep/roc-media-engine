@@ -38,6 +38,23 @@ pub fn router(orch: Arc<Orchestrator>) -> Router {
 
 type ApiState = Arc<Orchestrator>;
 
+/// `?path=` on the native record routes must stay inside the configured
+/// `recordings_dir` (it used to accept any absolute path, as root).
+fn native_record_path(orch: &Orchestrator, path: Option<String>) -> Result<Option<String>, ApiError> {
+    let Some(p) = path.filter(|s| !s.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let pb = std::path::PathBuf::from(&p);
+    crate::orchestrator::check_recording_path(&pb).map_err(ApiError::from)?;
+    if !pb.starts_with(&orch.cfg.recordings_dir) {
+        return Err(ApiError::bad_request(format!(
+            "path must be inside {}",
+            orch.cfg.recordings_dir.display()
+        )));
+    }
+    Ok(Some(p))
+}
+
 async fn health(State(orch): State<ApiState>) -> Json<serde_json::Value> {
     Json(orch.health())
 }
@@ -113,8 +130,9 @@ async fn start_record(
     Path(id): Path<u32>,
     Query(q): Query<RecordQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let path = native_record_path(&orch, q.path)?;
     let snap = run_blocking(move || {
-        orch.start_recording(id, q.path, q.label, q.category)
+        orch.start_recording(id, path, q.label, q.category)
     })
     .await
     .map_err(ApiError::from)?;
@@ -136,8 +154,9 @@ async fn start_record_proxy(
     Path(id): Path<u32>,
     Query(q): Query<RecordQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let path = native_record_path(&orch, q.path)?;
     let snap = run_blocking(move || {
-        orch.start_proxy_recording(id, q.path, q.label, q.category)
+        orch.start_proxy_recording(id, path, q.label, q.category)
     })
     .await
     .map_err(ApiError::from)?;
@@ -159,8 +178,9 @@ async fn start_record_hq(
     Path(id): Path<u32>,
     Query(q): Query<RecordQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let path = native_record_path(&orch, q.path)?;
     let snap = run_blocking(move || {
-        orch.start_hq_recording(id, q.path, q.label, q.category)
+        orch.start_hq_recording(id, path, q.label, q.category)
     })
     .await
     .map_err(ApiError::from)?;
