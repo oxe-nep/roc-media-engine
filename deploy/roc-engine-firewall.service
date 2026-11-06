@@ -1,0 +1,25 @@
+[Unit]
+Description=Restrict roc-media-engine API (TCP 8080) to k3s nodes + localhost
+# Only touches TCP 8080 via its own chain; SRT/UDP, SSH and Docker rules are untouched.
+After=network-pre.target
+Before=roc-media-engine.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# k3s nodes (frontend nginx egresses via node IPs). Space-separated.
+Environment="ROC_API_ALLOW=10.199.23.21 10.199.23.22 10.199.23.23 10.199.23.24"
+ExecStart=/bin/sh -ec '\
+  iptables -N ROC_ENGINE_API 2>/dev/null || true; \
+  iptables -F ROC_ENGINE_API; \
+  iptables -A ROC_ENGINE_API -i lo -j ACCEPT; \
+  for ip in $ROC_API_ALLOW; do iptables -A ROC_ENGINE_API -s "$ip" -j ACCEPT; done; \
+  iptables -A ROC_ENGINE_API -j DROP; \
+  iptables -C INPUT -p tcp --dport 8080 -j ROC_ENGINE_API 2>/dev/null || \
+    iptables -I INPUT 1 -p tcp --dport 8080 -j ROC_ENGINE_API'
+ExecStop=/bin/sh -c '\
+  while iptables -D INPUT -p tcp --dport 8080 -j ROC_ENGINE_API 2>/dev/null; do :; done; \
+  iptables -F ROC_ENGINE_API 2>/dev/null; iptables -X ROC_ENGINE_API 2>/dev/null; true'
+
+[Install]
+WantedBy=multi-user.target
