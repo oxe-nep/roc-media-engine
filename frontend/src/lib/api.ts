@@ -228,12 +228,95 @@ export interface SystemMetrics {
   gpu_percent?: number;
   gpu_mem_used_mb?: number;
   gpu_mem_total_mb?: number;
+  gpu_name?: string;
+  gpu_driver?: string;
+  gpu_temp_c?: number;
+  gpu_power_w?: number;
+  gpu_power_limit_w?: number;
+  gpu_encoder_sessions?: number;
+  gpu_encoder_fps?: number;
+  hostname?: string;
+  cpu_cores?: number;
+  load_avg?: [number, number, number];
+  host_uptime_secs?: number;
+  engine_uptime_secs?: number;
+  net_rx_bps?: number;
+  net_tx_bps?: number;
+  net_ifaces?: string[];
+  encode_kbps_total?: number;
+  srt_kbps_total?: number;
+  sampled_at_ms?: number;
+  nvenc_used?: number;
+  nvenc_limit?: number;
+  inputs?: SystemInput[];
+}
+
+/** Per channel: DeckLink card view of the input vs the encode / TC pipeline. */
+export interface SystemInput {
+  id: number;
+  name: string;
+  device: string;
+  card: { locked: boolean; detected_mode: string | null; current_mode: string | null } | null;
+  encode: {
+    status: string;
+    locked_mode: string | null;
+    bitrate_kbps?: number | null;
+    srt: boolean;
+    srt_kbps?: number | null;
+    recording: boolean;
+  };
+  tc: { status: string; mode: string | null } | null;
+}
+
+/** One 2 s sample from the engine's history ring buffer. */
+export interface SystemHistPoint {
+  t: number;
+  cpu: number;
+  mem: number;
+  gpu?: number;
+  nvenc?: number;
+  nvdec?: number;
+  vram?: number;
+  temp?: number;
+  rx_mbps?: number;
+  tx_mbps?: number;
+  enc_mbps: number;
+  srt_mbps: number;
 }
 
 export async function fetchSystemMetrics(): Promise<SystemMetrics> {
   const res = await apiFetch("/api/system");
   if (!res.ok) throw new Error(`fetchSystemMetrics: ${res.status}`);
   return res.json();
+}
+
+export async function fetchSystemHistory(): Promise<{ interval_ms: number; points: SystemHistPoint[] }> {
+  const res = await apiFetch("/api/system/history");
+  if (!res.ok) throw new Error(`fetchSystemHistory: ${res.status}`);
+  return res.json();
+}
+
+/** Same shape as a history point, from a live `/api/system` sample. */
+export function histPointFromMetrics(m: SystemMetrics): SystemHistPoint | null {
+  if (m.sampled_at_ms == null) return null;
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+  return {
+    t: m.sampled_at_ms,
+    cpu: r1(m.cpu_percent),
+    mem: r1(m.mem_percent),
+    gpu: m.gpu_percent,
+    nvenc: m.nvenc_percent,
+    nvdec: m.nvdec_percent,
+    vram:
+      m.gpu_mem_used_mb != null && m.gpu_mem_total_mb
+        ? r1((m.gpu_mem_used_mb / m.gpu_mem_total_mb) * 100)
+        : undefined,
+    temp: m.gpu_temp_c,
+    rx_mbps: m.net_rx_bps != null ? r1(m.net_rx_bps / 1e6) : undefined,
+    tx_mbps: m.net_tx_bps != null ? r1(m.net_tx_bps / 1e6) : undefined,
+    enc_mbps: r1((m.encode_kbps_total ?? 0) / 1000),
+    srt_mbps: r1((m.srt_kbps_total ?? 0) / 1000),
+  };
 }
 
 export async function setRecordingName(id: number, name: string): Promise<RecordingInfo> {

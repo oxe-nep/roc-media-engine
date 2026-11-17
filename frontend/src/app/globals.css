@@ -4228,3 +4228,349 @@ body:has(.commentator-root) .container {
   color: #8fd48f;
 }
 
+
+/* ── System status modal ─────────────────────────────────────────────
+   Chart tokens validated (dataviz validate_palette.js, dark, surface #2a2a2a):
+   series-1 blue / series-2 orange. Status colours reserved, always icon + label. */
+.sysm-root {
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-critical: #d03b3b;
+  --chart-grid: #363636;
+  --chart-base: #4a4a48;
+  width: min(1120px, 100%);
+  max-height: 92vh;
+}
+.sysm-header {
+  align-items: flex-start;
+  gap: 16px;
+}
+.sysm-subtitle {
+  margin-top: 3px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+.sysm-header-right {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.sysm-range {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.sysm-range button {
+  white-space: nowrap;
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.sysm-range button + button {
+  border-left: 1px solid var(--border-strong);
+}
+.sysm-range button.active {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+.sysm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+.sysm-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 10px 12px 8px;
+  min-width: 0;
+}
+/* Two tracks only where the grid always has ≥2 columns (a span on a
+   one-column grid would force an extra column and overflow). */
+@media (min-width: 640px) {
+  .sysm-card.wide {
+    grid-column: span 2;
+  }
+}
+.sysm-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.sysm-card-title {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+.sysm-card-value {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.sysm-card-sub {
+  margin: 2px 0 6px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sysm-legend {
+  display: flex;
+  gap: 12px;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.sysm-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* Chart */
+.mchart {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  margin-top: 4px;
+}
+.mchart {
+  cursor: crosshair;
+}
+/* Stretches to the box (viewBox + non-scaling strokes); never sizes the layout. */
+.mchart svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+}
+.mchart-grid {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+.mchart-base {
+  stroke: var(--chart-base);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+.mchart-cross {
+  stroke: var(--text-muted);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+/* 8px marker with a 2px surface ring. */
+.mchart-dot {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 2px var(--bg-surface);
+  pointer-events: none;
+}
+.mchart-tick {
+  position: absolute;
+  left: 2px;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.mchart-key {
+  display: inline-block;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
+  flex: none;
+}
+.mchart-tip {
+  position: absolute;
+  top: -6px;
+  transform: translate(10px, -100%);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 0.72rem;
+  color: var(--text-primary);
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 2;
+}
+.mchart-tip.left {
+  transform: translate(calc(-100% - 10px), -100%);
+}
+.mchart-tip-time {
+  color: var(--text-muted);
+  margin-bottom: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.mchart-tip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.mchart-tip-label {
+  color: var(--text-secondary);
+}
+.mchart-tip-val {
+  margin-left: auto;
+  padding-left: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Meter */
+.sysm-meter {
+  margin-top: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.sysm-meter-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+  font-size: 0.75rem;
+}
+.sysm-meter-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+.sysm-meter-detail {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.sysm-meter-head .sysm-sev {
+  margin-left: auto;
+}
+.sysm-meter-track {
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.sysm-meter-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: var(--series-1);
+}
+.sysm-meter-fill.warning {
+  background: var(--status-warning);
+}
+.sysm-meter-fill.critical {
+  background: var(--status-critical);
+}
+
+/* Status label (icon + text, colour never alone) */
+.sysm-sev {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.sysm-sev > span[aria-hidden] {
+  font-size: 0.7em;
+}
+.sysm-sev.good > span[aria-hidden] {
+  color: var(--status-good);
+}
+.sysm-sev.warning > span[aria-hidden] {
+  color: var(--status-warning);
+}
+.sysm-sev.critical > span[aria-hidden] {
+  color: var(--status-critical);
+}
+.sysm-muted {
+  color: var(--text-muted);
+}
+
+/* Inputs table */
+.sysm-section {
+  margin: 16px 0 6px;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.sysm-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+}
+.sysm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+.sysm-table th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+.sysm-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.sysm-table tr:last-child td {
+  border-bottom: none;
+}
+.sysm-table tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.03);
+}
+.sysm-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.sysm-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sysm-mismatch {
+  margin-left: 8px;
+  font-size: 0.72rem;
+}
+.sysm-flags {
+  display: inline-flex;
+  gap: 4px;
+}
+.sysm-flag {
+  font-size: 0.65rem;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+}
+.sysm-flag.rec {
+  border-color: var(--status-critical);
+  color: var(--text-primary);
+}
