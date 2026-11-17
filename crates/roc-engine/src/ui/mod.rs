@@ -181,6 +181,28 @@ pub fn spawn_tc_autostart(orch: Arc<Orchestrator>, ui: Arc<UiState>, hls_dir: Pa
     });
 }
 
+/// Poll every channel's signal/format once per second, UI open or not.
+/// Status polling (and the card-format adapt it drives) used to run only from
+/// WebSocket ticks, so with no browser open a re-routed source went unnoticed.
+pub fn spawn_signal_watch(orch: Arc<Orchestrator>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let o = orch.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || {
+                let _ = o.list_channels();
+            })
+            .await
+            {
+                tracing::error!(error = %e, "signal watch tick panicked");
+            }
+        }
+    });
+}
+
 pub fn spawn_schedule_ticker(orch: Arc<Orchestrator>, ui: Arc<UiState>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(1));

@@ -838,6 +838,20 @@ pub struct ChannelPipeline {
     dark_reprobe_attempts: u32,
     /// Format-adapt hysteresis: mode must stay stable before relaunch.
     pending_adapt_mode: Option<(String, std::time::Instant)>,
+    /// Card (DeckLink SDK status) reports a different input format than the
+    /// locked mode: relaunch to this mode on the next adapt-capable poll.
+    card_adapt: Option<String>,
+    /// Last card-status read (rate limit; meter ticks poll at ~30 Hz).
+    last_card_check: Option<std::time::Instant>,
+    /// Card status API answered for this device — supersedes probe re-detection.
+    card_status_ok: bool,
+    /// Last card-driven adapt target + when (backs off repeat relaunches).
+    last_card_adapt: Option<(String, std::time::Instant)>,
+    /// Mismatch already logged while recording (log once per detected mode).
+    card_mismatch_logged: Option<String>,
+    /// Card-detected mode that differs from locked + since when (stability gate:
+    /// DeckLink can flicker progressive first on an i50 lock).
+    card_seen: Option<(String, std::time::Instant)>,
     /// Peak dBFS per discrete channel (8). Updated from `level` bus messages.
     audio_peaks: [f64; 8],
     /// Last time a `level` bus message updated `audio_peaks`.
@@ -978,6 +992,12 @@ impl ChannelPipeline {
             pending_format_reprobe: false,
             dark_reprobe_attempts: 0,
             pending_adapt_mode: None,
+            card_adapt: None,
+            last_card_check: None,
+            card_status_ok: false,
+            last_card_adapt: None,
+            card_mismatch_logged: None,
+            card_seen: None,
             audio_peaks: [-90.0; 8],
             last_level_at: None,
             encode_bitrate: BitrateMeter::new(),
@@ -1263,6 +1283,10 @@ impl ChannelPipeline {
         self.last_decklink_signal = None;
         self.pending_format_reprobe = false;
         self.dark_reprobe_attempts = 0;
+        self.card_adapt = None;
+        self.last_card_adapt = None;
+        self.card_mismatch_logged = None;
+        self.card_seen = None;
         Ok(())
     }
 
@@ -2414,10 +2438,108 @@ impl ChannelPipeline {
         Some(dl.property::<bool>("signal"))
     }
 
+    /// Compare the card-reported input format (DeckLink SDK status, read-only)
+    /// with the locked capture mode. A locked input in the wrong mode only shows
+    /// `signal=false` to GStreamer forever; the card still reports what is on
+    /// the wire, so schedule a relaunch in that mode (`card_adapt`).
+    fn check_card_format(&mut self) {
+        let now = std::time::Instant::now();
+        if self
+            .last_card_check
+            .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(500))
+        {
+            return;
+        }
+        self.last_card_check = Some(now);
+        let Some(st) = super::card_status::query(crate::describe::decklink_device_number(&self.device))
+        else {
+            self.card_status_ok = false;
+            return;
+        };
+        self.card_status_ok = true;
+        if !is_auto_mode(&self.configured_mode) || self.card_adapt.is_some() {
+            return;
+        }
+        let detected = match st.detected_mode {
+            Some(m) if st.locked && m != self.locked_mode => m,
+            _ => {
+                self.card_seen = None;
+                self.card_mismatch_logged = None;
+                return;
+            }
+        };
+        // Stability gate: same detected mode for ≥1 s before acting.
+        match &self.card_seen {
+            Some((m, since)) if m == detected => {
+                if now.duration_since(*since) < std::time::Duration::from_secs(1) {
+                    return;
+                }
+            }
+            _ => {
+                self.card_seen = Some((detected.to_string(), now));
+                return;
+            }
+        }
+        if self.proxy_recording || self.hq_recording {
+            if self.card_mismatch_logged.as_deref() != Some(detected) {
+                tracing::warn!(
+                    channel = self.id,
+                    locked = %self.locked_mode,
+                    detected,
+                    "card reports a different input format while recording — keeping locked mode until REC stops"
+                );
+                self.card_mismatch_logged = Some(detected.to_string());
+            }
+            return;
+        }
+        let cool = self
+            .last_adapt
+            .map(|t| t.elapsed() > std::time::Duration::from_secs(3))
+            .unwrap_or(true);
+        // Already relaunched into this mode recently and the card still
+        // disagrees: back off instead of looping relaunches (OOM history).
+        let backoff = self.last_card_adapt.as_ref().is_some_and(|(m, t)| {
+            m == detected && t.elapsed() < std::time::Duration::from_secs(60)
+        });
+        if !cool || backoff {
+            return;
+        }
+        tracing::info!(
+            channel = self.id,
+            from = %self.locked_mode,
+            to = detected,
+            "card reports new input format — adapting capture"
+        );
+        self.card_seen = None;
+        self.card_adapt = Some(detected.to_string());
+    }
+
+    /// True when a card-status format change is waiting for a relaunch.
+    pub fn pending_card_adapt(&self) -> bool {
+        self.card_adapt.is_some()
+    }
+
+    /// Relaunch into the card-reported mode (caller holds `gst_op`).
+    pub fn apply_pending_card_adapt(&mut self) {
+        let Some(mode) = self.card_adapt.take() else {
+            return;
+        };
+        if self.pipeline.is_none() || self.proxy_recording || self.hq_recording {
+            return;
+        }
+        self.last_card_adapt = Some((mode.clone(), std::time::Instant::now()));
+        self.pending_format_reprobe = false;
+        self.pending_adapt_mode = None;
+        if let Err(err) = self.adapt_to_mode(&mode) {
+            tracing::error!(channel = self.id, error = %err, %mode, "card-driven relaunch failed");
+        }
+    }
+
     fn apply_signal_status(&mut self, playing: bool) {
         if !playing || self.status == ChannelStatus::Error {
             return;
         }
+        self.check_card_format();
         match self.decklink_signal_present() {
             Some(false) => {
                 // Drop stale peaks immediately — DeckLink can stop posting `level`
@@ -2449,7 +2571,10 @@ impl ChannelPipeline {
                     && self
                         .no_signal_since
                         .is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(backoff_secs));
-                if self.had_signal_lock
+                // With card status available the card tells us the real format;
+                // the teardown-and-probe path is only a fallback without the SDK.
+                if !self.card_status_ok
+                    && self.had_signal_lock
                     && self.dark_reprobe_attempts < MAX_DARK_REPROBES
                     && is_auto_mode(&self.configured_mode)
                     && !self.pending_format_reprobe
@@ -2485,7 +2610,8 @@ impl ChannelPipeline {
                 self.dark_reprobe_attempts = 0;
                 // Signal returned after an outage — re-probe with mode=auto.
                 // Locked caps cannot reliably report a scan/format change.
-                if rising
+                if !self.card_status_ok
+                    && rising
                     && had_lock_before
                     && !relaunching
                     && is_auto_mode(&self.configured_mode)
@@ -2650,6 +2776,11 @@ impl ChannelPipeline {
         };
         self.apply_signal_status(playing);
         self.decay_stale_peaks();
+        if self.card_adapt.is_some() {
+            self.apply_pending_card_adapt();
+            self.drain_bus_messages();
+            return;
+        }
 
         let adapt_to = {
             if let Some(fmt) = self.read_live_format() {

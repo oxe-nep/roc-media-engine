@@ -2,6 +2,7 @@
 
 mod bitrate;
 mod capture;
+mod card_status;
 mod preview_webrtc;
 mod probe;
 mod tc_loop;
@@ -688,6 +689,18 @@ impl GstBackend {
         self
     }
 
+    /// Relaunch channels whose card status reported a different input format
+    /// (flagged by the meter tick, which must not relaunch inside its pass).
+    fn drain_pending_card_adapts(&self) {
+        let _gst = self.gst_op.lock();
+        let mut map = self.channels.lock();
+        for pipe in map.values_mut() {
+            if pipe.pending_card_adapt() {
+                pipe.apply_pending_card_adapt();
+            }
+        }
+    }
+
     /// Rising-edge format check: release DeckLink → `probe_input_format` (mode=auto)
     /// outside `gst_op` → relaunch locked to the probed mode.
     fn drain_pending_format_reprobes(&self) {
@@ -847,7 +860,29 @@ impl PipelineBackend for GstBackend {
             return Ok(());
         }
 
-        let (locked, detected) = if is_auto_mode(&configured) {
+        let card = if is_auto_mode(&configured) {
+            card_status::query(crate::describe::decklink_device_number(&device))
+        } else {
+            None
+        };
+        let (locked, detected) = if let Some(st) = card {
+            // Card status knows the wire format without opening the input.
+            // Dark input: start in the fallback mode; the card check adapts
+            // as soon as a source is routed (no 5 s probe per dark channel).
+            match st.detected_mode.filter(|_| st.locked) {
+                Some(mode) => {
+                    tracing::info!(channel = channel_id, mode, "card reports input format");
+                    (mode.to_string(), None)
+                }
+                None => {
+                    tracing::info!(
+                        channel = channel_id,
+                        "card reports no input signal — starting in 1080p50 until a source is routed"
+                    );
+                    ("1080p50".into(), None)
+                }
+            }
+        } else if is_auto_mode(&configured) {
             match probe_input_format(&device, 5000) {
                 Ok(fmt) => {
                     tracing::info!(
@@ -1259,6 +1294,7 @@ impl PipelineBackend for GstBackend {
             let mut ids: Vec<u32> = map.keys().copied().collect();
             ids.sort_unstable();
             let mut pending = false;
+            let mut card = false;
             let snaps = ids
                 .into_iter()
                 .filter_map(|id| {
@@ -1267,13 +1303,19 @@ impl PipelineBackend for GstBackend {
                     if p.pending_format_reprobe() {
                         pending = true;
                     }
+                    if p.pending_card_adapt() {
+                        card = true;
+                    }
                     Some(p.snapshot(used))
                 })
                 .collect::<Vec<_>>();
-            (snaps, pending)
+            (snaps, (pending, card))
         };
-        if pending {
+        if pending.0 {
             self.drain_pending_format_reprobes();
+        }
+        if pending.1 {
+            self.drain_pending_card_adapts();
         }
         snaps
     }

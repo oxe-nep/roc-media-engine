@@ -129,6 +129,7 @@ async fn main() -> Result<()> {
     ui::spawn_encode_autostart(orch.clone(), ui.clone());
     ui::spawn_tc_autostart(orch.clone(), ui.clone(), cfg.hls_dir.clone());
     ui::spawn_schedule_ticker(orch.clone(), ui.clone());
+    ui::spawn_signal_watch(orch.clone());
 
     let app = ui::router(orch, ui, cfg.hls_dir.clone(), data_dir.clone());
     tracing::info!(%addr, hls = %cfg.hls_dir.display(), "roc-media-engine listening (UI cutover)");

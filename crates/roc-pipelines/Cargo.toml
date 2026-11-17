@@ -25,3 +25,6 @@ gstreamer-video = { workspace = true, optional = true }
 gstreamer-webrtc = { workspace = true, optional = true }
 gstreamer-sdp = { workspace = true, optional = true }
 gstreamer-rtp = { workspace = true, optional = true }
+
+[build-dependencies]
+cc = "1"

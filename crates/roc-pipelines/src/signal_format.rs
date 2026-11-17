@@ -127,6 +127,32 @@ fn approx(a: f64, b: f64) -> bool {
     (a - b).abs() < 0.08
 }
 
+/// Map a DeckLink SDK `BMDDisplayMode` four-cc (e.g. `'Hi50'`) to the
+/// GStreamer `decklinkvideosrc` mode name. `None` for unknown / unsupported.
+pub fn gst_mode_from_bmd_code(code: u32) -> Option<&'static str> {
+    Some(match &code.to_be_bytes() {
+        b"23ps" => "1080p2398",
+        b"24ps" => "1080p24",
+        b"Hp25" => "1080p25",
+        b"Hp29" => "1080p2997",
+        b"Hp30" => "1080p30",
+        b"Hp50" => "1080p50",
+        b"Hp59" => "1080p5994",
+        b"Hp60" => "1080p60",
+        b"Hi50" => "1080i50",
+        b"Hi59" => "1080i5994",
+        b"Hi60" => "1080i60",
+        b"hp50" => "720p50",
+        b"hp59" => "720p5994",
+        b"hp60" => "720p60",
+        b"4k25" => "2160p25",
+        b"4k50" => "2160p50",
+        b"4k59" => "2160p5994",
+        b"4k60" => "2160p60",
+        _ => return None,
+    })
+}
+
 pub fn is_auto_mode(mode: &str) -> bool {
     let m = mode.trim().to_ascii_lowercase();
     m.is_empty() || m == "auto"
@@ -621,5 +647,17 @@ mod tests {
             bit_depth: 8,
         };
         assert_eq!(playout_sink_mode_from_input(&fmt), "1080p50");
+    }
+
+    #[test]
+    fn bmd_fourcc_maps_to_gst_mode() {
+        // Values straight from DeckLinkAPIModes.h (SDK 16.0).
+        assert_eq!(gst_mode_from_bmd_code(0x48693530), Some("1080i50")); // 'Hi50'
+        assert_eq!(gst_mode_from_bmd_code(0x48703530), Some("1080p50")); // 'Hp50'
+        assert_eq!(gst_mode_from_bmd_code(0x48703235), Some("1080p25")); // 'Hp25'
+        assert_eq!(gst_mode_from_bmd_code(0x68703530), Some("720p50")); // 'hp50'
+        assert_eq!(gst_mode_from_bmd_code(0x346B3530), Some("2160p50")); // '4k50'
+        assert_eq!(gst_mode_from_bmd_code(0x69756E6B), None); // 'iunk' bmdModeUnknown
+        assert_eq!(gst_mode_from_bmd_code(0), None);
     }
 }
