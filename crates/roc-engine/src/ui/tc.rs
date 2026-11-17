@@ -95,40 +95,60 @@ pub fn build_launch_opts(
         bail!("decode {id} has no DeckLink device");
     }
 
-    // Prefer live probe so OUT/SRT match the actual IN (locked_mode is cleared when
+    // Without card status: live probe so OUT/SRT match the actual IN (locked_mode is cleared when
     // encode stops for exclusive TC). Fall back to last lock / config / 1080p50
     // (facility default — 1080i50 fallback previously left OUT black on p50 routers
     // when DeckLink IP probe timed out).
-    let input_mode = match roc_pipelines::probe_input_format(&ch.device, 4000) {
-        Ok(fmt) => {
-            tracing::info!(
-                channel = id,
-                mode = %fmt.mode,
-                format = %fmt.summary(),
-                "TC probed input format"
-            );
-            fmt.mode
+    // Card status (DeckLink SDK) gives the wire format without opening the
+    // input; a dark input starts in 1080p50 and the TC loop follows the card
+    // once a source is routed.
+    let card = roc_pipelines::card_status_for_device(&ch.device);
+    let input_mode = if let Some(st) = card {
+        match st.detected_mode.filter(|_| st.locked) {
+            Some(mode) => {
+                tracing::info!(channel = id, mode, "TC: card reports input format");
+                mode.to_string()
+            }
+            None => {
+                tracing::info!(
+                    channel = id,
+                    "TC: card reports no input signal — starting in 1080p50 until a source is routed"
+                );
+                "1080p50".to_string()
+            }
         }
-        Err(err) => {
-            let fallback = snap
-                .as_ref()
-                .and_then(|s| s.locked_mode.clone())
-                .filter(|m| !m.is_empty() && m != "auto")
-                // Stale i50 lock after a failed probe is worse than facility p50.
-                .filter(|m| m != "1080i50")
-                .or_else(|| {
-                    ch.mode
-                        .clone()
-                        .filter(|m| !m.is_empty() && !m.eq_ignore_ascii_case("auto"))
-                })
-                .unwrap_or_else(|| "1080p50".into());
-            tracing::warn!(
-                channel = id,
-                error = %err,
-                mode = %fallback,
-                "TC input probe failed — using fallback mode"
-            );
-            fallback
+    } else {
+        match roc_pipelines::probe_input_format(&ch.device, 4000) {
+            Ok(fmt) => {
+                tracing::info!(
+                    channel = id,
+                    mode = %fmt.mode,
+                    format = %fmt.summary(),
+                    "TC probed input format"
+                );
+                fmt.mode
+            }
+            Err(err) => {
+                let fallback = snap
+                    .as_ref()
+                    .and_then(|s| s.locked_mode.clone())
+                    .filter(|m| !m.is_empty() && m != "auto")
+                    // Stale i50 lock after a failed probe is worse than facility p50.
+                    .filter(|m| m != "1080i50")
+                    .or_else(|| {
+                        ch.mode
+                            .clone()
+                            .filter(|m| !m.is_empty() && !m.eq_ignore_ascii_case("auto"))
+                    })
+                    .unwrap_or_else(|| "1080p50".into());
+                tracing::warn!(
+                    channel = id,
+                    error = %err,
+                    mode = %fallback,
+                    "TC input probe failed — using fallback mode"
+                );
+                fallback
+            }
         }
     };
 

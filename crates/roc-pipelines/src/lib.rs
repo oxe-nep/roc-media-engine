@@ -1,5 +1,6 @@
 //! Pipeline abstractions: capture, record, SRT, preview, playout.
 
+mod card_status;
 mod describe;
 mod dnxhd;
 mod launch_safe;
@@ -8,6 +9,7 @@ mod signal_format;
 mod state;
 mod traits;
 
+pub use card_status::*;
 pub use describe::*;
 pub use dnxhd::*;
 pub use launch_safe::*;

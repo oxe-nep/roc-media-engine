@@ -2,7 +2,6 @@
 
 mod bitrate;
 mod capture;
-mod card_status;
 mod preview_webrtc;
 mod probe;
 mod tc_loop;
@@ -136,7 +135,7 @@ fn tc_alternate_scan(mode: &str) -> Option<&'static str> {
 }
 
 /// Decide if TC should relaunch for a new DeckLink mode (format change or p/i flip).
-fn tc_adapt_candidate(rt: &TcLoopRuntime) -> Option<String> {
+fn tc_adapt_candidate(rt: &mut TcLoopRuntime) -> Option<String> {
     if !matches!(rt.status, TcLoopStatus::Running | TcLoopStatus::Restarting) {
         return None;
     }
@@ -144,6 +143,33 @@ fn tc_adapt_candidate(rt: &TcLoopRuntime) -> Option<String> {
         t.map(|x| x.elapsed() > std::time::Duration::from_secs(secs))
             .unwrap_or(true)
     };
+    // The card's detected format (DeckLink SDK status) is what is actually on
+    // the wire, so it is trusted for p<->i changes too, unlike the caps chatter
+    // handled below. OUT follows IN, same as an operator TC restart.
+    let now = std::time::Instant::now();
+    if rt.card_follow.due(now) {
+        match crate::card_status_for_device(&rt.launch_opts.input_device) {
+            Some(st) => {
+                rt.card_status_ok = true;
+                if let Some(mode) = rt.card_follow.candidate(&st, &rt.locked_mode, now) {
+                    if cool(rt.last_adapt, 3) {
+                        tracing::info!(
+                            from = %rt.locked_mode,
+                            to = mode,
+                            "card reports new input format — adapting TC"
+                        );
+                        rt.card_follow.committed(mode, now);
+                        return Some(mode.to_string());
+                    }
+                }
+                return None;
+            }
+            None => rt.card_status_ok = false,
+        }
+    }
+    if rt.card_status_ok {
+        return None;
+    }
     // Do NOT auto-flip p↔i on signal=false. On DeckLink IP that path was
     // thrashing OUT (i50 vs p50) while GST thumbs still looked fine — receivers
     // subscribed to the wrong scan see black. Prefer stable lock; operator can
@@ -666,6 +692,10 @@ struct TcLoopRuntime {
     last_adapt: Option<std::time::Instant>,
     last_signal_flip: Option<std::time::Instant>,
     signal_flip_attempts: u8,
+    /// Follow the card-reported input format (same policy as encode capture).
+    card_follow: crate::CardFormatFollower,
+    /// Card status API answered — supersedes the caps-based adapt below.
+    card_status_ok: bool,
 }
 
 impl GstBackend {
@@ -861,7 +891,7 @@ impl PipelineBackend for GstBackend {
         }
 
         let card = if is_auto_mode(&configured) {
-            card_status::query(crate::describe::decklink_device_number(&device))
+            crate::card_status(crate::describe::decklink_device_number(&device))
         } else {
             None
         };
@@ -1719,6 +1749,8 @@ impl PipelineBackend for GstBackend {
                 last_adapt: None,
                 last_signal_flip: None,
                 signal_flip_attempts: 0,
+                card_follow: crate::CardFormatFollower::default(),
+                card_status_ok: false,
             },
         );
         self.workflows

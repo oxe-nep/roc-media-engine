@@ -840,18 +840,13 @@ pub struct ChannelPipeline {
     pending_adapt_mode: Option<(String, std::time::Instant)>,
     /// Card (DeckLink SDK status) reports a different input format than the
     /// locked mode: relaunch to this mode on the next adapt-capable poll.
-    card_adapt: Option<String>,
-    /// Last card-status read (rate limit; meter ticks poll at ~30 Hz).
-    last_card_check: Option<std::time::Instant>,
+    card_adapt: Option<&'static str>,
+    /// Stability / back-off / rate-cap policy for card-driven relaunches.
+    card_follow: crate::CardFormatFollower,
     /// Card status API answered for this device — supersedes probe re-detection.
     card_status_ok: bool,
-    /// Last card-driven adapt target + when (backs off repeat relaunches).
-    last_card_adapt: Option<(String, std::time::Instant)>,
     /// Mismatch already logged while recording (log once per detected mode).
-    card_mismatch_logged: Option<String>,
-    /// Card-detected mode that differs from locked + since when (stability gate:
-    /// DeckLink can flicker progressive first on an i50 lock).
-    card_seen: Option<(String, std::time::Instant)>,
+    card_mismatch_logged: Option<&'static str>,
     /// Peak dBFS per discrete channel (8). Updated from `level` bus messages.
     audio_peaks: [f64; 8],
     /// Last time a `level` bus message updated `audio_peaks`.
@@ -993,11 +988,9 @@ impl ChannelPipeline {
             dark_reprobe_attempts: 0,
             pending_adapt_mode: None,
             card_adapt: None,
-            last_card_check: None,
+            card_follow: crate::CardFormatFollower::default(),
             card_status_ok: false,
-            last_card_adapt: None,
             card_mismatch_logged: None,
-            card_seen: None,
             audio_peaks: [-90.0; 8],
             last_level_at: None,
             encode_bitrate: BitrateMeter::new(),
@@ -1284,9 +1277,8 @@ impl ChannelPipeline {
         self.pending_format_reprobe = false;
         self.dark_reprobe_attempts = 0;
         self.card_adapt = None;
-        self.last_card_adapt = None;
+        self.card_follow.reset();
         self.card_mismatch_logged = None;
-        self.card_seen = None;
         Ok(())
     }
 
@@ -2444,15 +2436,10 @@ impl ChannelPipeline {
     /// the wire, so schedule a relaunch in that mode (`card_adapt`).
     fn check_card_format(&mut self) {
         let now = std::time::Instant::now();
-        if self
-            .last_card_check
-            .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(500))
-        {
+        if !self.card_follow.due(now) {
             return;
         }
-        self.last_card_check = Some(now);
-        let Some(st) = super::card_status::query(crate::describe::decklink_device_number(&self.device))
-        else {
+        let Some(st) = crate::card_status_for_device(&self.device) else {
             self.card_status_ok = false;
             return;
         };
@@ -2460,35 +2447,21 @@ impl ChannelPipeline {
         if !is_auto_mode(&self.configured_mode) || self.card_adapt.is_some() {
             return;
         }
-        let detected = match st.detected_mode {
-            Some(m) if st.locked && m != self.locked_mode => m,
-            _ => {
-                self.card_seen = None;
+        let Some(detected) = self.card_follow.candidate(&st, &self.locked_mode, now) else {
+            if st.detected_mode.is_none_or(|m| m == self.locked_mode) {
                 self.card_mismatch_logged = None;
-                return;
             }
+            return;
         };
-        // Stability gate: same detected mode for ≥1 s before acting.
-        match &self.card_seen {
-            Some((m, since)) if m == detected => {
-                if now.duration_since(*since) < std::time::Duration::from_secs(1) {
-                    return;
-                }
-            }
-            _ => {
-                self.card_seen = Some((detected.to_string(), now));
-                return;
-            }
-        }
         if self.proxy_recording || self.hq_recording {
-            if self.card_mismatch_logged.as_deref() != Some(detected) {
+            if self.card_mismatch_logged != Some(detected) {
                 tracing::warn!(
                     channel = self.id,
                     locked = %self.locked_mode,
                     detected,
                     "card reports a different input format while recording — keeping locked mode until REC stops"
                 );
-                self.card_mismatch_logged = Some(detected.to_string());
+                self.card_mismatch_logged = Some(detected);
             }
             return;
         }
@@ -2496,12 +2469,7 @@ impl ChannelPipeline {
             .last_adapt
             .map(|t| t.elapsed() > std::time::Duration::from_secs(3))
             .unwrap_or(true);
-        // Already relaunched into this mode recently and the card still
-        // disagrees: back off instead of looping relaunches (OOM history).
-        let backoff = self.last_card_adapt.as_ref().is_some_and(|(m, t)| {
-            m == detected && t.elapsed() < std::time::Duration::from_secs(60)
-        });
-        if !cool || backoff {
+        if !cool {
             return;
         }
         tracing::info!(
@@ -2510,8 +2478,8 @@ impl ChannelPipeline {
             to = detected,
             "card reports new input format — adapting capture"
         );
-        self.card_seen = None;
-        self.card_adapt = Some(detected.to_string());
+        self.card_follow.committed(detected, now);
+        self.card_adapt = Some(detected);
     }
 
     /// True when a card-status format change is waiting for a relaunch.
@@ -2527,10 +2495,9 @@ impl ChannelPipeline {
         if self.pipeline.is_none() || self.proxy_recording || self.hq_recording {
             return;
         }
-        self.last_card_adapt = Some((mode.clone(), std::time::Instant::now()));
         self.pending_format_reprobe = false;
         self.pending_adapt_mode = None;
-        if let Err(err) = self.adapt_to_mode(&mode) {
+        if let Err(err) = self.adapt_to_mode(mode) {
             tracing::error!(channel = self.id, error = %err, %mode, "card-driven relaunch failed");
         }
     }
