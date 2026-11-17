@@ -199,10 +199,9 @@ mod tests {
             c
         };
         assert_eq!(adapt(&mut f, &mut t, "1080i50", "1080p50"), Some("1080i50"));
-        // Relaunched into i50 but card still disagrees with something else, then back:
-        assert_eq!(adapt(&mut f, &mut t, "1080p50", "1080i50"), Some("1080p50"));
-        // Same target again within 60 s → backed off.
+        // Relaunch into i50 did not take (still locked p50): same target backed off.
         assert_eq!(adapt(&mut f, &mut t, "1080i50", "1080p50"), None);
+        assert_eq!(adapt(&mut f, &mut t, "1080p50", "1080i50"), Some("1080p50"));
         assert_eq!(adapt(&mut f, &mut t, "720p50", "1080p50"), Some("720p50"));
         assert_eq!(adapt(&mut f, &mut t, "2160p50", "720p50"), Some("2160p50"));
         // 4 relaunches inside the window → capped.
