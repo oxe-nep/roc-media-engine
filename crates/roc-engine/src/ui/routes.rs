@@ -86,6 +86,7 @@ pub fn router() -> Router<AppState> {
             get(get_rec_path).put(set_rec_path),
         )
         .route("/api/system", get(system_status))
+        .route("/api/system/history", get(system_history))
         .route("/api/workflows", get(workflows_map))
         .route("/api/workflows/{id}", put(set_workflow_ui))
         .route("/thumb/{id}", get(thumb))
@@ -1289,13 +1290,13 @@ async fn set_rec_path(
 }
 
 async fn system_status(State(st): State<AppState>) -> Json<Value> {
-    let mut snap = st.sys.snapshot();
-    // Keep disk path aligned with current recordings root.
+    // Keep disk path aligned with current recordings root (next sample picks it up).
     let rec = st.ui.recordings_dir();
-    if snap.disk_path != rec.display().to_string() {
-        st.sys.set_disk_path(rec.clone());
-        snap = st.sys.snapshot();
+    if st.sys.disk_path() != rec {
+        st.sys.set_disk_path(rec);
     }
+    let st2 = st.clone();
+    let (snap, inputs) = run_blocking(move || (st2.sys.snapshot(), input_rows(&st2.orch))).await;
     let h = st.orch.health();
     let mut v = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
     if let Some(obj) = v.as_object_mut() {
@@ -1307,10 +1308,75 @@ async fn system_status(State(st): State<AppState>) -> Json<Value> {
             "nvenc_limit".into(),
             h.get("nvenc_limit").cloned().unwrap_or(json!(8)),
         );
+        obj.insert("inputs".into(), Value::Array(inputs));
         obj.insert("ok".into(), json!(true));
         obj.insert("backend".into(), json!("media_engine"));
     }
     Json(v)
+}
+
+/// Per channel: what the DeckLink card sees on its input (SDK status) next to
+/// what the encode / TC pipeline is doing with it.
+fn input_rows(orch: &crate::orchestrator::Orchestrator) -> Vec<Value> {
+    let tc: std::collections::HashMap<u32, roc_pipelines::TcLoopSnapshot> = orch
+        .list_tc_loops()
+        .into_iter()
+        .map(|t| (t.id, t))
+        .collect();
+    let mut rows: Vec<Value> = orch
+        .list_channel_meters()
+        .into_iter()
+        .map(|ch| {
+            let device = orch
+                .channel_config(ch.id)
+                .map(|c| c.device.clone())
+                .unwrap_or_default();
+            let card = if device.trim().is_empty() {
+                None
+            } else {
+                roc_pipelines::card_status_for_device(&device)
+            };
+            let tc_row = tc.get(&ch.id).map(|t| {
+                json!({
+                    "status": match t.status {
+                        roc_pipelines::TcLoopStatus::Off => "off",
+                        roc_pipelines::TcLoopStatus::Running => "running",
+                        roc_pipelines::TcLoopStatus::Restarting => "restarting",
+                        roc_pipelines::TcLoopStatus::Error => "error",
+                    },
+                    "mode": t.mode,
+                })
+            });
+            json!({
+                "id": ch.id,
+                "name": ch.name,
+                "device": device,
+                "card": card.map(|c| json!({
+                    "locked": c.locked,
+                    "detected_mode": c.detected_mode,
+                    "current_mode": c.current_mode,
+                })),
+                "encode": {
+                    "status": roc_pipelines::status_label(ch.status),
+                    "locked_mode": ch.locked_mode,
+                    "bitrate_kbps": ch.video_bitrate_kbps,
+                    "srt": ch.srt,
+                    "srt_kbps": ch.srt_bitrate_kbps,
+                    "recording": ch.recording,
+                },
+                "tc": tc_row,
+            })
+        })
+        .collect();
+    rows.sort_by_key(|r| r.get("id").and_then(|v| v.as_u64()).unwrap_or(0));
+    rows
+}
+
+async fn system_history(State(st): State<AppState>) -> Json<Value> {
+    Json(json!({
+        "interval_ms": crate::ui::sysmetrics::SAMPLE_EVERY.as_millis() as u64,
+        "points": st.sys.history(),
+    }))
 }
 
 async fn list_playout_media(State(st): State<AppState>) -> Json<Value> {

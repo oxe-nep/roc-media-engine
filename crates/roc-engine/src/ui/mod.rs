@@ -48,6 +48,7 @@ pub fn router(
 ) -> Router {
     let _ = std::fs::create_dir_all(&hls_dir);
     let sys = Arc::new(SysCollector::new(ui.recordings_dir()));
+    sysmetrics::spawn_sampler(sys.clone(), orch.clone());
     let playout_media = Arc::new(MediaStore::open(&data_dir));
     let state = AppState {
         orch: orch.clone(),
