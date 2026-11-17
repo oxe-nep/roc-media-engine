@@ -1240,6 +1240,7 @@ dependencies = [
  "serde_yaml",
  "tokio",
  "tokio-util",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -1251,6 +1252,7 @@ name = "roc-pipelines"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cc",
  "gstreamer",
  "gstreamer-app",
  "gstreamer-rtp",
